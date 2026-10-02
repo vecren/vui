@@ -1,0 +1,17 @@
+[package]
+name = "vui-render"
+version.workspace = true
+license.workspace = true
+
+[lib]
+name = "vui-render"
+module = "vui.render"
+archive = "vui-render"
+
+[usage]
+options = ["-Wall", "-Wextra", "-Wno-missing-field-initializers", "-Werror=return-type"]
+
+[dependencies]
+vui = { workspace = true, pub = true }
+vrento = { workspace = true, pub = true }
+rstd-nostd = { workspace = true, usage = "link" }

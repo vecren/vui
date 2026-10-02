@@ -1,0 +1,17 @@
+[package]
+name = "vui"
+version.workspace = true
+license.workspace = true
+
+[lib]
+name = "vui"
+module = "vui"
+archive = "vui"
+
+[usage]
+options = ["-Wall", "-Wextra", "-Werror=return-type"]
+
+[dependencies]
+vectext = { path = "../../vectext", pub = true }
+rstd-std = { workspace = true, pub = true }
+rstd-nostd = { workspace = true, usage = "link" }

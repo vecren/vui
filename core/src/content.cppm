@@ -1,0 +1,204 @@
+export module vui:content;
+import :image;
+import :wakeup;
+using namespace rstd::prelude;
+
+export namespace vui {
+enum class ContentColorSpace { LinearSrgb, Srgb };
+enum class ContentAlpha { Opaque, Premultiplied, Straight };
+enum class ContentOrigin { TopLeft, BottomLeft };
+enum class ContentFormat { Rgba8Unorm, Rgba8Srgb, Bgra8Unorm, Bgra8Srgb, Rgba16Float };
+enum class ContentError { InvalidValue, WrongProducer, StaleFrame, Closed, Limit };
+struct TextureFrameInfo {
+    Serial producer_session{}, frame_version{}, device_epoch{};
+    Index width{}, height{};
+    ContentFormat format{ContentFormat::Rgba8Unorm};
+    ContentColorSpace color_space{ContentColorSpace::LinearSrgb};
+    ContentAlpha alpha{ContentAlpha::Premultiplied};
+    ContentOrigin origin{ContentOrigin::TopLeft};
+    auto valid() const -> bool {
+        return producer_session && frame_version && device_epoch && width && height &&
+               (color_space == ContentColorSpace::LinearSrgb ||
+                color_space == ContentColorSpace::Srgb) &&
+               (alpha == ContentAlpha::Opaque || alpha == ContentAlpha::Premultiplied ||
+                alpha == ContentAlpha::Straight) &&
+               (format == ContentFormat::Rgba8Unorm || format == ContentFormat::Rgba8Srgb ||
+                format == ContentFormat::Bgra8Unorm || format == ContentFormat::Bgra8Srgb ||
+                format == ContentFormat::Rgba16Float) &&
+               ((format != ContentFormat::Rgba8Srgb && format != ContentFormat::Bgra8Srgb) ||
+                color_space == ContentColorSpace::Srgb) &&
+               (origin == ContentOrigin::TopLeft || origin == ContentOrigin::BottomLeft);
+    }
+    friend auto operator==(const TextureFrameInfo &, const TextureFrameInfo &) -> bool = default;
+};
+struct ScenePlacement {
+    TextureFrameInfo frame;
+    ImagePlacement image;
+    auto content_position(Point local) const -> Option<Point> {
+        const auto &d = image.destination;
+        if (!finite(local.x) || !finite(local.y) || !d.width || !d.height || local.x < d.x ||
+            local.y < d.y || local.x >= d.x + d.width || local.y >= d.y + d.height)
+            return None();
+        return Some(Point{image.source.x + (local.x - d.x) * image.source.width / d.width,
+                          image.source.y + (local.y - d.y) * image.source.height / d.height});
+    }
+};
+class TextureFrame {
+    struct Payload {
+        virtual ~Payload() = default;
+        virtual auto type() const -> rstd::any::TypeId = 0;
+    };
+    template <class T> struct Stored : Payload {
+        T value;
+        explicit Stored(T v) : value(rstd::move(v)) {}
+        auto type() const -> rstd::any::TypeId override { return rstd::any::TypeId::of<T>(); }
+    };
+    struct Data {
+        TextureFrameInfo info;
+        Box<Payload> payload;
+        Data(TextureFrameInfo i, Box<Payload> p) : info(i), payload(rstd::move(p)) {}
+    };
+    rstd::sync::Arc<Data> data_;
+    TextureFrame(TextureFrameInfo info, Box<Payload> payload)
+        : data_(rstd::sync::Arc<Data>::make(info, rstd::move(payload))) {}
+
+  public:
+    TextureFrame(const TextureFrame &other) : data_(other.data_.clone()) {}
+    auto operator=(const TextureFrame &other) -> TextureFrame & {
+        if (this != &other)
+            data_ = other.data_.clone();
+        return *this;
+    }
+    TextureFrame(TextureFrame &&) = default;
+    auto operator=(TextureFrame &&) -> TextureFrame & = default;
+    template <class T>
+    static auto make(TextureFrameInfo info, T payload) -> Result<TextureFrame, ContentError> {
+        if (!info.valid())
+            return Err(ContentError::InvalidValue);
+        auto stored = Box<Stored<T>>::make(rstd::move(payload));
+        return Ok(TextureFrame(
+            info, Box<Payload>::from_raw(rstd::move(stored).into_raw().template cast<Payload>())));
+    }
+    auto valid() const -> bool { return bool(data_); }
+    auto info() const -> TextureFrameInfo { return data_->info; }
+    template <class T> auto payload() const -> const T * {
+        if (!valid() || data_->payload->type() != rstd::any::TypeId::of<T>())
+            return nullptr;
+        return &static_cast<const Stored<T> &>(*data_->payload).value;
+    }
+};
+class ContentSubscription {
+    friend class ContentSource;
+    rstd::sync::Arc<FrameWaker> listener_;
+    explicit ContentSubscription(rstd::sync::Arc<FrameWaker> value)
+        : listener_(rstd::move(value)) {}
+
+  public:
+    ContentSubscription(const ContentSubscription &) = delete;
+    auto operator=(const ContentSubscription &) -> ContentSubscription & = delete;
+    ContentSubscription(ContentSubscription &&) = default;
+    auto operator=(ContentSubscription &&) -> ContentSubscription & = default;
+};
+class ContentSource {
+    struct State {
+        Serial id{new_session()}, producer, revision{1}, last_version{};
+        bool closed{};
+        Option<TextureFrame> latest;
+        Vec<rstd::sync::Weak<FrameWaker>> listeners;
+        Serial wake_failures{};
+        explicit State(Serial p) : producer(p) {}
+        void notify() {
+            listeners.retain([&](const auto &weak) {
+                auto listener = weak.upgrade();
+                if (!listener)
+                    return false;
+                if (listener->request() == FrameWakeResult::Failed && wake_failures != ~Serial{})
+                    ++wake_failures;
+                return true;
+            });
+        }
+    };
+    rstd::sync::Arc<State> state_;
+    explicit ContentSource(Serial producer) : state_(rstd::sync::Arc<State>::make(producer)) {}
+
+  public:
+    ContentSource(const ContentSource &other) : state_(other.state_.clone()) {}
+    auto operator=(const ContentSource &other) -> ContentSource & {
+        if (this != &other)
+            state_ = other.state_.clone();
+        return *this;
+    }
+    ContentSource(ContentSource &&) = default;
+    auto operator=(ContentSource &&) -> ContentSource & = default;
+    static auto create(Serial producer_session) -> Result<ContentSource, ContentError> {
+        if (!producer_session)
+            return Err(ContentError::InvalidValue);
+        return Ok(ContentSource(producer_session));
+    }
+    auto valid() const -> bool { return bool(state_); }
+    auto id() const -> Serial { return state_->id; }
+    auto producer_session() const -> Serial { return state_->producer; }
+    auto revision() const -> Serial { return state_->revision; }
+    auto closed() const -> bool { return state_->closed; }
+    auto wake_failures() const -> Serial { return state_->wake_failures; }
+    // Source access and subscription lifetime are serialized by the source owner.
+    auto subscribe(FrameWaker waker) const -> Result<ContentSubscription, ContentError> {
+        if (!valid() || !waker.valid())
+            return Err(ContentError::InvalidValue);
+        if (closed())
+            return Err(ContentError::Closed);
+        state_->listeners.retain([](const auto &weak) { return !weak.expired(); });
+        auto listener = rstd::sync::Arc<FrameWaker>::make(rstd::move(waker));
+        state_->listeners.push(listener.downgrade());
+        return Ok(ContentSubscription(rstd::move(listener)));
+    }
+    auto latest() const -> Option<TextureFrame> {
+        return state_->latest.is_some() ? Some(TextureFrame(*state_->latest)) : None();
+    }
+    auto publish(TextureFrame frame) -> Result<empty, ContentError> {
+        if (!valid() || !frame.valid())
+            return Err(ContentError::InvalidValue);
+        if (state_->closed)
+            return Err(ContentError::Closed);
+        if (frame.info().producer_session != state_->producer)
+            return Err(ContentError::WrongProducer);
+        if (frame.info().frame_version <= state_->last_version)
+            return Err(ContentError::StaleFrame);
+        if (state_->revision == ~Serial{})
+            return Err(ContentError::Limit);
+        state_->last_version = frame.info().frame_version;
+        state_->latest = Some(rstd::move(frame));
+        ++state_->revision;
+        state_->notify();
+        return Ok(empty{});
+    }
+    auto clear() -> Result<empty, ContentError> {
+        if (!valid())
+            return Err(ContentError::InvalidValue);
+        if (state_->closed)
+            return Err(ContentError::Closed);
+        if (state_->latest.is_none())
+            return Ok(empty{});
+        if (state_->revision == ~Serial{})
+            return Err(ContentError::Limit);
+        state_->latest = None();
+        ++state_->revision;
+        state_->notify();
+        return Ok(empty{});
+    }
+    auto close() -> Result<empty, ContentError> {
+        if (!valid())
+            return Err(ContentError::InvalidValue);
+        if (state_->closed)
+            return Ok(empty{});
+        if (state_->revision == ~Serial{})
+            return Err(ContentError::Limit);
+        state_->latest = None();
+        state_->closed = true;
+        ++state_->revision;
+        state_->notify();
+        state_->listeners.clear();
+        return Ok(empty{});
+    }
+};
+} // namespace vui

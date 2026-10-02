@@ -1,0 +1,388 @@
+module;
+#include <SDL.h>
+#include <SDL_vulkan.h>
+module vui.sdl;
+using namespace rstd::prelude;
+using namespace rstd::literals;
+
+namespace vui::sdl {
+struct NativeWindow {
+    SDL_Window *window;
+    explicit NativeWindow(SDL_Window *value) : window(value) {}
+    NativeWindow(const NativeWindow &) = delete;
+    ~NativeWindow() {
+        SDL_DestroyWindow(window);
+        SDL_QuitSubSystem(SDL_INIT_VIDEO | SDL_INIT_EVENTS);
+    }
+};
+struct NativeLease : gpu::SurfaceLifetime {
+    rstd::sync::Arc<NativeWindow> native;
+    explicit NativeLease(rstd::sync::Arc<NativeWindow> value) : native(rstd::move(value)) {}
+};
+struct WakeState {
+    SDL_mutex *mutex{SDL_CreateMutex()};
+    Index event_type, window_id;
+    WakeStats stats;
+    bool queued{};
+    WakeState(Index type, Index id) : event_type(type), window_id(id) {}
+    ~WakeState() {
+        if (mutex)
+            SDL_DestroyMutex(mutex);
+    }
+    struct Lock {
+        SDL_mutex *mutex;
+        explicit Lock(SDL_mutex *value) : mutex(value) { SDL_LockMutex(mutex); }
+        ~Lock() { SDL_UnlockMutex(mutex); }
+    };
+    auto request() -> FrameWakeResult {
+        Lock lock(mutex);
+        if (stats.closed)
+            return FrameWakeResult::Closed;
+        stats.pending = true;
+        if (queued) {
+            ++stats.coalesced;
+            return FrameWakeResult::Coalesced;
+        }
+        // SDL filters run inside PushEvent; recursive requests must coalesce.
+        queued = true;
+        SDL_Event event{};
+        event.type = event_type;
+        event.user.windowID = window_id;
+        if (SDL_PushEvent(&event) != 1) {
+            queued = false;
+            ++stats.failed;
+            return FrameWakeResult::Failed;
+        }
+        ++stats.queued;
+        return FrameWakeResult::Queued;
+    }
+    auto take() -> bool {
+        Lock lock(mutex);
+        auto pending = stats.pending;
+        stats.pending = false;
+        queued = false;
+        return pending;
+    }
+    auto snapshot() -> WakeStats {
+        Lock lock(mutex);
+        return stats;
+    }
+    void close() {
+        Lock lock(mutex);
+        stats.closed = true;
+        stats.pending = false;
+        queued = false;
+    }
+};
+struct Window::Impl {
+    SDL_Window *window{};
+    bool minimized{}, trace_input{};
+    InputTraceSource input_trace;
+    Option<rstd::sync::Arc<NativeWindow>> native;
+    Option<rstd::sync::Arc<WakeState>> wake;
+    SurfaceInfo metrics{{}, 1, 1};
+    auto extent() const -> VkExtent2D {
+        int width{}, height{};
+        if (window && !minimized)
+            SDL_Vulkan_GetDrawableSize(window, &width, &height);
+        return {width > 0 ? static_cast<Index>(width) : 0,
+                height > 0 ? static_cast<Index>(height) : 0};
+    }
+    auto update_metrics() -> bool {
+        minimized = (SDL_GetWindowFlags(window) & SDL_WINDOW_MINIMIZED) != 0;
+        auto pixels = extent();
+        int width{}, height{};
+        SDL_GetWindowSize(window, &width, &height);
+        Scalar scale = pixels.width && width > 0 ? Scalar(pixels.width) / width : metrics.scale;
+        Size size{pixels.width / scale, pixels.height / scale};
+        if (size == metrics.logical_size && scale == metrics.scale)
+            return false;
+        metrics = {size, scale, metrics.generation + 1};
+        return true;
+    }
+    auto position(int x, int y) const -> Point {
+        int width{}, height{};
+        SDL_GetWindowSize(window, &width, &height);
+        return {width > 0 ? x * metrics.logical_size.width / width : 0,
+                height > 0 ? y * metrics.logical_size.height / height : 0};
+    }
+    static auto modifiers(SDL_Keymod value) -> Modifiers {
+        return {bool(value & KMOD_SHIFT), bool(value & KMOD_CTRL), bool(value & KMOD_ALT),
+                bool(value & KMOD_GUI)};
+    }
+    static auto key(SDL_Keycode value) -> Key {
+        switch (value) {
+        case SDLK_TAB:
+            return Key::Tab;
+        case SDLK_RETURN:
+        case SDLK_KP_ENTER:
+            return Key::Enter;
+        case SDLK_SPACE:
+            return Key::Space;
+        case SDLK_ESCAPE:
+            return Key::Escape;
+        case SDLK_LEFT:
+            return Key::Left;
+        case SDLK_RIGHT:
+            return Key::Right;
+        case SDLK_UP:
+            return Key::Up;
+        case SDLK_DOWN:
+            return Key::Down;
+        case SDLK_HOME:
+            return Key::Home;
+        case SDLK_END:
+            return Key::End;
+        case SDLK_PAGEUP:
+            return Key::PageUp;
+        case SDLK_PAGEDOWN:
+            return Key::PageDown;
+        default:
+            return Key::Unknown;
+        }
+    }
+    void emit_input(Events &output, InputEvent input) {
+        if (trace_input)
+            input.stamp = input_trace.stamp();
+        output.input.push(rstd::move(input));
+    }
+    void event(const SDL_Event &value, Events &output) {
+        auto window_id = SDL_GetWindowID(window);
+        if (wake.is_some() && value.type == (*wake)->event_type &&
+            value.user.windowID == window_id) {
+            output.redraw = (*wake)->take() || output.redraw;
+            return;
+        }
+        InputEvent input;
+        switch (value.type) {
+        case SDL_QUIT:
+            output.close_requested = true;
+            return;
+        case SDL_WINDOWEVENT:
+            if (value.window.windowID != window_id)
+                return;
+            switch (value.window.event) {
+            case SDL_WINDOWEVENT_CLOSE:
+                output.close_requested = true;
+                break;
+            case SDL_WINDOWEVENT_MINIMIZED:
+                minimized = true;
+                output.redraw = true;
+                SDL_CaptureMouse(SDL_FALSE);
+                input.type = EventType::WindowFocusLost;
+                emit_input(output, rstd::move(input));
+                break;
+            case SDL_WINDOWEVENT_RESTORED:
+            case SDL_WINDOWEVENT_MAXIMIZED:
+                minimized = false;
+                output.redraw = true;
+                break;
+            case SDL_WINDOWEVENT_EXPOSED:
+            case SDL_WINDOWEVENT_SIZE_CHANGED:
+            case SDL_WINDOWEVENT_RESIZED:
+            case SDL_WINDOWEVENT_DISPLAY_CHANGED:
+                output.redraw = true;
+                break;
+            case SDL_WINDOWEVENT_FOCUS_LOST:
+                SDL_CaptureMouse(SDL_FALSE);
+                input.type = EventType::WindowFocusLost;
+                emit_input(output, rstd::move(input));
+                break;
+            case SDL_WINDOWEVENT_FOCUS_GAINED:
+                input.type = EventType::WindowFocusGained;
+                emit_input(output, rstd::move(input));
+                break;
+            default:
+                break;
+            }
+            update_metrics();
+            return;
+        case SDL_MOUSEMOTION:
+            if (value.motion.windowID != window_id || value.motion.which == SDL_TOUCH_MOUSEID)
+                return;
+            input.type = EventType::PointerMove;
+            input.position = position(value.motion.x, value.motion.y);
+            break;
+        case SDL_MOUSEBUTTONDOWN:
+        case SDL_MOUSEBUTTONUP:
+            if (value.button.windowID != window_id || value.button.which == SDL_TOUCH_MOUSEID)
+                return;
+            input.type =
+                value.type == SDL_MOUSEBUTTONDOWN ? EventType::PointerDown : EventType::PointerUp;
+            input.position = position(value.button.x, value.button.y);
+            if (value.button.button == SDL_BUTTON_LEFT)
+                input.button = PointerButton::Primary;
+            else if (value.button.button == SDL_BUTTON_RIGHT)
+                input.button = PointerButton::Secondary;
+            else if (value.button.button == SDL_BUTTON_MIDDLE)
+                input.button = PointerButton::Middle;
+            else
+                return;
+            if (value.type == SDL_MOUSEBUTTONDOWN)
+                SDL_CaptureMouse(SDL_TRUE);
+            else if (SDL_GetMouseState(nullptr, nullptr) == 0)
+                SDL_CaptureMouse(SDL_FALSE);
+            break;
+        case SDL_MOUSEWHEEL: {
+            if (value.wheel.windowID != window_id || value.wheel.which == SDL_TOUCH_MOUSEID)
+                return;
+            input.type = EventType::Wheel;
+            input.scroll_unit = ScrollUnit::Lines;
+            auto direction = value.wheel.direction == SDL_MOUSEWHEEL_FLIPPED ? -1 : 1;
+            input.scroll_delta = {direction * Scalar(value.wheel.preciseX),
+                                  -direction * Scalar(value.wheel.preciseY)};
+#if SDL_VERSION_ATLEAST(2, 26, 0)
+            input.position = position(value.wheel.mouseX, value.wheel.mouseY);
+#else
+            int x{}, y{};
+            SDL_GetMouseState(&x, &y);
+            input.position = position(x, y);
+#endif
+            break;
+        }
+        case SDL_KEYDOWN:
+        case SDL_KEYUP:
+            if (value.key.windowID != window_id)
+                return;
+            input.type = value.type == SDL_KEYDOWN ? EventType::KeyDown : EventType::KeyUp;
+            input.key = key(value.key.keysym.sym);
+            input.modifiers = modifiers(static_cast<SDL_Keymod>(value.key.keysym.mod));
+            input.repeat = value.key.repeat != 0;
+            emit_input(output, rstd::move(input));
+            return;
+        default:
+            return;
+        }
+        input.modifiers = modifiers(SDL_GetModState());
+        emit_input(output, rstd::move(input));
+    }
+};
+Window::Window() : impl_(Box<Impl>::make()) {}
+Window::~Window() {
+    if (impl_->wake.is_some())
+        (*impl_->wake)->close();
+}
+auto Window::open(const char *title, Index width, Index height) -> Result<empty, gpu::Error> {
+    if (impl_->window || !width || !height || width > 32768 || height > 32768)
+        return Err(gpu::Error{gpu::Stage::State});
+    if (SDL_InitSubSystem(SDL_INIT_VIDEO | SDL_INIT_EVENTS) != 0)
+        return Err(gpu::Error{gpu::Stage::Surface});
+    impl_->window =
+        SDL_CreateWindow(title, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+                         static_cast<int>(width), static_cast<int>(height),
+                         SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
+    if (!impl_->window) {
+        SDL_QuitSubSystem(SDL_INIT_VIDEO | SDL_INIT_EVENTS);
+        return Err(gpu::Error{gpu::Stage::Surface});
+    }
+    impl_->native = Some(rstd::sync::Arc<NativeWindow>::make(impl_->window));
+    auto type = SDL_RegisterEvents(1);
+    if (type == Uint32(-1)) {
+        impl_->native = None();
+        impl_->window = nullptr;
+        return Err(gpu::Error{gpu::Stage::Surface});
+    }
+    auto wake = rstd::sync::Arc<WakeState>::make(type, SDL_GetWindowID(impl_->window));
+    if (!wake->mutex) {
+        impl_->native = None();
+        impl_->window = nullptr;
+        return Err(gpu::Error{gpu::Stage::Surface});
+    }
+    impl_->wake = Some(rstd::move(wake));
+    impl_->update_metrics();
+    return Ok(empty{});
+}
+auto Window::poll() -> Events { return wait(0); }
+auto Window::frame_waker() const -> Option<FrameWaker> {
+    if (impl_->wake.is_none())
+        return None();
+    return Some(FrameWaker::make([state = impl_->wake->clone()] { return state->request(); }));
+}
+auto Window::wake_stats() const -> WakeStats {
+    return impl_->wake.is_some() ? (*impl_->wake)->snapshot() : WakeStats{0, 0, 0, false, true};
+}
+auto Window::handle_event(const SDL_Event &event) -> Events {
+    Events output;
+    if (!impl_->window) {
+        output.close_requested = true;
+        return output;
+    }
+    output.redraw = impl_->update_metrics();
+    output.redraw = (*impl_->wake)->take() || output.redraw;
+    impl_->event(event, output);
+    output.redraw = impl_->update_metrics() || output.redraw;
+    output.surface = impl_->metrics;
+    output.minimized = impl_->minimized;
+    return output;
+}
+auto Window::wait(Index milliseconds) -> Events {
+    Events output;
+    if (!impl_->window) {
+        output.close_requested = true;
+        return output;
+    }
+    output.redraw = impl_->update_metrics();
+    output.redraw = (*impl_->wake)->take() || output.redraw;
+    SDL_Event event;
+    if (milliseconds && !output.redraw &&
+        SDL_WaitEventTimeout(&event, milliseconds > 1000 ? 1000 : static_cast<int>(milliseconds)))
+        impl_->event(event, output);
+    unsigned count{};
+    while (count++ < 4096 && output.input.len() < usize(2048) && SDL_PollEvent(&event))
+        impl_->event(event, output);
+    output.redraw = impl_->update_metrics() || output.redraw;
+    output.redraw = (*impl_->wake)->take() || output.redraw;
+    output.surface = impl_->metrics;
+    output.minimized = impl_->minimized;
+    return output;
+}
+void Window::set_input_tracing(bool enabled) { impl_->trace_input = enabled; }
+auto Window::timing() const -> FrameTiming {
+    auto frequency = SDL_GetPerformanceFrequency();
+    auto counter = SDL_GetPerformanceCounter();
+    return {static_cast<Serial>((static_cast<long double>(counter) / frequency) * 1'000'000'000),
+            {}};
+}
+auto Window::resize(Index width, Index height) -> Result<empty, gpu::Error> {
+    if (!impl_->window || !width || !height || width > 32768 || height > 32768)
+        return Err(gpu::Error{gpu::Stage::State});
+    SDL_SetWindowSize(impl_->window, static_cast<int>(width), static_cast<int>(height));
+    return Ok(empty{});
+}
+void Window::minimize() {
+    if (impl_->window)
+        SDL_MinimizeWindow(impl_->window);
+}
+void Window::restore() {
+    if (impl_->window) {
+        SDL_RestoreWindow(impl_->window);
+        SDL_RaiseWindow(impl_->window);
+    }
+}
+auto Window::id() const -> Index { return impl_->window ? SDL_GetWindowID(impl_->window) : 0; }
+auto Window::error() const -> const char * { return SDL_GetError(); }
+auto Window::pixel_extent() const -> VkExtent2D { return impl_->extent(); }
+auto Window::instance_extensions() -> Result<Vec<vrento::vulkan::Extension>, gpu::Error> {
+    unsigned count{};
+    if (!impl_->window || !SDL_Vulkan_GetInstanceExtensions(impl_->window, &count, nullptr))
+        return Err(gpu::Error{gpu::Stage::Surface});
+    Vec<const char *> names;
+    for (unsigned i = 0; i < count; ++i)
+        names.push(nullptr);
+    if (!SDL_Vulkan_GetInstanceExtensions(impl_->window, &count, names.as_mut_slice().as_raw_ptr()))
+        return Err(gpu::Error{gpu::Stage::Surface});
+    Vec<vrento::vulkan::Extension> extensions;
+    for (auto name : names)
+        extensions.push({true, rstd::ffi::CStr::from_ptr(name).to_str().unwrap()});
+    return Ok(rstd::move(extensions));
+}
+auto Window::create_surface(VkInstance instance) -> Result<gpu::NativeSurface, gpu::Error> {
+    VkSurfaceKHR surface{};
+    if (!impl_->window || !SDL_Vulkan_CreateSurface(impl_->window, instance, &surface))
+        return Err(gpu::Error{gpu::Stage::Surface});
+    auto lifetime = Box<NativeLease>::make(impl_->native->clone());
+    return Ok(gpu::NativeSurface{
+        surface, Box<gpu::SurfaceLifetime>::from_raw(
+                     rstd::move(lifetime).into_raw().template cast<gpu::SurfaceLifetime>())});
+}
+} // namespace vui::sdl

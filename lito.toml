@@ -1,0 +1,21 @@
+[workspace]
+name = "vui"
+members = ["core", "render", "sdl"]
+
+[workspace.package]
+version = "0.1.0"
+authors = ["hypengw <hypengwip@gmail.com>"]
+license = "MIT OR Apache-2.0"
+
+[profile.base]
+exceptions = false
+rtti = false
+
+[workspace.dependencies]
+vui = { path = "core" }
+vectext = { path = "../vectext" }
+vui-render = { path = "render" }
+vui-sdl = { path = "sdl" }
+vrento = { path = "../vrento" }
+rstd-std = { version = "0.1.5" }
+rstd-nostd = { version = "0.1.5" }
