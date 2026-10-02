@@ -8,8 +8,6 @@ name = "vui"
 module = "vui"
 archive = "vui"
 
-[usage]
-options = ["-Wall", "-Wextra", "-Werror=return-type"]
 
 [dependencies]
 vectext = { path = "../../vectext", pub = true }

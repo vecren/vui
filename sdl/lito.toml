@@ -9,9 +9,6 @@ module = "vui.sdl"
 archive = "vui-sdl"
 sources = ["src/lib.cppm", "src/frames.cppm", "src/window.cppm", "src/window.cpp"]
 
-[usage]
-options = ["-Wall", "-Wextra", "-Wno-missing-field-initializers", "-Werror=return-type"]
-
 [dependencies]
 vui-render = { workspace = true, pub = true }
 rstd-nostd = { workspace = true, usage = "link" }

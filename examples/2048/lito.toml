@@ -1,0 +1,19 @@
+[package]
+name = "vui-2048"
+version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "vui-2048"
+module = "vui.examples.game2048"
+path = "main.cppm"
+source-root = "."
+link-stdlib = false
+
+[usage]
+options = ["-Wall", "-Wextra", "-Wno-missing-field-initializers", "-Werror=return-type"]
+
+[dependencies]
+rstd-std = { workspace = true }
+vui-examples = { workspace = true }
+rstd-nostd = { workspace = true, usage = "link" }

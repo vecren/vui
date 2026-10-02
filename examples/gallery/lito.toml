@@ -1,0 +1,19 @@
+[package]
+name = "vui-gallery"
+version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "vui-gallery"
+module = "vui.examples.gallery"
+path = "main.cppm"
+source-root = "."
+link-stdlib = false
+
+[usage]
+options = ["-Wall", "-Wextra", "-Wno-missing-field-initializers", "-Werror=return-type"]
+
+[dependencies]
+rstd-std = { workspace = true }
+vui-examples = { workspace = true }
+rstd-nostd = { workspace = true, usage = "link" }
