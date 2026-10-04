@@ -900,15 +900,19 @@ struct Renderer::Impl {
         if (result != VK_SUCCESS)
             return Err(Error{Stage::Pipeline, result});
         vvk::ShaderModule vertex, rect, compose, glyph_fragment, image_fragment;
-        result = shader(handle, shaders::quad, sizeof(shaders::quad), vertex);
+        result = shader(handle, shaders::quad.words, sizeof(shaders::quad.words), vertex);
         if (result == VK_SUCCESS)
-            result = shader(handle, shaders::rectangle, sizeof(shaders::rectangle), rect);
+            result = shader(handle, shaders::rectangle.words,
+                            sizeof(shaders::rectangle.words), rect);
         if (result == VK_SUCCESS)
-            result = shader(handle, shaders::composite, sizeof(shaders::composite), compose);
+            result = shader(handle, shaders::composite.words,
+                            sizeof(shaders::composite.words), compose);
         if (result == VK_SUCCESS)
-            result = shader(handle, shaders::glyph, sizeof(shaders::glyph), glyph_fragment);
+            result = shader(handle, shaders::glyph.words, sizeof(shaders::glyph.words),
+                            glyph_fragment);
         if (result == VK_SUCCESS)
-            result = shader(handle, shaders::image, sizeof(shaders::image), image_fragment);
+            result = shader(handle, shaders::image.words, sizeof(shaders::image.words),
+                            image_fragment);
         if (result != VK_SUCCESS)
             return Err(Error{Stage::Shader, result});
         auto make_pipeline = [&](VkShaderModule fragment, vvk::Pipeline &output) {
