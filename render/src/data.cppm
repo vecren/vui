@@ -1,5 +1,5 @@
 module vui.render:data;
-import vrento.vulkan;
+import vrento;
 namespace vui::gpu::detail {
 inline constexpr auto format = VK_FORMAT_R8G8B8A8_SRGB;
 struct DrawData {

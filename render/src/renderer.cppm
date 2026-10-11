@@ -1,6 +1,6 @@
 export module vui.render:renderer;
 import vui;
-import vrento.device_session;
+import vrento;
 import :content;
 import rstd;
 using namespace rstd::prelude;
@@ -34,7 +34,7 @@ struct Error {
     Stage stage;
     VkResult result{VK_SUCCESS};
     Option<TextError> text{};
-    Option<vrento::resource::SampledFrameError> content{};
+    Option<vrento::texture::Error> content{};
 };
 struct Completion {
     Serial submission;

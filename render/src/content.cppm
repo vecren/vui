@@ -1,56 +1,60 @@
 export module vui.render:content;
 import vui;
-import vrento.sampled_frame;
+export import vrento;
 using namespace rstd::prelude;
 
 export namespace vui::gpu {
 class NativeTextureFrame {
-    vrento::resource::SampledFrame frame_;
+    vrento::texture::TextureViewRef view_;
     TextureFrameInfo info_;
-    NativeTextureFrame(vrento::resource::SampledFrame frame, TextureFrameInfo info)
-        : frame_(rstd::move(frame)), info_(info) {}
+    NativeTextureFrame(vrento::texture::TextureViewRef view,
+                       TextureFrameInfo info)
+        : view_(rstd::move(view)), info_(info) {}
 
   public:
-    auto native() const -> const vrento::resource::SampledFrame & { return frame_; }
+    auto native() const -> const vrento::texture::TextureViewRef & {
+        return view_;
+    }
     auto info() const -> TextureFrameInfo { return info_; }
-    static auto wrap(vrento::resource::SampledFrame frame) -> Result<TextureFrame, ContentError> {
-        if (!frame.valid())
+    static auto wrap(vrento::texture::TextureViewRef view,
+                     TextureFrameInfo info)
+        -> Result<TextureFrame, ContentError> {
+        if (!view.valid() || !view.permits(false))
             return Err(ContentError::InvalidValue);
-        const auto &d = frame.description();
-        TextureFrameInfo info;
-        info.producer_session = d.producer_session;
-        info.frame_version = d.frame_version;
-        info.device_epoch = d.device_epoch;
-        info.width = d.extent.width;
-        info.height = d.extent.height;
-        switch (d.format) {
-        case VK_FORMAT_R8G8B8A8_UNORM:
+        const auto &desc = view.texture().description();
+        const auto range = view.description().range;
+        if (view.description().dimension != vrento::texture::Dimension::D2 ||
+            range.layer_count != 1 || range.mip_count != 1)
+            return Err(ContentError::InvalidValue);
+        auto extent = vrento::texture::mip_extent(desc, range.first_mip);
+        info.width = extent.width;
+        info.height = extent.height;
+        info.device_epoch = view.texture().identity().epoch;
+        switch (desc.format) {
+        case vrento::TextureFormat::RGBA8:
             info.format = ContentFormat::Rgba8Unorm;
             break;
-        case VK_FORMAT_R8G8B8A8_SRGB:
+        case vrento::TextureFormat::RGBA8_SRGB:
             info.format = ContentFormat::Rgba8Srgb;
             break;
-        case VK_FORMAT_B8G8R8A8_UNORM:
+        case vrento::TextureFormat::BGRA8:
             info.format = ContentFormat::Bgra8Unorm;
             break;
-        case VK_FORMAT_B8G8R8A8_SRGB:
+        case vrento::TextureFormat::BGRA8_SRGB:
             info.format = ContentFormat::Bgra8Srgb;
             break;
-        case VK_FORMAT_R16G16B16A16_SFLOAT:
+        case vrento::TextureFormat::RGBA16F:
             info.format = ContentFormat::Rgba16Float;
             break;
         default:
             return Err(ContentError::InvalidValue);
         }
-        using namespace vrento::resource;
-        info.color_space = d.color_space == FrameColorSpace::Srgb ? ContentColorSpace::Srgb
-                                                                  : ContentColorSpace::LinearSrgb;
-        info.alpha = d.alpha == FrameAlpha::Straight ? ContentAlpha::Straight
-                     : d.alpha == FrameAlpha::Opaque ? ContentAlpha::Opaque
-                                                     : ContentAlpha::Premultiplied;
-        info.origin = d.origin == FrameOrigin::BottomLeft ? ContentOrigin::BottomLeft
-                                                          : ContentOrigin::TopLeft;
-        return TextureFrame::make(info, NativeTextureFrame(rstd::move(frame), info));
+        if ((info.format == ContentFormat::Rgba8Srgb ||
+             info.format == ContentFormat::Bgra8Srgb) &&
+            info.color_space != ContentColorSpace::Srgb)
+            return Err(ContentError::InvalidValue);
+        return TextureFrame::make(info,
+                                  NativeTextureFrame(rstd::move(view), info));
     }
 };
 } // namespace vui::gpu

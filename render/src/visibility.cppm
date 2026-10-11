@@ -3,7 +3,7 @@ module;
 #include <cstring>
 module vui.render:visibility;
 import vui;
-import vrento.vulkan;
+import vrento;
 import :data;
 using namespace rstd::prelude;
 namespace vui::gpu::detail {
