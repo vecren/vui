@@ -1,6 +1,6 @@
 [workspace]
 name = "vui-examples"
-members = ["common", "gallery", "2048"]
+members = ["common", "gallery", "2048", "interaction"]
 
 [workspace.package]
 version = "0.1.0"
@@ -14,5 +14,6 @@ rtti = false
 rstd-std = { version = "0.1.5" }
 vui-examples = { path = "common" }
 vui-sdl = { path = "../sdl" }
+vui-controls = { path = "../controls" }
 vectext = { path = "../../vectext" }
 rstd-nostd = { version = "0.1.5" }

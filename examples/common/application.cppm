@@ -28,9 +28,10 @@ class Application {
     Option<rstd::path::PathBuf> capture_path_;
 
     auto report(gpu::Error error) -> int {
-        auto detail = rstd::ffi::CStr::from_ptr(window.error()).to_str().unwrap_or("unknown error"_str);
-        rstd::io::eprintln("renderer stage={} vk={} SDL={}", unsigned(error.stage), int(error.result),
-                          detail);
+        auto detail =
+            rstd::ffi::CStr::from_ptr(window.error()).to_str().unwrap_or("unknown error"_str);
+        rstd::io::eprintln("renderer stage={} vk={} SDL={}", unsigned(error.stage),
+                           int(error.result), detail);
         return 1;
     }
 
@@ -78,12 +79,15 @@ class Application {
             return false;
         }
         session.set_frame_waker(window.frame_waker()).unwrap();
+        session.input().set_navigation(TabNavigation{});
+        session.input().set_native_capture(
+            [this](PointerKind kind, bool enabled) { return window.capture(kind, enabled); });
         return true;
     }
     template <class BeforeUpdate, class AfterUpdate, class Presented>
     auto run(unsigned limit, BeforeUpdate before_update, AfterUpdate after_update,
              Presented presented) -> int {
-        sdl::FrameLoop frames_loop(session, renderer);
+        host::FrameLoop frames_loop(session, renderer);
         bool dirty = true, closing{}, animating = session.document().animations_active();
         unsigned frames{};
         auto close = [&] {
@@ -92,8 +96,11 @@ class Application {
             frames_loop.close();
         };
         while (!frames_loop.status().closed) {
-            auto events = window.wait(
-                dirty && !closing ? 0 : frames_loop.wait_milliseconds(animating && !closing));
+            auto events =
+                window.wait(dirty && !closing ? 0
+                                              : frames_loop.wait_milliseconds(animating && !closing,
+                                                                              window.timing(),
+                                                                              session.next_tick()));
             bool requested_close = events.close_requested;
             for (const auto &event : events.input)
                 if (event.type == EventType::KeyDown && event.key == Key::Escape)
@@ -107,14 +114,16 @@ class Application {
                 if (update.is_err()) {
                     auto error = update.unwrap_err();
                     rstd::io::eprintln("session stage={} processed={}", unsigned(error.stage),
-                                      error.processed_events);
+                                       error.processed_events);
                     return 1;
                 }
-                animating = update.unwrap().animations_active;
-                after_update(update.unwrap());
+                auto outcome = update.unwrap();
+                animating = outcome.animations_active;
+                after_update(outcome);
                 // Completion events are observations; callbacks have already run in
                 // advance().
                 (void)session.document().poll_animation_events();
+                (void)session.motion().poll_events();
                 for (const auto &mutation : session.poll_mutations())
                     if (mutation.error.is_some()) {
                         rstd::io::eprintln("UI mutation failed: {}", unsigned(*mutation.error));
@@ -122,12 +131,12 @@ class Application {
                     }
                 frames_loop.set_surface(events.minimized ? VkExtent2D{} : window.pixel_extent(),
                                         events.surface.generation);
-                dirty = dirty || events.redraw || update.unwrap().frame_needed;
+                dirty = dirty || events.redraw || outcome.frame_needed;
                 if (dirty) {
                     auto requested = frames_loop.request();
                     if (requested.is_ok())
                         dirty = false;
-                    else if (requested.unwrap_err() != sdl::FrameRequestError::Busy)
+                    else if (requested.unwrap_err() != host::FrameRequestError::Busy)
                         return 1;
                 }
             }
@@ -135,7 +144,7 @@ class Application {
             if (pumped.is_err())
                 return report(pumped.unwrap_err());
             for (const auto &event : frames_loop.poll_events()) {
-                if (event.type == sdl::FrameEventType::Failed) {
+                if (event.type == host::FrameEventType::Failed) {
                     if (event.error.is_some())
                         return report(*event.error);
                     rstd::io::eprintln("frame planning failed");
@@ -143,7 +152,7 @@ class Application {
                 }
                 if (event.present.is_some() && *event.present != gpu::PresentStatus::Queued)
                     dirty = true;
-                if (event.type != sdl::FrameEventType::GpuComplete)
+                if (event.type != host::FrameEventType::GpuComplete)
                     continue;
                 if (capture_path_.is_some() && frames == 0 && !capture(capture_path_->as_path()))
                     return 1;

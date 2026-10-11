@@ -1,0 +1,14 @@
+[package]
+name = "vui-controls"
+version.workspace = true
+license.workspace = true
+
+[lib]
+name = "vui-controls"
+module = "vui.controls"
+archive = "vui-controls"
+sources = ["src/lib.cppm", "src/types.cppm", "src/button.cppm", "src/scroll_view.cppm"]
+
+[dependencies]
+vui = { workspace = true, pub = true }
+rstd-nostd = { workspace = true, usage = "link" }

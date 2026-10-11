@@ -1,4 +1,5 @@
 export module vui.examples.game2048:view;
+import vui.controls;
 import vui;
 import vectext;
 import vui.examples;
@@ -21,6 +22,8 @@ class View {
         }
     };
     UiSession &session_;
+    Binding lifetime_{session_.document().bindings().make()};
+    Vec<Binding> click_bindings_;
     Game game_;
     UiId root_, panel_, board_, score_, message_, restart_, continue_;
     Option<UiId> tiles_[16];
@@ -85,8 +88,9 @@ class View {
     auto button(ref<str> title, Scalar x) -> UiId {
         auto style = examples::block(210, 48, {});
         style.transform = {1, 0, 0, 1, x, 562};
-        auto id = Button::create(session_, style, {ink, {.01, .025, .05, 1}, {.035, .12, .26, 1}, 10})
-                      .unwrap();
+        auto id =
+            Button::create(session_, style, {ink, {.01, .025, .05, 1}, {.035, .12, .26, 1}, 10})
+                .unwrap();
         ui().attach(panel_, id).unwrap();
         auto text = label(id, title, 17, {}, true, {1, 1, 1, 1});
         ui().set_layout(text, {.horizontal = Alignment::Center, .vertical = Alignment::Center})
@@ -131,7 +135,7 @@ class View {
     void watch(AnimationId animation, bool sliding) {
         ++pending_;
         auto generation = generation_;
-        ui().on_animation_end(animation,
+        ui().on_animation_end(animation, lifetime_.guard(),
                               [this, generation, sliding](auto &, const AnimationEvent &event) {
                                   if (generation != generation_ ||
                                       event.reason != AnimationEndReason::Finished)
@@ -210,11 +214,12 @@ class View {
         context.prevent_default();
         context.stop_propagation();
         if (!event.input.repeat)
-            context
-                .defer([this, direction](auto &) -> Result<empty, UiError> {
-                    move(direction);
-                    return Ok(empty{});
-                })
+            context.document()
+                .defer(root_, lifetime_.guard(),
+                       [this, direction](auto &) -> Result<empty, UiError> {
+                           move(direction);
+                           return Ok(empty{});
+                       })
                 .unwrap();
     }
 
@@ -256,39 +261,37 @@ class View {
         for (auto phase : phases)
             session_.input()
                 .on(
-                    root_, EventType::KeyDown,
+                    root_, EventType::KeyDown, lifetime_.guard(),
                     [this](auto &context, const auto &event) { key(context, event); }, phase)
                 .unwrap();
         session_.input()
-            .on(board_, EventType::PointerDown,
+            .on(board_, EventType::PointerDown, lifetime_.guard(),
                 [this](auto &, const auto &) {
                     session_.input().request_focus(Some(root_)).unwrap();
                 })
             .unwrap();
-        session_.input()
-            .on(restart_, EventType::Activate,
-                [this](auto &context, const auto &) {
-                    context
-                        .defer([this](auto &) -> Result<empty, UiError> {
-                            restart();
-                            return Ok(empty{});
-                        })
-                        .unwrap();
-                })
-            .unwrap();
-        session_.input()
-            .on(continue_, EventType::Activate,
-                [this](auto &context, const auto &) {
-                    context
-                        .defer([this](auto &) -> Result<empty, UiError> {
-                            continued_ = true;
-                            update_status();
-                            focus_pending_ = true;
-                            return Ok(empty{});
-                        })
-                        .unwrap();
-                })
-            .unwrap();
+        click_bindings_.push(
+            Button::on_clicked(ui(), restart_, [this](auto &context, const auto &) {
+                context.document()
+                    .defer(root_, lifetime_.guard(),
+                           [this](auto &) -> Result<empty, UiError> {
+                               restart();
+                               return Ok(empty{});
+                           })
+                    .unwrap();
+            }).unwrap());
+        click_bindings_.push(
+            Button::on_clicked(ui(), continue_, [this](auto &context, const auto &) {
+                context.document()
+                    .defer(root_, lifetime_.guard(),
+                           [this](auto &) -> Result<empty, UiError> {
+                               continued_ = true;
+                               update_status();
+                               focus_pending_ = true;
+                               return Ok(empty{});
+                           })
+                    .unwrap();
+            }).unwrap());
         resize({{520, 720}, 1, 1});
     }
     View(const View &) = delete;

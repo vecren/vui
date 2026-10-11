@@ -9,6 +9,7 @@ struct Events {
     Vec<InputEvent> input;
     SurfaceInfo surface;
     bool redraw{}, close_requested{}, minimized{};
+    Serial dropped_input{};
 };
 struct WakeStats {
     Serial queued{}, coalesced{}, failed{};
@@ -31,6 +32,7 @@ class Window final : public gpu::SurfaceHost {
     auto handle_event(const SDL_Event &event) -> Events;
     auto timing() const -> FrameTiming;
     void set_input_tracing(bool enabled);
+    auto capture(PointerKind kind, bool enabled) -> NativeCaptureResult;
     auto resize(Index width, Index height) -> Result<empty, gpu::Error>;
     void minimize();
     void restore();

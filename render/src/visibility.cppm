@@ -115,20 +115,19 @@ struct QuadMapping {
 auto outside(RasterBounds a, RasterBounds b) -> bool {
     return a.right < b.left || a.left > b.right || a.bottom < b.top || a.top > b.bottom;
 }
-auto clipped(RasterBounds pixels, const GpuClip &clip, float scale) -> bool {
+auto clipped(RasterBounds pixels, const GpuClip &clip, float scale_x, float scale_y) -> bool {
     if (clip.params[2] == 0)
         return true;
-    auto x = Range(pixels.left, pixels.right) / Range(scale);
-    auto y = Range(pixels.top, pixels.bottom) / Range(scale);
+    auto x = Range(pixels.left, pixels.right) / Range(scale_x);
+    auto y = Range(pixels.top, pixels.bottom) / Range(scale_y);
     auto local_x = Range(clip.row0[0]) * x + Range(clip.row0[1]) * y + Range(clip.row0[2]);
     auto local_y = Range(clip.row1[0]) * x + Range(clip.row1[1]) * y + Range(clip.row1[2]);
     RasterBounds local{local_x.low, local_y.low, local_x.high, local_y.high};
     if (!finite_bounds(local))
         return false;
     // Rounded-box distance is 1-Lipschitz; bound both screen derivatives and float SDF error.
-    auto derivative = (std::hypot(double(clip.row0[0]), double(clip.row1[0])) +
-                       std::hypot(double(clip.row0[1]), double(clip.row1[1]))) /
-                      scale;
+    auto derivative = std::hypot(double(clip.row0[0]), double(clip.row1[0])) / scale_x +
+                      std::hypot(double(clip.row0[1]), double(clip.row1[1])) / scale_y;
     double magnitude = 1;
     double coordinates[]{local.left, local.top, local.right, local.bottom};
     for (auto value : coordinates)

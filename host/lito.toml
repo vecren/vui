@@ -1,0 +1,14 @@
+[package]
+name = "vui-host"
+version.workspace = true
+license.workspace = true
+
+[lib]
+name = "vui-host"
+module = "vui.host"
+archive = "vui-host"
+sources = ["src/lib.cppm", "src/frames.cppm"]
+
+[dependencies]
+vui-render = { workspace = true, pub = true }
+rstd-nostd = { workspace = true, usage = "link" }

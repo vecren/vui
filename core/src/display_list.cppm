@@ -32,12 +32,13 @@ class DisplayList {
     struct Data {
         Vec<DrawOp> operations;
         bool children{};
-        Data(Vec<DrawOp> ops, bool has_children)
-            : operations(rstd::move(ops)), children(has_children) {}
+        Option<Rect> bounds;
+        Data(Vec<DrawOp> ops, bool has_children, Option<Rect> extent)
+            : operations(rstd::move(ops)), children(has_children), bounds(extent) {}
     };
     rstd::sync::Arc<Data> data_;
-    DisplayList(Vec<DrawOp> ops, bool children)
-        : data_(rstd::sync::Arc<Data>::make(rstd::move(ops), children)) {}
+    DisplayList(Vec<DrawOp> ops, bool children, Option<Rect> bounds = None())
+        : data_(rstd::sync::Arc<Data>::make(rstd::move(ops), children, bounds)) {}
     friend class DisplayListRecorder;
 
   public:
@@ -52,6 +53,7 @@ class DisplayList {
     auto operator=(DisplayList &&) -> DisplayList & = default;
     auto operations() const -> slice<DrawOp> { return data_->operations.as_slice(); }
     auto has_children() const -> bool { return data_->children; }
+    auto bounds() const -> Option<Rect> { return data_->bounds; }
     auto same_content(const DisplayList &other) const -> bool {
         return rstd::sync::Arc<Data>::ptr_eq(data_, other.data_);
     }
@@ -62,6 +64,38 @@ class DisplayListRecorder {
     usize depth_{};
     bool children_{}, base_modified_{}, closed_{};
     Option<RecordingError> error_;
+    Transform coordinates_;
+    Vec<Transform> coordinates_stack_;
+    Option<Rect> bounds_;
+    void include(Rect rect) {
+        Point points[] = {coordinates_.map({rect.x, rect.y}),
+                          coordinates_.map({rect.x + rect.width, rect.y}),
+                          coordinates_.map({rect.x, rect.y + rect.height}),
+                          coordinates_.map({rect.x + rect.width, rect.y + rect.height})};
+        auto left = points[0].x, right = left, top = points[0].y, bottom = top;
+        for (auto point : points) {
+            if (!finite(point.x) || !finite(point.y)) {
+                reject(RecordingError::InvalidValue);
+                return;
+            }
+            left = rstd::cmp::min(left, point.x);
+            right = rstd::cmp::max(right, point.x);
+            top = rstd::cmp::min(top, point.y);
+            bottom = rstd::cmp::max(bottom, point.y);
+        }
+        if (bounds_.is_some()) {
+            left = rstd::cmp::min(left, bounds_->x);
+            top = rstd::cmp::min(top, bounds_->y);
+            right = rstd::cmp::max(right, bounds_->x + bounds_->width);
+            bottom = rstd::cmp::max(bottom, bounds_->y + bounds_->height);
+        }
+        Rect bounds{left, top, right - left, bottom - top};
+        if (!bounds.valid()) {
+            reject(RecordingError::InvalidValue);
+            return;
+        }
+        bounds_ = Some(bounds);
+    }
 
     void reject(RecordingError error) {
         if (error_.is_none())
@@ -82,6 +116,7 @@ class DisplayListRecorder {
             return;
         }
         ++depth_;
+        coordinates_stack_.push(Transform(coordinates_));
         operations_.push(DrawOp::Save());
     }
     void restore() {
@@ -92,6 +127,7 @@ class DisplayListRecorder {
             return;
         }
         --depth_;
+        coordinates_ = coordinates_stack_.pop().unwrap();
         operations_.push(DrawOp::Restore());
     }
     void transform(Transform value) {
@@ -103,6 +139,7 @@ class DisplayListRecorder {
         }
         if (depth_ == usize())
             base_modified_ = true;
+        coordinates_ = coordinates_ * value;
         operations_.push(DrawOp::Transform(value));
     }
     void clip(Clip value) {
@@ -123,6 +160,7 @@ class DisplayListRecorder {
             reject(RecordingError::InvalidValue);
             return;
         }
+        include(value);
         operations_.push(DrawOp::Rect(value, color, radius));
     }
     void text(TextLayout layout, Point origin, Color color) {
@@ -132,6 +170,8 @@ class DisplayListRecorder {
             reject(RecordingError::InvalidValue);
             return;
         }
+        auto ink = layout.ink_bounds();
+        include({ink.x + origin.x, ink.y + origin.y, ink.width, ink.height});
         operations_.push(DrawOp::Text(rstd::move(layout), origin, color));
     }
     void image(ImageData data, Rect destination, Rect source,
@@ -144,6 +184,7 @@ class DisplayListRecorder {
             reject(RecordingError::InvalidValue);
             return;
         }
+        include(destination);
         operations_.push(DrawOp::Image(rstd::move(data), destination, source, sampling));
     }
     void external(ContentSource source, Rect destination, ImageFit fit = ImageFit::Contain,
@@ -157,6 +198,7 @@ class DisplayListRecorder {
             reject(RecordingError::InvalidValue);
             return;
         }
+        include(destination);
         operations_.push(
             DrawOp::External(rstd::move(source), destination, fit, sampling, placeholder));
     }
@@ -180,7 +222,7 @@ class DisplayListRecorder {
         closed_ = true;
         if (depth_ != usize())
             return Err(RecordingError::Unbalanced);
-        return Ok(DisplayList(rstd::move(operations_), children_));
+        return Ok(DisplayList(rstd::move(operations_), children_, bounds_));
     }
 };
 } // namespace vui

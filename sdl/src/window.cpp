@@ -78,6 +78,47 @@ struct Window::Impl {
     SDL_Window *window{};
     bool minimized{}, trace_input{};
     InputTraceSource input_trace;
+    Serial sample_clock{new_session()};
+    struct TouchDevice {
+        SDL_TouchID native;
+        DeviceId id;
+    };
+    struct TouchContact {
+        SDL_TouchID device;
+        SDL_FingerID finger;
+        Index pointer;
+    };
+    Vec<TouchDevice> touch_devices;
+    Vec<TouchContact> touch_contacts;
+    Index next_contact{1};
+    auto sample_time(Uint32 timestamp, Option<Serial> &age_at_receipt) const -> SampleTime {
+        auto frequency = SDL_GetPerformanceFrequency();
+        auto now = static_cast<Serial>(
+            (static_cast<long double>(SDL_GetPerformanceCounter()) / frequency) * 1'000'000'000);
+        auto age = static_cast<Uint32>(SDL_GetTicks() - timestamp);
+        if (age > 0x7fffffffU || Serial(age) * 1'000'000 > now)
+            return {sample_clock, now, 1'000'000, TimeOrigin::Received};
+        age_at_receipt = Some(Serial(age) * 1'000'000);
+        return {sample_clock, now - Serial(age) * 1'000'000, 1'000'000, TimeOrigin::Native};
+    }
+    auto touch_device(SDL_TouchID native) -> DeviceId {
+        for (const auto &device : touch_devices)
+            if (device.native == native)
+                return device.id;
+        if (touch_devices.len() >= usize(256))
+            for (usize i{}; i < touch_devices.len(); ++i) {
+                bool active{};
+                for (const auto &contact : touch_contacts)
+                    active |= contact.device == touch_devices[i].native;
+                if (!active) {
+                    touch_devices.remove(i);
+                    break;
+                }
+            }
+        auto id = (Serial(1) << 63) | new_session();
+        touch_devices.push({native, id});
+        return id;
+    }
     Option<rstd::sync::Arc<NativeWindow>> native;
     Option<rstd::sync::Arc<WakeState>> wake;
     SurfaceInfo metrics{{}, 1, 1};
@@ -142,6 +183,7 @@ struct Window::Impl {
         }
     }
     void emit_input(Events &output, InputEvent input) {
+        input.coordinate_generation = metrics.generation;
         if (trace_input)
             input.stamp = input_trace.stamp();
         output.input.push(rstd::move(input));
@@ -154,6 +196,7 @@ struct Window::Impl {
             return;
         }
         InputEvent input;
+        input.sample_time = sample_time(value.common.timestamp, input.age_at_receipt_ns);
         switch (value.type) {
         case SDL_QUIT:
             output.close_requested = true;
@@ -169,6 +212,7 @@ struct Window::Impl {
                 minimized = true;
                 output.redraw = true;
                 SDL_CaptureMouse(SDL_FALSE);
+                touch_contacts.clear();
                 input.type = EventType::WindowFocusLost;
                 emit_input(output, rstd::move(input));
                 break;
@@ -185,6 +229,7 @@ struct Window::Impl {
                 break;
             case SDL_WINDOWEVENT_FOCUS_LOST:
                 SDL_CaptureMouse(SDL_FALSE);
+                touch_contacts.clear();
                 input.type = EventType::WindowFocusLost;
                 emit_input(output, rstd::move(input));
                 break;
@@ -202,6 +247,7 @@ struct Window::Impl {
                 return;
             input.type = EventType::PointerMove;
             input.position = position(value.motion.x, value.motion.y);
+            input.device = value.motion.which;
             break;
         case SDL_MOUSEBUTTONDOWN:
         case SDL_MOUSEBUTTONUP:
@@ -210,23 +256,25 @@ struct Window::Impl {
             input.type =
                 value.type == SDL_MOUSEBUTTONDOWN ? EventType::PointerDown : EventType::PointerUp;
             input.position = position(value.button.x, value.button.y);
+            input.device = value.button.which;
             if (value.button.button == SDL_BUTTON_LEFT)
                 input.button = PointerButton::Primary;
             else if (value.button.button == SDL_BUTTON_RIGHT)
                 input.button = PointerButton::Secondary;
             else if (value.button.button == SDL_BUTTON_MIDDLE)
                 input.button = PointerButton::Middle;
+            else if (value.button.button == SDL_BUTTON_X1)
+                input.button = PointerButton::Back;
+            else if (value.button.button == SDL_BUTTON_X2)
+                input.button = PointerButton::Forward;
             else
                 return;
-            if (value.type == SDL_MOUSEBUTTONDOWN)
-                SDL_CaptureMouse(SDL_TRUE);
-            else if (SDL_GetMouseState(nullptr, nullptr) == 0)
-                SDL_CaptureMouse(SDL_FALSE);
             break;
         case SDL_MOUSEWHEEL: {
             if (value.wheel.windowID != window_id || value.wheel.which == SDL_TOUCH_MOUSEID)
                 return;
             input.type = EventType::Wheel;
+            input.device = value.wheel.which;
             input.scroll_unit = ScrollUnit::Lines;
             auto direction = value.wheel.direction == SDL_MOUSEWHEEL_FLIPPED ? -1 : 1;
             input.scroll_delta = {direction * Scalar(value.wheel.preciseX),
@@ -238,6 +286,44 @@ struct Window::Impl {
             SDL_GetMouseState(&x, &y);
             input.position = position(x, y);
 #endif
+            break;
+        }
+        case SDL_FINGERDOWN:
+        case SDL_FINGERMOTION:
+        case SDL_FINGERUP: {
+            const auto &touch = value.tfinger;
+            if (touch.windowID && touch.windowID != window_id)
+                return;
+            TouchContact *contact{};
+            for (auto &current : touch_contacts)
+                if (current.device == touch.touchId && current.finger == touch.fingerId)
+                    contact = &current;
+            if (!contact && value.type == SDL_FINGERDOWN) {
+                if (touch_contacts.len() >= usize(32) || next_contact == ~Index{}) {
+                    ++output.dropped_input;
+                    return;
+                }
+                touch_contacts.push({touch.touchId, touch.fingerId, next_contact++});
+                contact = &touch_contacts[touch_contacts.len() - usize(1)];
+            }
+            if (!contact)
+                return;
+            input.type = value.type == SDL_FINGERDOWN ? EventType::PointerDown
+                         : value.type == SDL_FINGERUP ? EventType::PointerUp
+                                                      : EventType::PointerMove;
+            input.device = touch_device(touch.touchId);
+            input.pointer = contact->pointer;
+            input.pointer_kind = PointerKind::Touch;
+            input.position = {Scalar(touch.x) * metrics.logical_size.width,
+                              Scalar(touch.y) * metrics.logical_size.height};
+            if (!finite(input.position.x) || !finite(input.position.y))
+                return;
+            if (finite(touch.pressure) && touch.pressure >= 0 && touch.pressure <= 1)
+                input.pressure = Some(Scalar(touch.pressure));
+            if (value.type == SDL_FINGERUP)
+                touch_contacts.retain([&](const TouchContact &current) {
+                    return current.device != touch.touchId || current.finger != touch.fingerId;
+                });
             break;
         }
         case SDL_KEYDOWN:
@@ -335,6 +421,14 @@ auto Window::wait(Index milliseconds) -> Events {
     output.surface = impl_->metrics;
     output.minimized = impl_->minimized;
     return output;
+}
+auto Window::capture(PointerKind kind, bool enabled) -> NativeCaptureResult {
+    if (kind != PointerKind::Mouse)
+        return NativeCaptureResult::Unsupported;
+    if (!impl_->window)
+        return NativeCaptureResult::Failed;
+    return SDL_CaptureMouse(enabled ? SDL_TRUE : SDL_FALSE) == 0 ? NativeCaptureResult::Succeeded
+                                                                 : NativeCaptureResult::Failed;
 }
 void Window::set_input_tracing(bool enabled) { impl_->trace_input = enabled; }
 auto Window::timing() const -> FrameTiming {

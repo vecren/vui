@@ -1,4 +1,5 @@
 export module vui.examples.gallery;
+import vui.controls;
 import vui.examples;
 import rstd;
 
@@ -30,6 +31,7 @@ int main(int argc, char **argv) {
         return 1;
     auto &session = app.session;
     auto &ui = session.document();
+    Vec<Binding> click_bindings_;
     auto service = Box<vectext::SystemTextService>::make();
     ui.set_text_service(
           Box<TextService>::from_raw(rstd::move(service).into_raw().template cast<TextService>()))
@@ -121,15 +123,11 @@ int main(int argc, char **argv) {
     auto button = Button::create(session, button_style).unwrap();
     ui.attach(root, button).unwrap();
     text_label(button, "重置 / Reset"_str, {8, 10}, 14);
-    session.input()
-        .on(button, EventType::Activate,
-            [&](auto &context, const auto &) {
-                position = {100, 110};
-                context.document()
-                    .set_transform(tile, {1, 0, 0, 1, position.x, position.y})
-                    .unwrap();
-            })
-        .unwrap();
+    click_bindings_.push(
+        Button::on_clicked(session.document(), button, [&](auto &context, const auto &) {
+            position = {100, 110};
+            context.document().set_transform(tile, {1, 0, 0, 1, position.x, position.y}).unwrap();
+        }).unwrap());
     auto scroll_content = ui.create<Column>().unwrap();
     for (unsigned i = 0; i < 12; ++i) {
         auto item = Button::create(session, block(100, 34, {}),
@@ -141,15 +139,13 @@ int main(int argc, char **argv) {
         ui.attach(scroll_content, item).unwrap();
         auto title = rstd::format("项目 {:02}", i + 1);
         text_label(item, title.as_str(), {8, 7}, 15);
-        session.input()
-            .on(item, EventType::Activate,
-                [&, i](auto &context, const auto &) {
-                    position = {100 + 10 * Scalar(i), 110};
-                    context.document()
-                        .set_transform(tile, {1, 0, 0, 1, position.x, position.y})
-                        .unwrap();
-                })
-            .unwrap();
+        click_bindings_.push(
+            Button::on_clicked(session.document(), item, [&, i](auto &context, const auto &) {
+                position = {100 + 10 * Scalar(i), 110};
+                context.document()
+                    .set_transform(tile, {1, 0, 0, 1, position.x, position.y})
+                    .unwrap();
+            }).unwrap());
     }
     auto scroll_style = block(100, 150, {});
     scroll_style.transform = {1, 0, 0, 1, 400, 85};
@@ -157,10 +153,10 @@ int main(int argc, char **argv) {
     auto scroll = ScrollView::create(session, scroll_content, scroll_style).unwrap();
     ui.attach(root, scroll).unwrap();
     rstd::io::println("Drag the tile; Tab selects controls; arrows move the tile. Wheel over "
-           "the right list "
-           "to scroll; its buttons move the tile. The lower-right button resets it. "
-           "Focused scroll view supports arrows, PageUp/PageDown, Home/End. Escape "
-           "closes.");
+                      "the right list "
+                      "to scroll; its buttons move the tile. The lower-right button resets it. "
+                      "Focused scroll view supports arrows, PageUp/PageDown, Home/End. Escape "
+                      "closes.");
     Serial animation_samples{}, animation_completions{};
     Scalar opacity_min{1}, opacity_max{};
     gpu::TextCacheStats cache;

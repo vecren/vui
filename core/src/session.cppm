@@ -1,14 +1,11 @@
 export module vui:session;
 import :events;
+import :motion.drivers;
 import :visual;
 import :frame;
 using namespace rstd::prelude;
 
 export namespace vui {
-struct FrameTiming {
-    Serial now_ns{};
-    Option<Serial> expected_present_ns;
-};
 enum class SessionStage {
     Closed,
     Reentrant,
@@ -41,7 +38,7 @@ struct AdvanceResult {
 struct AdvanceTimings {
     Serial document{}, ui_revision{}, render_revision{};
     FrameTiming requested;
-    CpuTiming advance, update, layout, paint, collect, input, build, apply;
+    CpuTiming advance, geometry, update, layout, paint, collect, input, build, apply;
     UpdateStats work;
     usize processed_events{};
     Option<SessionStage> error;
@@ -50,7 +47,11 @@ struct InputSample {
     usize index{};
     InputStamp stamp;
     Option<rstd::time::Instant> dispatch_started, dispatch_finished;
-    bool dispatched{};
+    bool dispatched{}, coalesced{};
+    SampleTime sample_time;
+    Option<Serial> age_at_receipt_ns;
+    Serial history_count{}, history_lost{};
+    InputWork work;
 };
 struct InputBatchTiming {
     Serial document{}, sequence{}, successful_sequence{}, scene_session{}, ui_revision{},
@@ -83,6 +84,7 @@ class InputTimings {
 };
 class UiSession {
     UiDocument document_;
+    MotionRuntime motion_{document_};
     EventRouter input_{document_};
     Serial render_session_{new_session()};
     VisualBuilder visual_{render_session_};
@@ -113,6 +115,11 @@ class UiSession {
                 continue;
             }
             result.samples.push({i, *events[i].stamp, {}, {}, false});
+            auto &sample = result.samples[result.samples.len() - usize(1)];
+            sample.sample_time = events[i].sample_time;
+            sample.age_at_receipt_ns = events[i].age_at_receipt_ns;
+            sample.history_count = events[i].history.len().to_primitive();
+            sample.history_lost = events[i].history_lost;
         }
         if (result.samples.is_empty())
             return None();
@@ -183,6 +190,73 @@ class UiSession {
         return changed;
     }
 
+    template <class Snapshot>
+    auto reveal_focus(const Snapshot &snapshot) -> Result<bool, SessionError> {
+        if (revealed_focus_ == input_.focus_revision())
+            return Ok(false);
+        if (auto target = input_.focused(); target.is_some()) {
+            auto revealed = document_.bring_into_view(snapshot, *target);
+            if (revealed.is_err())
+                return Err(SessionError{SessionStage::Update, Some(revealed.unwrap_err())});
+        }
+        revealed_focus_ = input_.focus_revision();
+        return Ok(document_.revision() != snapshot.revision());
+    }
+    auto settle_input(Size size, Serial sample_time, UpdateStats &stats)
+        -> Result<empty, SessionError> {
+        for (unsigned iteration{}; iteration < 16; ++iteration) {
+            if (mutations_.len() + document_.pending_mutations() > usize(4096))
+                return Err(SessionError{SessionStage::Backpressure});
+            auto mutations = document_.flush_mutations();
+            if (mutations.is_err())
+                return Err(SessionError{SessionStage::Update, Some(mutations.unwrap_err())});
+            for (auto &result : mutations.unwrap())
+                mutations_.push(rstd::move(result));
+            auto sampled = document_.sample_animations(sample_time);
+            if (sampled.is_err()) {
+                SessionError e{SessionStage::Animation};
+                e.animation = Some(sampled.unwrap_err());
+                return Err(rstd::move(e));
+            }
+            auto driven = motion_.sample({sample_time, {}});
+            if (driven.is_err())
+                return Err(SessionError{SessionStage::Animation});
+            auto callbacks = document_.dispatch_animation_callbacks();
+            if (callbacks.is_err()) {
+                SessionError e{SessionStage::Animation};
+                e.animation = Some(callbacks.unwrap_err());
+                return Err(rstd::move(e));
+            }
+            CpuTimer geometry(active_timings_ ? &active_timings_->geometry : nullptr);
+            auto next = document_.input_snapshot(size, {active_timings_ != nullptr});
+            geometry.pause();
+            stats.add(document_.input_stats());
+            if (active_timings_)
+                active_timings_->work.add(document_.input_stats());
+            if (active_timings_)
+                if (auto timing = document_.last_update_timings(); timing.is_some()) {
+                    active_timings_->layout.add(timing->layout);
+                    active_timings_->collect.add(timing->collect);
+                }
+            if (next.is_err())
+                return Err(SessionError{SessionStage::Update, Some(next.unwrap_err())});
+            auto snapshot = rstd::move(next).unwrap();
+            auto revision = snapshot.revision();
+            auto synced = input_.synchronize(rstd::move(snapshot));
+            if (synced.is_err())
+                return Err(SessionError{SessionStage::Input, {}, Some(synced.unwrap_err())});
+            if (revision == document_.revision() && document_.pending_mutations() == usize() &&
+                !document_.pending_animation_callbacks()) {
+                auto revealed = reveal_focus(input_.snapshot().unwrap());
+                if (revealed.is_err())
+                    return Err(revealed.unwrap_err());
+                if (revealed.unwrap())
+                    continue;
+                return Ok(empty{});
+            }
+        }
+        return Err(SessionError{SessionStage::Limit});
+    }
     auto settle(Size size, Serial sample_time, UpdateStats &stats) -> Result<empty, SessionError> {
         for (int iteration = 0; iteration < 16; ++iteration) {
             if (mutations_.len() + document_.pending_mutations() > usize(4096))
@@ -198,6 +272,9 @@ class UiSession {
                 error.animation = Some(sampled.unwrap_err());
                 return Err(rstd::move(error));
             }
+            auto driven = motion_.sample({sample_time, {}});
+            if (driven.is_err())
+                return Err(SessionError{SessionStage::Animation});
             auto callbacks = document_.dispatch_animation_callbacks();
             if (callbacks.is_err()) {
                 SessionError error{SessionStage::Animation};
@@ -223,17 +300,11 @@ class UiSession {
             if (document_.revision() == update_->revision() &&
                 document_.pending_mutations() == usize() &&
                 !document_.pending_animation_callbacks()) {
-                if (revealed_focus_ != input_.focus_revision()) {
-                    if (auto target = input_.focused(); target.is_some()) {
-                        auto revealed = document_.bring_into_view(*update_, *target);
-                        if (revealed.is_err())
-                            return Err(
-                                SessionError{SessionStage::Update, Some(revealed.unwrap_err())});
-                    }
-                    revealed_focus_ = input_.focus_revision();
-                    if (document_.revision() != update_->revision())
-                        continue;
-                }
+                auto revealed = reveal_focus(*update_);
+                if (revealed.is_err())
+                    return Err(revealed.unwrap_err());
+                if (revealed.unwrap())
+                    continue;
                 return Ok(empty{});
             }
         }
@@ -246,6 +317,8 @@ class UiSession {
     auto operator=(const UiSession &) -> UiSession & = delete;
     auto document() -> UiDocument & { return document_; }
     auto input() -> EventRouter & { return input_; }
+    auto motion() -> MotionRuntime & { return motion_; }
+    auto next_tick() const -> Option<Serial> { return motion_.next_tick(); }
     auto render_scene() const -> const RenderScene & { return endpoint_.scene(); }
     auto set_frame_waker(Option<FrameWaker> waker) -> Result<empty, SessionError> {
         if (closed_ || closing_)
@@ -254,6 +327,8 @@ class UiSession {
             return Err(SessionError{SessionStage::Reentrant});
         if (waker.is_some() && !waker->valid())
             waker = None();
+        document_.bindings().set_waker(waker.is_some() ? Some(FrameWaker(*waker))
+                                                       : None<FrameWaker>());
         frame_waker_ = rstd::move(waker);
         for (auto &observed : content_) {
             observed.subscription = None();
@@ -345,31 +420,75 @@ class UiSession {
         } guard{advancing_};
         last_time_ = timing.now_ns;
         UpdateStats stats;
+        input_.begin_input_batch();
         auto sample_time =
             timing.expected_present_ns.is_some() ? *timing.expected_present_ns : timing.now_ns;
-        auto settled = settle(surface.logical_size, sample_time, stats);
+        auto settled = events.is_empty() ? settle(surface.logical_size, sample_time, stats)
+                                         : settle_input(surface.logical_size, sample_time, stats);
         if (settled.is_err())
             return failure(settled.unwrap_err());
-        for (const auto &event : events) {
-            InputSample *sample{};
-            if (active_inputs_ && input_cursor_ < active_inputs_->samples.len() &&
-                active_inputs_->samples[input_cursor_].index == processed) {
-                sample = &active_inputs_->samples[input_cursor_++];
-                sample->dispatch_started = Some(rstd::time::Instant::now());
+        for (usize event_index{}; event_index < events.len();) {
+            InputEvent event = events[event_index];
+            auto last = event_index;
+            Vec<PointerSample> history;
+            while (last + usize(1) < events.len() &&
+                   history.len() + events[last].history.len() +
+                           events[last + usize(1)].history.len() <
+                       usize(512) &&
+                   !document_.pending_mutations().to_primitive() &&
+                   input_.can_coalesce(events[last], events[last + usize(1)])) {
+                for (const auto &sample : events[last].history)
+                    history.push(PointerSample(sample));
+                history.push({events[last].sample_time, events[last].position,
+                              events[last].pressure, events[last].tilt, events[last].twist});
+                ++last;
+            }
+            if (last != event_index) {
+                event = events[last];
+                for (auto i = event_index; i < last; ++i)
+                    event.history_lost +=
+                        rstd::min(events[i].history_lost, ~Serial{} - event.history_lost);
+                for (const auto &sample : event.history)
+                    history.push(PointerSample(sample));
+                event.history = history.as_slice();
+            }
+            auto count = last - event_index + usize(1);
+            auto sample_begin = input_cursor_;
+            Option<rstd::time::Instant> dispatch_started;
+            if (active_inputs_) {
+                while (input_cursor_ < active_inputs_->samples.len() &&
+                       active_inputs_->samples[input_cursor_].index < processed + count)
+                    ++input_cursor_;
+                if (input_cursor_ != sample_begin)
+                    dispatch_started = Some(rstd::time::Instant::now());
             }
             CpuTimer input_time(active_timings_ ? &active_timings_->input : nullptr);
             auto dispatched = input_.dispatch(event);
             input_time.pause();
-            if (sample) {
-                sample->dispatch_finished = Some(rstd::time::Instant::now());
-                sample->dispatched = dispatched.is_ok();
+            if (dispatch_started.is_some()) {
+                auto finished = rstd::time::Instant::now();
+                for (auto i = sample_begin; i < input_cursor_; ++i) {
+                    auto &sample = active_inputs_->samples[i];
+                    sample.dispatch_started = dispatch_started;
+                    sample.dispatch_finished = Some(rstd::time::Instant(finished));
+                    sample.dispatched = dispatched.is_ok();
+                    sample.coalesced = sample.index != last;
+                    if (sample.index == last)
+                        sample.work = input_.work();
+                }
             }
-            ++processed;
+            processed += count;
+            event_index = last + usize(1);
             if (active_timings_)
                 active_timings_->processed_events = processed;
             if (dispatched.is_err())
                 return failure(
                     SessionError{SessionStage::Input, {}, Some(dispatched.unwrap_err())});
+            settled = settle_input(surface.logical_size, sample_time, stats);
+            if (settled.is_err())
+                return failure(settled.unwrap_err());
+        }
+        if (!events.is_empty()) {
             settled = settle(surface.logical_size, sample_time, stats);
             if (settled.is_err())
                 return failure(settled.unwrap_err());
@@ -417,7 +536,7 @@ class UiSession {
         bool content_changed = observe_content();
         return Ok(AdvanceResult{update_->revision(), visual_.applied_revision(), stats,
                                 changed || surface_changed || content_changed, processed,
-                                document_.animations_active()});
+                                document_.animations_active() || motion_.active()});
     }
 
   public:
@@ -435,6 +554,7 @@ class UiSession {
         if (advancing_ || !document_.can_route())
             return Err(SessionError{SessionStage::Reentrant});
         closing_ = true;
+        motion_.close();
         auto animations = document_.close_animations();
         if (animations.is_err()) {
             SessionError error{SessionStage::Animation};
@@ -446,6 +566,7 @@ class UiSession {
             return Err(SessionError{SessionStage::Input, {}, Some(result.unwrap_err())});
         for (auto &mutation : document_.cancel_mutations().unwrap())
             mutations_.push(rstd::move(mutation));
+        document_.bindings().close();
         endpoint_.close();
         content_.clear();
         frame_waker_ = None();

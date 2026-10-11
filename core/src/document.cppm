@@ -1,96 +1,17 @@
 export module vui:document;
 import :composition;
+import :node.types;
 import :animation;
 import :layout;
 import :diagnostics;
+import :binding;
+import :layout.protocol;
+import :paint.protocol;
+import :motion.properties;
 using namespace rstd::prelude;
 using namespace rstd::literals;
 
 export namespace vui {
-enum class LayoutKind { Leaf, Row, Column, Stack, Viewport, Text, Image, Custom, Scene };
-struct SceneViewport {
-    static constexpr LayoutKind layout = LayoutKind::Scene;
-};
-struct Viewport {
-    static constexpr LayoutKind layout = LayoutKind::Viewport;
-};
-struct ScrollAxes {
-    bool horizontal{}, vertical{true};
-    friend auto operator==(const ScrollAxes &, const ScrollAxes &) -> bool = default;
-};
-struct ViewportMetrics {
-    Size viewport, extent;
-    Point offset, maximum;
-};
-struct Image {
-    static constexpr LayoutKind layout = LayoutKind::Image;
-};
-struct Text {
-    static constexpr LayoutKind layout = LayoutKind::Text;
-};
-struct Rectangle {
-    static constexpr LayoutKind layout = LayoutKind::Leaf;
-};
-struct Row {
-    static constexpr LayoutKind layout = LayoutKind::Row;
-};
-struct Column {
-    static constexpr LayoutKind layout = LayoutKind::Column;
-};
-struct CustomLayout {
-    static constexpr LayoutKind layout = LayoutKind::Custom;
-};
-struct Stack {
-    static constexpr LayoutKind layout = LayoutKind::Stack;
-};
-struct NodeStyle {
-    LayoutStyle layout;
-    Color background{0, 0, 0, 0};
-    Scalar radius{};
-    Transform transform;
-    Clip clip;
-    Scalar opacity{1};
-    bool visible{true}, hit_test_visible{true}, enabled{true}, focusable{};
-    auto valid() const -> bool {
-        return layout.valid() && background.valid() && finite(radius) && radius >= 0 &&
-               RenderProperties{transform, {}, clip, opacity, visible}.valid();
-    }
-};
-enum class UiError {
-    InvalidId,
-    InvalidValue,
-    Cycle,
-    Root,
-    MissingChild,
-    Limit,
-    Routing,
-    Cancelled,
-    LayoutPending,
-    TextServiceMissing,
-    TextLayoutFailed,
-    LayoutFailed
-};
-class LayoutMeasureContext {
-  public:
-    virtual ~LayoutMeasureContext() = default;
-    virtual auto child_count() const -> usize = 0;
-    virtual auto measure_child(usize, LayoutConstraints) -> Result<Size, UiError> = 0;
-    virtual void request_layout() = 0;
-};
-class LayoutArrangeContext {
-  public:
-    virtual ~LayoutArrangeContext() = default;
-    virtual auto child_count() const -> usize = 0;
-    virtual auto desired_child(usize) -> Result<Size, UiError> = 0;
-    virtual auto arrange_child(usize, Rect) -> Result<empty, UiError> = 0;
-    virtual void request_layout() = 0;
-};
-class LayoutStrategy {
-  public:
-    virtual ~LayoutStrategy() = default;
-    virtual auto measure(LayoutMeasureContext &, LayoutConstraints) -> Result<Size, UiError> = 0;
-    virtual auto arrange(LayoutArrangeContext &, Size) -> Result<empty, UiError> = 0;
-};
 struct MutationResult {
     Serial id{};
     Option<UiError> error;
@@ -105,6 +26,8 @@ struct UiVisual {
     Serial mount_generation{};
     Option<ViewportMetrics> viewport;
     Rect layout_bounds;
+    Rect layout_rect;
+    Option<Rect> layout_slot;
 };
 enum class RevealStatus { Contained, Partial, Hidden, NonInvertible };
 struct BringIntoViewResult {
@@ -122,6 +45,7 @@ struct TextPlacement {
 struct UpdateStats {
     Serial measurements{}, recordings{}, text_layouts{}, arrangements{}, layout_passes{};
     Serial measure_cache_hits{}, arrange_cache_hits{};
+    Serial collected_nodes{}, geometry_overrides{};
     void add(UpdateStats other) {
         measurements += other.measurements;
         recordings += other.recordings;
@@ -130,6 +54,8 @@ struct UpdateStats {
         layout_passes += other.layout_passes;
         measure_cache_hits += other.measure_cache_hits;
         arrange_cache_hits += other.arrange_cache_hits;
+        collected_nodes += other.collected_nodes;
+        geometry_overrides += other.geometry_overrides;
     }
 };
 struct UpdateTimings {
@@ -138,6 +64,34 @@ struct UpdateTimings {
     UpdateStats work;
     Option<UiError> error;
 };
+template <class Snapshot>
+auto surface_transform(const Snapshot &snapshot, UiId id) -> Result<Transform, UiError> {
+    Transform result;
+    auto cursor = Some(id);
+    unsigned depth{};
+    while (cursor.is_some() && depth++ < 256) {
+        auto node = snapshot.get(*cursor);
+        if (!node)
+            return Err(UiError::InvalidId);
+        result = node->properties.transform * result;
+        cursor = node->parent;
+    }
+    if (cursor.is_some() || !result.valid())
+        return Err(UiError::InvalidValue);
+    return Ok(result);
+}
+template <class Snapshot>
+auto between_transform(const Snapshot &snapshot, UiId from, UiId to) -> Result<Transform, UiError> {
+    auto source = surface_transform(snapshot, from), target = surface_transform(snapshot, to);
+    if (source.is_err())
+        return Err(source.unwrap_err());
+    if (target.is_err())
+        return Err(target.unwrap_err());
+    auto inverse = target.unwrap().inverse();
+    if (inverse.is_none())
+        return Err(UiError::InvalidValue);
+    return Ok(*inverse * source.unwrap());
+}
 class UiDocument;
 class UiUpdate {
     struct Data {
@@ -169,6 +123,33 @@ class UiUpdate {
     auto stats() const -> UpdateStats { return data_->stats; }
     auto timings() const -> Option<UpdateTimings> { return data_->timings; }
     auto layout_revision() const -> Serial { return data_->layout_revision; }
+    auto layout_rect(UiId id) const -> Result<Rect, UiError> {
+        auto node = get(id);
+        if (!node)
+            return Err(UiError::InvalidId);
+        return Ok(Rect(node->layout_rect));
+    }
+    auto layout_slot(UiId id) const -> Result<Option<Rect>, UiError> {
+        auto node = get(id);
+        if (!node)
+            return Err(UiError::InvalidId);
+        return Ok(Option<Rect>(node->layout_slot));
+    }
+    auto local_to_surface(UiId id) const -> Result<Transform, UiError> {
+        return surface_transform(*this, id);
+    }
+    auto transform_to(UiId from, UiId to) const -> Result<Transform, UiError> {
+        return between_transform(*this, from, to);
+    }
+    auto map_point(UiId from, UiId to, Point point) const -> Result<Point, UiError> {
+        auto transform = transform_to(from, to);
+        if (transform.is_err())
+            return Err(transform.unwrap_err());
+        auto mapped = transform.unwrap().map(point);
+        if (!finite(mapped.x) || !finite(mapped.y))
+            return Err(UiError::InvalidValue);
+        return Ok(mapped);
+    }
     auto get(UiId id) const -> const UiVisual * {
         if (!id.valid() || id.session != data_->document || usize(id.slot) >= data_->indices.len())
             return nullptr;
@@ -177,6 +158,90 @@ class UiUpdate {
             return nullptr;
         const auto &visual = data_->visuals[usize(index)];
         return visual.id == id ? &visual : nullptr;
+    }
+};
+
+class InputSnapshot {
+    struct Data {
+        UiUpdate base;
+        Vec<UiVisual> changes;
+        Serial revision;
+        Data(UiUpdate value, Vec<UiVisual> updates, Serial rev)
+            : base(rstd::move(value)), changes(rstd::move(updates)), revision(rev) {}
+    };
+    rstd::sync::Arc<Data> data_;
+    friend class UiDocument;
+    static auto freeze(UiUpdate base) -> rstd::sync::Arc<Data> {
+        auto revision = base.revision();
+        return rstd::sync::Arc<Data>::make(rstd::move(base), Vec<UiVisual>{}, revision);
+    }
+    InputSnapshot(UiUpdate base, Vec<UiVisual> changes, Serial revision)
+        : data_(rstd::sync::Arc<Data>::make(rstd::move(base), rstd::move(changes), revision)) {}
+
+  public:
+    InputSnapshot(UiUpdate base) : data_(freeze(rstd::move(base))) {}
+    InputSnapshot(const InputSnapshot &other) : data_(other.data_.clone()) {}
+    auto operator=(const InputSnapshot &other) -> InputSnapshot & {
+        data_ = other.data_.clone();
+        return *this;
+    }
+    InputSnapshot(InputSnapshot &&) = default;
+    auto operator=(InputSnapshot &&) -> InputSnapshot & = default;
+    auto document() const -> Serial { return data_->base.document(); }
+    auto revision() const -> Serial { return data_->revision; }
+    auto layout_revision() const -> Serial { return data_->base.layout_revision(); }
+    auto root() const -> Option<UiId> { return data_->base.root(); }
+    struct Visuals {
+        const InputSnapshot *snapshot;
+        struct Iterator {
+            const InputSnapshot *snapshot;
+            usize index;
+            auto operator*() const -> const UiVisual & {
+                return *snapshot->get(snapshot->data_->base.visuals()[index].id);
+            }
+            auto operator++() -> Iterator & {
+                ++index;
+                return *this;
+            }
+            auto operator!=(const Iterator &other) const -> bool { return index != other.index; }
+        };
+        auto begin() const -> Iterator { return {snapshot, {}}; }
+        auto end() const -> Iterator { return {snapshot, snapshot->data_->base.visuals().len()}; }
+        auto len() const -> usize { return snapshot->data_->base.visuals().len(); }
+    };
+    auto visuals() const -> Visuals { return {this}; }
+    auto get(UiId id) const -> const UiVisual * {
+        for (const auto &node : data_->changes)
+            if (node.id == id)
+                return &node;
+        return data_->base.get(id);
+    }
+    auto layout_rect(UiId id) const -> Result<Rect, UiError> {
+        auto node = get(id);
+        if (!node)
+            return Err(UiError::InvalidId);
+        return Ok(Rect(node->layout_rect));
+    }
+    auto layout_slot(UiId id) const -> Result<Option<Rect>, UiError> {
+        auto node = get(id);
+        if (!node)
+            return Err(UiError::InvalidId);
+        return Ok(Option<Rect>(node->layout_slot));
+    }
+    auto local_to_surface(UiId id) const -> Result<Transform, UiError> {
+        return surface_transform(*this, id);
+    }
+    auto transform_to(UiId from, UiId to) const -> Result<Transform, UiError> {
+        return between_transform(*this, from, to);
+    }
+    auto map_point(UiId from, UiId to, Point point) const -> Result<Point, UiError> {
+        auto transform = transform_to(from, to);
+        if (transform.is_err())
+            return Err(transform.unwrap_err());
+        auto mapped = transform.unwrap().map(point);
+        if (!finite(mapped.x) || !finite(mapped.y))
+            return Err(UiError::InvalidValue);
+        return Ok(mapped);
     }
 };
 
@@ -268,17 +333,21 @@ class UiDocument {
         bool measure_dirty{true}, arrange_dirty{true}, subtree_arrange_dirty{true};
         bool pending_layout{}, constraint_conflict{};
         Option<Rect> arranged_slot;
-        Option<Box<LayoutStrategy>> layout_strategy;
+        Option<Box<rstd::dyn<Layout>>> layout_strategy;
+        Option<BindingGuard> layout_binding;
+        Option<Box<rstd::dyn<Paint>>> painter;
+        Option<BindingGuard> paint_binding;
         Point position;
         bool paint_dirty{true};
         DisplayList content;
-        Serial mount_generation{1};
+        Serial mount_generation{1}, relation_generation{1};
         Option<Box<State>> state;
         Option<Box<ViewportLayout>> viewport;
         Option<Box<TextContent>> text;
         Option<Box<ImageContent>> image;
         Option<Box<SceneContent>> scene;
         AnimatedStyle animated;
+        rstd::rc::Weak<PropertyLeaseState> property_owner[7];
         Node(LayoutKind value, NodeStyle properties) : kind(value), style(properties) {}
     };
     struct Slot {
@@ -287,6 +356,9 @@ class UiDocument {
     };
     Serial session_{new_session()}, revision_{1};
     Vec<Slot> slots_;
+    Option<UiUpdate> input_base_;
+    Vec<UiId> input_changes_;
+    Vec<UiId> bound_nodes_;
     Option<UiId> root_;
     bool layout_dirty_{true}, layout_active_{}, layout_again_{};
     Serial layout_revision_{};
@@ -304,7 +376,12 @@ class UiDocument {
     usize dispatching_animation_count_{};
     bool animation_dispatching_{}, animations_closed_{};
     UpdateStats stats_;
-    bool updating_{};
+    UpdateStats input_stats_;
+    bool updating_{}, painting_{};
+    BindingRegistry bindings_;
+    Binding lease_owner_{bindings_.make()};
+    Serial next_lease_{1};
+    Vec<PaintDiagnostic> paint_diagnostics_;
     UpdateTimings *active_timings_{};
     Option<UpdateTimings> last_timings_;
     Index depth_limit_{256};
@@ -312,6 +389,35 @@ class UiDocument {
     Serial next_mutation_{1};
     Vec<Box<Mutation>> mutations_;
 
+    void sweep_bindings() {
+        for (auto id : bound_nodes_) {
+            auto value = resolve(id);
+            if (!value)
+                continue;
+            auto &node = *value;
+            if (node.layout_binding.is_some() && !node.layout_binding->alive()) {
+                node.layout_strategy = None();
+                node.layout_binding = None();
+                changed(true, Some(id));
+            }
+            if (node.paint_binding.is_some() && !node.paint_binding->alive()) {
+                node.painter = None();
+                node.paint_binding = None();
+                node.paint_dirty = true;
+                changed(false);
+            }
+        }
+        bound_nodes_.retain([&](UiId id) {
+            auto node = resolve(id);
+            return node && (node->layout_binding.is_some() || node->paint_binding.is_some());
+        });
+    }
+    void track_binding(UiId id) {
+        for (auto node : bound_nodes_)
+            if (node == id)
+                return;
+        bound_nodes_.push(UiId(id));
+    }
     auto resolve(UiId id) -> Node * {
         if (!id.valid() || id.session != session_ || usize(id.slot) >= slots_.len())
             return nullptr;
@@ -341,6 +447,22 @@ class UiDocument {
         }
     }
     void changed(bool layout, Option<UiId> target = {}) {
+        if (target.is_some()) {
+            bool known{};
+            for (auto id : input_changes_)
+                known |= id == *target;
+            if (!known)
+                input_changes_.push(UiId(*target));
+            auto node = resolve(*target);
+            if (node && node->viewport.is_some())
+                for (auto child : node->children) {
+                    bool present{};
+                    for (auto changed_id : input_changes_)
+                        present |= changed_id == child;
+                    if (!present)
+                        input_changes_.push(UiId(child));
+                }
+        }
         if (revision_ == ~Serial{})
             rstd::panic("vui document revision exhausted");
         ++revision_;
@@ -389,6 +511,107 @@ class UiDocument {
         if (node.animated.background.is_some())
             result.background = *node.animated.background;
         return result;
+    }
+    static auto property_index(PresentationProperty property) -> unsigned {
+        return static_cast<unsigned>(property);
+    }
+    auto property_occupied(Node &node, PresentationProperty property) -> bool {
+        auto owner = node.property_owner[property_index(property)].upgrade();
+        return owner.is_some() && owner->get()->active && owner->get()->owner.alive() &&
+               (owner->get()->driver.is_none() || owner->get()->driver->alive());
+    }
+    void revoke_property(Node &node, PresentationProperty property) {
+        auto owner = node.property_owner[property_index(property)].upgrade();
+        if (owner.is_some())
+            owner->get()->active = false;
+        node.property_owner[property_index(property)] = {};
+    }
+    auto read_property(UiId id, Node &node, PresentationProperty property, bool base = false)
+        -> PropertyWrite {
+        auto style = base ? node.style : effective_style(node);
+        PropertyWrite result{{id, property}};
+        switch (property) {
+        case PresentationProperty::Transform:
+            result.value = AnimationValue::Matrix(style.transform);
+            break;
+        case PresentationProperty::Opacity:
+            result.value = AnimationValue::Number(style.opacity);
+            break;
+        case PresentationProperty::Width:
+            result.value = AnimationValue::Number(
+                style.layout.width.is_some() ? *style.layout.width : node.measured.width);
+            result.automatic_size = style.layout.width.is_none();
+            break;
+        case PresentationProperty::Height:
+            result.value = AnimationValue::Number(
+                style.layout.height.is_some() ? *style.layout.height : node.measured.height);
+            result.automatic_size = style.layout.height.is_none();
+            break;
+        case PresentationProperty::Background:
+            result.value = AnimationValue::Tint(style.background);
+            break;
+        case PresentationProperty::Clip:
+            result.clip = style.clip;
+            break;
+        case PresentationProperty::ViewportOffset:
+            result.point = node.viewport.is_some() ? (*node.viewport)->requested : Point{};
+            break;
+        }
+        return result;
+    }
+    auto valid_property(const PropertyWrite &write, const Node &node) const -> bool {
+        auto property = write.key.property;
+        if (property_index(property) >= 7)
+            return false;
+        if (write.automatic_size)
+            return property == PresentationProperty::Width ||
+                   property == PresentationProperty::Height;
+        if (property == PresentationProperty::Clip)
+            return write.clip.valid() && node.viewport.is_none();
+        if (property == PresentationProperty::ViewportOffset)
+            return node.viewport.is_some() && finite(write.point.x) && finite(write.point.y);
+        return write.value.valid(static_cast<AnimationProperty>(property_index(property)));
+    }
+    void apply_property(Node &node, const PropertyWrite &write) {
+        auto before = effective_style(node);
+        auto offset = node.viewport.is_some() ? (*node.viewport)->metrics.offset : Point{};
+        switch (write.key.property) {
+        case PresentationProperty::Transform:
+            node.style.transform = write.value.as_Matrix().value;
+            break;
+        case PresentationProperty::Opacity:
+            node.style.opacity = write.value.as_Number().value;
+            break;
+        case PresentationProperty::Width:
+            node.style.layout.width =
+                write.automatic_size ? None<Scalar>() : Some(Scalar(write.value.as_Number().value));
+            break;
+        case PresentationProperty::Height:
+            node.style.layout.height =
+                write.automatic_size ? None<Scalar>() : Some(Scalar(write.value.as_Number().value));
+            break;
+        case PresentationProperty::Background:
+            node.style.background = write.value.as_Tint().value;
+            break;
+        case PresentationProperty::Clip:
+            node.style.clip = write.clip;
+            break;
+        case PresentationProperty::ViewportOffset: {
+            auto &viewport = **node.viewport;
+            viewport.requested = write.point;
+            viewport.metrics.offset = {bounded(write.point.x, 0, Some(viewport.metrics.maximum.x)),
+                                       bounded(write.point.y, 0, Some(viewport.metrics.maximum.y))};
+            break;
+        }
+        }
+        auto after = effective_style(node);
+        auto next_offset = node.viewport.is_some() ? (*node.viewport)->metrics.offset : Point{};
+        if (before.background != after.background)
+            node.paint_dirty = true;
+        if (before.transform != after.transform || before.opacity != after.opacity ||
+            before.background != after.background || before.clip != after.clip ||
+            before.layout != after.layout || offset != next_offset)
+            changed(before.layout != after.layout, Some(UiId(write.key.target)));
     }
     auto animation_index(AnimationId id) const -> Option<usize> {
         for (usize i{}; i < animations_.len(); ++i)
@@ -467,7 +690,7 @@ class UiDocument {
     }
     auto start_animation(UiId id, AnimationProperty property, AnimationValue to,
                          AnimationOptions options) -> Result<AnimationId, AnimationError> {
-        if (layout_active_)
+        if ((layout_active_ || painting_))
             return Err(AnimationError::Reentrant);
         if (animations_closed_)
             return Err(AnimationError::Closed);
@@ -478,6 +701,7 @@ class UiDocument {
             return Err(AnimationError::InvalidValue);
         if (animation_reservations() >= usize(4096) || next_animation_ == ~Serial{})
             return Err(AnimationError::Limit);
+        revoke_property(*node, static_cast<PresentationProperty>(static_cast<unsigned>(property)));
         auto style = effective_style(*node);
         auto from = AnimationValue::Number(0);
         switch (property) {
@@ -525,6 +749,8 @@ class UiDocument {
         node.subtree_arrange_dirty = true;
         if (node.mount_generation == ~Serial{})
             rstd::panic("vui mount generation exhausted");
+        for (unsigned property{}; property < 7; ++property)
+            revoke_property(node, static_cast<PresentationProperty>(property));
         ++node.mount_generation;
         for (auto child : node.children)
             remount(child);
@@ -584,7 +810,20 @@ class UiDocument {
             for (usize j{}; j < node.children.len(); ++j)
                 visited.push(false);
         }
+        auto node_id() const -> UiId override { return id; }
+        auto style() const -> LayoutStyle override { return effective_style(node).layout; }
+        auto child_relation(usize index) const -> Result<UiRelation, UiError> override {
+            if (index >= node.children.len())
+                return Err(UiError::MissingChild);
+            auto child = node.children[index];
+            return Ok(UiRelation{id, child, document.resolve(child)->relation_generation});
+        }
         auto child_count() const -> usize override { return node.children.len(); }
+        auto child_id(usize index) const -> Result<UiId, UiError> override {
+            if (index >= node.children.len())
+                return Err(UiError::MissingChild);
+            return Ok(UiId(node.children[index]));
+        }
         auto measure_child(usize index, LayoutConstraints constraints)
             -> Result<Size, UiError> override {
             if (error.is_some())
@@ -620,7 +859,20 @@ class UiDocument {
             for (usize j{}; j < node.children.len(); ++j)
                 visited.push(false);
         }
+        auto node_id() const -> UiId override { return id; }
+        auto style() const -> LayoutStyle override { return effective_style(node).layout; }
+        auto child_relation(usize index) const -> Result<UiRelation, UiError> override {
+            if (index >= node.children.len())
+                return Err(UiError::MissingChild);
+            auto child = node.children[index];
+            return Ok(UiRelation{id, child, document.resolve(child)->relation_generation});
+        }
         auto child_count() const -> usize override { return node.children.len(); }
+        auto child_id(usize index) const -> Result<UiId, UiError> override {
+            if (index >= node.children.len())
+                return Err(UiError::MissingChild);
+            return Ok(UiId(node.children[index]));
+        }
         auto desired_child(usize index) -> Result<Size, UiError> override {
             if (error.is_some())
                 return Err(*error);
@@ -701,15 +953,17 @@ class UiDocument {
             if (text_service_.is_none())
                 return Some(UiError::TextServiceMissing);
             auto &text = **node.text;
-            auto wrap_width = text.wrap == TextWrap::None && text.alignment == TextAlignment::Natural
-                                  ? None<Scalar>() : inner.max_width;
+            auto wrap_width =
+                text.wrap == TextWrap::None && text.alignment == TextAlignment::Natural
+                    ? None<Scalar>()
+                    : inner.max_width;
             if (text.dirty || text.layout.is_none() || text.width != wrap_width) {
                 ++stats_.text_layouts;
-                auto result = (*text_service_)
-                                  ->layout({text.value.as_str(), text.family.as_str(),
-                                            text.language.as_str(), text.size, wrap_width,
-                                            text.direction, text.wrap, text.bold, text.italic,
-                                            text.alignment, text.line_spacing});
+                auto result =
+                    (*text_service_)
+                        ->layout({text.value.as_str(), text.family.as_str(), text.language.as_str(),
+                                  text.size, wrap_width, text.direction, text.wrap, text.bold,
+                                  text.italic, text.alignment, text.line_spacing});
                 if (result.is_err()) {
                     text.error = Some(result.unwrap_err());
                     return Some(UiError::TextLayoutFailed);
@@ -726,7 +980,8 @@ class UiDocument {
         if (node.image.is_some() && (*node.image)->data.is_some())
             desired = (*node.image)->data->natural_size();
 
-        if (node.kind == LayoutKind::Custom) {
+        if (node.layout_strategy.is_some() || node.kind == LayoutKind::Custom ||
+            (node.kind == LayoutKind::Item && !node.children.is_empty())) {
             if (node.layout_strategy.is_none())
                 return layout_failure(id, LayoutIssue::Strategy);
             MeasureContext context(*this, node, id, depth);
@@ -838,7 +1093,7 @@ class UiDocument {
                          slot.y + aligned_offset(slot.height - height, style.vertical)};
         Size inner{limit(width - 2 * style.padding, width),
                    limit(height - 2 * style.padding, height)};
-        if (visit_children && node.kind == LayoutKind::Custom) {
+        if (visit_children && node.layout_strategy.is_some()) {
             ArrangeContext context(*this, node, id, depth, style.padding);
             auto result = (*node.layout_strategy)->arrange(context, inner);
             if (context.error.is_some())
@@ -904,7 +1159,12 @@ class UiDocument {
                                 image.fit)
                         .unwrap());
     }
-    void paint(Node &node) {
+    auto paint(UiId id, Node &node) -> Option<UiError> {
+        painting_ = true;
+        struct Guard {
+            bool &active;
+            ~Guard() { active = false; }
+        } guard{painting_};
         CpuTimer timer(active_timings_ ? &active_timings_->paint : nullptr);
         DisplayListRecorder recorder;
         auto style = effective_style(node);
@@ -932,21 +1192,38 @@ class UiDocument {
             else
                 recorder.rect(box, scene.placeholder);
         }
-        if (node.kind != LayoutKind::Leaf && node.kind != LayoutKind::Text &&
-            node.kind != LayoutKind::Image && node.kind != LayoutKind::Scene)
+        bool repaint{};
+        if (node.painter.is_some()) {
+            PaintContext context(id, node.measured, recorder, style);
+            auto result = (*node.painter)->paint(context);
+            if (result.is_err()) {
+                paint_diagnostics_.push({id, {}, result.unwrap_err()});
+                return Some(result.unwrap_err());
+            }
+            repaint = context.repaint_requested();
+        } else if (node.kind != LayoutKind::Leaf && node.kind != LayoutKind::Text &&
+                   node.kind != LayoutKind::Image && node.kind != LayoutKind::Scene) {
             recorder.children();
-        node.content = rstd::move(recorder).finish().unwrap();
-        node.paint_dirty = false;
+        }
+        auto recorded = rstd::move(recorder).finish();
+        if (recorded.is_err()) {
+            paint_diagnostics_.push({id, Some(recorded.unwrap_err()), UiError::PaintFailed});
+            return Some(UiError::PaintFailed);
+        }
+        auto content = rstd::move(recorded).unwrap();
+        if (!node.children.is_empty() && !content.has_children()) {
+            paint_diagnostics_.push({id, {}, UiError::MissingChild});
+            return Some(UiError::PaintFailed);
+        }
+        node.content = rstd::move(content);
+        node.paint_dirty = repaint;
+        if (repaint)
+            changed(false);
         ++stats_.recordings;
+        return None();
     }
-    auto collect(UiId id, UiUpdate::Data &output, Index depth) -> Option<UiError> {
-        if (depth >= depth_limit_)
-            return Some(UiError::Limit);
+    auto make_visual(UiId id) -> Result<UiVisual, UiError> {
         auto &node = *resolve(id);
-        if (node.constraint_conflict)
-            layout_diagnostics_.push(LayoutDiagnostic{id, LayoutIssue::ConstraintConflict});
-        if (node.paint_dirty)
-            paint(node);
         Transform placement;
         placement.tx = node.position.x;
         placement.ty = node.position.y;
@@ -966,6 +1243,13 @@ class UiDocument {
         }
         Rect layout_bounds{0, 0, node.measured.width, node.measured.height};
         auto content_bounds = layout_bounds;
+        if (auto extent = node.content.bounds(); extent.is_some()) {
+            auto left = rstd::cmp::min(Scalar(0), extent->x),
+                 top = rstd::cmp::min(Scalar(0), extent->y);
+            content_bounds = {
+                left, top, rstd::cmp::max(layout_bounds.width, extent->x + extent->width) - left,
+                rstd::cmp::max(layout_bounds.height, extent->y + extent->height) - top};
+        }
         if (node.text.is_some() && (*node.text)->layout.is_some()) {
             auto ink = (*node.text)->layout->ink_bounds();
             auto origin = text_origin(node);
@@ -982,25 +1266,47 @@ class UiDocument {
         RenderProperties properties{placement * style.transform, content_bounds, clip,
                                     style.opacity, style.visible};
         if (!properties.valid())
-            return Some(UiError::InvalidValue);
-        UiVisual visual{id,
-                        properties,
-                        node.content,
-                        {},
-                        node.style.hit_test_visible,
-                        node.style.enabled,
-                        node.style.focusable,
-                        node.parent,
-                        node.mount_generation,
-                        node.viewport.is_some() ? Some(ViewportMetrics((*node.viewport)->metrics))
-                                                : None<ViewportMetrics>(),
-                        layout_bounds};
+            return Err(UiError::InvalidValue);
+        UiVisual visual{
+            id,
+            properties,
+            node.content,
+            {},
+            node.style.hit_test_visible,
+            node.style.enabled,
+            node.style.focusable,
+            node.parent,
+            node.mount_generation,
+            node.viewport.is_some() ? Some(ViewportMetrics((*node.viewport)->metrics))
+                                    : None<ViewportMetrics>(),
+            layout_bounds,
+            {node.position.x, node.position.y, node.measured.width, node.measured.height},
+            node.arranged_slot};
         for (auto child : node.children)
             visual.children.push(UiId(child));
+        return Ok(rstd::move(visual));
+    }
+    auto collect(UiId id, UiUpdate::Data &output, Index depth, bool recording = true)
+        -> Option<UiError> {
+        ++stats_.collected_nodes;
+        if (depth >= depth_limit_)
+            return Some(UiError::Limit);
+        auto &node = *resolve(id);
+        if (node.constraint_conflict)
+            layout_diagnostics_.push(LayoutDiagnostic{id, LayoutIssue::ConstraintConflict});
+        if (recording && node.paint_dirty) {
+            auto error = paint(id, node);
+            if (error.is_some())
+                return error;
+        }
+        auto built = make_visual(id);
+        if (built.is_err())
+            return Some(built.unwrap_err());
+        auto visual = rstd::move(built).unwrap();
         output.indices[usize(id.slot)] = static_cast<Index>(output.visuals.len().to_primitive());
         output.visuals.push(rstd::move(visual));
         for (auto child : node.children) {
-            auto error = collect(child, output, depth + 1);
+            auto error = collect(child, output, depth + 1, recording);
             if (error.is_some())
                 return error;
         }
@@ -1008,6 +1314,10 @@ class UiDocument {
     }
     void erase(UiId id) {
         auto &slot = slots_[usize(id.slot)];
+        if (slot.node->layout_binding.is_some())
+            slot.node->layout_binding->disconnect();
+        if (slot.node->paint_binding.is_some())
+            slot.node->paint_binding->disconnect();
         auto children = rstd::move(slot.node->children);
         for (auto child : children)
             erase(child);
@@ -1035,10 +1345,24 @@ class UiDocument {
     UiDocument(const UiDocument &) = delete;
     auto operator=(const UiDocument &) -> UiDocument & = delete;
     auto session() const -> Serial { return session_; }
+    auto bindings() -> BindingRegistry & { return bindings_; }
+    auto paint_diagnostics() const -> slice<PaintDiagnostic> {
+        return paint_diagnostics_.as_slice();
+    }
+    auto invalidate_paint(UiId id) -> Result<empty, UiError> {
+        if (layout_active_ || painting_)
+            return Err(UiError::Routing);
+        auto node = resolve(id);
+        if (!node)
+            return Err(UiError::InvalidId);
+        node->paint_dirty = true;
+        changed(false);
+        return Ok(empty{});
+    }
     auto revision() const -> Serial { return revision_; }
     auto routing() const -> bool { return routing_; }
     auto can_route() const -> bool {
-        return !routing_ && !draining_ && !animation_dispatching_ && !layout_active_;
+        return !routing_ && !draining_ && !animation_dispatching_ && !layout_active_ && !painting_;
     }
     auto acquire_route() -> Result<RouteScope, UiError> {
         if (!can_route())
@@ -1048,7 +1372,7 @@ class UiDocument {
     }
     auto pending_mutations() const -> usize { return mutations_.len(); }
     auto cancel_mutations() -> Result<Vec<MutationResult>, UiError> {
-        if (routing_ || draining_ || animation_dispatching_ || layout_active_)
+        if (routing_ || draining_ || animation_dispatching_ || (layout_active_ || painting_))
             return Err(UiError::Routing);
         auto pending = rstd::exchange(mutations_, Vec<Box<Mutation>>{});
         Vec<MutationResult> results;
@@ -1057,7 +1381,7 @@ class UiDocument {
         return Ok(rstd::move(results));
     }
     template <class F> auto defer(F callback) -> Result<Serial, UiError> {
-        if (layout_active_)
+        if ((layout_active_ || painting_))
             return Err(UiError::Routing);
         if (mutations_.len() >= usize(1024) || next_mutation_ == ~Serial{})
             return Err(UiError::Limit);
@@ -1067,8 +1391,40 @@ class UiDocument {
             Box<Mutation>::from_raw(rstd::move(item).into_raw().template cast<Mutation>()));
         return Ok(id);
     }
+    template <class F>
+    auto defer(UiId target, BindingGuard guard, F callback) -> Result<Serial, UiError> {
+        auto mount = mount_state(target);
+        if (mount.is_err())
+            return Err(mount.unwrap_err());
+        auto generation = mount.unwrap().generation;
+        return defer([target, generation, guard, callback = rstd::move(callback)](
+                         UiDocument &document) mutable -> Result<empty, UiError> {
+            auto current = document.mount_state(target);
+            if (!guard.alive() || current.is_err() || current.unwrap().generation != generation)
+                return Err(UiError::Cancelled);
+            return callback(document);
+        });
+    }
+    template <class T, class F>
+    auto defer(UiId target, BindingGuard guard, rstd::rc::Weak<T> receiver, F callback)
+        -> Result<Serial, UiError> {
+        auto mount = mount_state(target);
+        if (mount.is_err())
+            return Err(mount.unwrap_err());
+        auto generation = mount.unwrap().generation;
+        return defer([target, generation, guard, receiver = rstd::move(receiver),
+                      callback = rstd::move(callback)](
+                         UiDocument &document) mutable -> Result<empty, UiError> {
+            auto current = document.mount_state(target);
+            auto value = receiver.upgrade();
+            if (!guard.alive() || value.is_none() || current.is_err() ||
+                current.unwrap().generation != generation)
+                return Err(UiError::Cancelled);
+            return callback(*value->get(), document);
+        });
+    }
     auto flush_mutations() -> Result<Vec<MutationResult>, UiError> {
-        if (routing_ || draining_ || animation_dispatching_ || layout_active_)
+        if (routing_ || draining_ || animation_dispatching_ || (layout_active_ || painting_))
             return Err(UiError::Routing);
         draining_ = true;
         auto pending = rstd::exchange(mutations_, Vec<Box<Mutation>>{});
@@ -1088,7 +1444,7 @@ class UiDocument {
         return slot.generation == id.generation && slot.node.is_some();
     }
     template <class T> auto attach_state(UiId id, T value) -> Result<empty, UiError> {
-        if (routing_ || layout_active_)
+        if (routing_ || (layout_active_ || painting_))
             return Err(UiError::Routing);
         auto node = resolve(id);
         if (!node)
@@ -1107,7 +1463,7 @@ class UiDocument {
         return &static_cast<StoredState<T> &>(**node->state).value;
     }
     template <class T> auto create(NodeStyle style = {}) -> Result<UiId, UiError> {
-        if (routing_ || layout_active_)
+        if (routing_ || (layout_active_ || painting_))
             return Err(UiError::Routing);
         if (!style.valid() || (T::layout == LayoutKind::Viewport && style.clip.enabled))
             return Err(UiError::InvalidValue);
@@ -1133,7 +1489,7 @@ class UiDocument {
             UiId{session_, static_cast<Index>(index.to_primitive()), slots_[index].generation});
     }
     auto attach(UiId parent, UiId child) -> Result<empty, UiError> {
-        if (routing_ || layout_active_)
+        if (routing_ || (layout_active_ || painting_))
             return Err(UiError::Routing);
         auto p = resolve(parent), c = resolve(child);
         if (!p || !c)
@@ -1174,6 +1530,7 @@ class UiDocument {
             auto previous = resolve(*c->parent);
             previous->children.retain([&](UiId value) { return value != child; });
         }
+        ++c->relation_generation;
         c->parent = Some(parent);
         p->children.push(UiId(child));
         remount(child);
@@ -1195,7 +1552,7 @@ class UiDocument {
         return Ok(id);
     }
     auto mount(UiId root) -> Result<empty, UiError> {
-        if (routing_ || layout_active_)
+        if (routing_ || (layout_active_ || painting_))
             return Err(UiError::Routing);
         auto node = resolve(root);
         if (!node)
@@ -1213,13 +1570,14 @@ class UiDocument {
         return Ok(empty{});
     }
     auto detach(UiId id) -> Result<empty, UiError> {
-        if (routing_ || layout_active_)
+        if (routing_ || (layout_active_ || painting_))
             return Err(UiError::Routing);
         auto node = resolve(id);
         if (!node)
             return Err(UiError::InvalidId);
         remount(id);
         if (node->parent.is_some()) {
+            ++node->relation_generation;
             dirty_measure(*node->parent);
             resolve(*node->parent)->children.retain([&](UiId child) { return child != id; });
             node->parent = None();
@@ -1237,7 +1595,7 @@ class UiDocument {
         return Ok(empty{});
     }
     auto reorder(UiId parent, UiId child, usize destination) -> Result<empty, UiError> {
-        if (routing_ || layout_active_)
+        if (routing_ || (layout_active_ || painting_))
             return Err(UiError::Routing);
         auto node = resolve(parent);
         if (!node)
@@ -1267,6 +1625,127 @@ class UiDocument {
         if (!node)
             return Err(UiError::InvalidId);
         return Ok(UiMountState{mounted(id), node->mount_generation});
+    }
+    auto take_over(slice<PropertyKey> keys, TakeoverPolicy policy = TakeoverPolicy::PreserveCurrent)
+        -> Result<PresentationLease, UiError> {
+        if (layout_active_ || painting_)
+            return Err(UiError::Routing);
+        if (keys.is_empty() || keys.len() > usize(256) || !lease_owner_.alive())
+            return Err(UiError::InvalidValue);
+        if (next_lease_ == ~Serial{})
+            return Err(UiError::Limit);
+        for (usize i{}; i < keys.len(); ++i) {
+            auto node = resolve(keys[i].target);
+            if (!node || !mounted(keys[i].target))
+                return Err(UiError::InvalidId);
+            if (property_index(keys[i].property) >= 7)
+                return Err(UiError::InvalidValue);
+            for (usize j{}; j < i; ++j)
+                if (keys[j] == keys[i])
+                    return Err(UiError::InvalidValue);
+            if ((keys[i].property == PresentationProperty::Width ||
+                 keys[i].property == PresentationProperty::Height) &&
+                layout_dirty_)
+                return Err(UiError::LayoutPending);
+            if (keys[i].property == PresentationProperty::ViewportOffset &&
+                node->viewport.is_none())
+                return Err(UiError::InvalidValue);
+            if (keys[i].property == PresentationProperty::Clip && node->viewport.is_some())
+                return Err(UiError::InvalidValue);
+            if (policy == TakeoverPolicy::RejectOccupied) {
+                if (property_occupied(*node, keys[i].property))
+                    return Err(UiError::PropertyOwned);
+                for (const auto &animation : animations_)
+                    if (animation.state.target == keys[i].target &&
+                        property_index(keys[i].property) ==
+                            static_cast<unsigned>(animation.state.property))
+                        return Err(UiError::PropertyOwned);
+            }
+        }
+        auto state = rstd::rc::make_rc<PropertyLeaseState>();
+        auto stored = state.get();
+        stored->document = session_;
+        stored->id = next_lease_++;
+        stored->owner = lease_owner_.guard();
+        for (const auto &key : keys) {
+            auto &node = *resolve(key.target);
+            stored->keys.push(PropertyKey(key));
+            stored->mounts.push(Serial(node.mount_generation));
+            stored->originals.push(read_property(key.target, node, key.property, true));
+            auto current = read_property(key.target, node, key.property);
+            stored->current.push(PropertyWrite(current));
+            revoke_property(node, key.property);
+            for (auto i = animations_.len(); i > usize(); --i) {
+                auto &animation = animations_[i - usize(1)];
+                if (animation.state.target == key.target &&
+                    property_index(key.property) == static_cast<unsigned>(animation.state.property))
+                    end_animation(i - usize(1), AnimationEndReason::Replaced, true);
+            }
+            apply_property(node, current);
+            node.property_owner[property_index(key.property)] = state.downgrade();
+        }
+        return Ok(PresentationLease(rstd::move(state)));
+    }
+    auto write_presentation(PresentationLease &lease, const PresentationBatch &batch,
+                            Option<BindingGuard> driver = {}) -> Result<empty, UiError> {
+        if (layout_active_ || painting_)
+            return Err(UiError::Routing);
+        if (!lease.active() || lease.state_.get()->document != session_)
+            return Err(UiError::PropertyOwned);
+        if (driver.is_some() && !driver->alive())
+            return Err(UiError::PropertyOwned);
+        auto state = lease.state_.get();
+        if (driver.is_some() && state->driver.is_some() && !driver->same_binding(*state->driver))
+            return Err(UiError::PropertyOwned);
+        for (usize i{}; i < state->keys.len(); ++i) {
+            auto node = resolve(state->keys[i].target);
+            if (!node || node->mount_generation != state->mounts[i])
+                return Err(UiError::InvalidId);
+            auto owner = node->property_owner[property_index(state->keys[i].property)].upgrade();
+            if (owner.is_none() || owner->get() != state)
+                return Err(UiError::PropertyOwned);
+        }
+        for (usize i{}; i < batch.writes().len(); ++i) {
+            const auto &write = batch.writes()[i];
+            auto node = resolve(write.key.target);
+            if (!node || !valid_property(write, *node))
+                return Err(UiError::InvalidValue);
+            bool found{};
+            for (const auto &key : state->keys)
+                found |= key == write.key;
+            if (!found)
+                return Err(UiError::PropertyOwned);
+            for (usize j{}; j < i; ++j)
+                if (batch.writes()[j].key == write.key)
+                    return Err(UiError::InvalidValue);
+        }
+        if (driver.is_some())
+            state->driver = rstd::move(driver);
+        for (const auto &write : batch.writes()) {
+            auto &node = *resolve(write.key.target);
+            apply_property(node, write);
+            for (auto &current : state->current)
+                if (current.key == write.key)
+                    current = write;
+        }
+        return Ok(empty{});
+    }
+    auto release_presentation(PresentationLease &lease,
+                              LeaseEndPolicy policy = LeaseEndPolicy::CommitCurrent)
+        -> Result<empty, UiError> {
+        if (layout_active_ || painting_)
+            return Err(UiError::Routing);
+        if (!lease.active() || lease.state_.get()->document != session_)
+            return Err(UiError::PropertyOwned);
+        if (policy == LeaseEndPolicy::RestoreBase) {
+            for (const auto &write : lease.state_.get()->originals)
+                if (!resolve(write.key.target))
+                    return Err(UiError::InvalidId);
+            for (const auto &write : lease.state_.get()->originals)
+                apply_property(*resolve(write.key.target), write);
+        }
+        lease.revoke();
+        return Ok(empty{});
     }
     auto base_style(UiId id) -> Result<NodeStyle, UiError> {
         auto node = resolve(id);
@@ -1310,7 +1789,7 @@ class UiDocument {
     }
     auto retarget_animation(AnimationId id, AnimationValue to, AnimationOptions options)
         -> Result<empty, AnimationError> {
-        if (layout_active_)
+        if ((layout_active_ || painting_))
             return Err(AnimationError::Reentrant);
         if (animations_closed_)
             return Err(AnimationError::Closed);
@@ -1333,7 +1812,7 @@ class UiDocument {
         return retarget_animation(id, rstd::move(to), animations_[*index].state.options);
     }
     auto cancel_animation(AnimationId id) -> Result<empty, AnimationError> {
-        if (layout_active_)
+        if ((layout_active_ || painting_))
             return Err(AnimationError::Reentrant);
         auto index = animation_index(id);
         if (index.is_none())
@@ -1343,7 +1822,7 @@ class UiDocument {
     }
     template <class F>
     auto on_animation_end(AnimationId id, F callback) -> Result<empty, AnimationError> {
-        if (layout_active_)
+        if ((layout_active_ || painting_))
             return Err(AnimationError::Reentrant);
         auto index = animation_index(id);
         if (index.is_none())
@@ -1352,6 +1831,38 @@ class UiDocument {
         animations_[*index].callback = Some(Box<AnimationCallback>::from_raw(
             rstd::move(item).into_raw().template cast<AnimationCallback>()));
         return Ok(empty{});
+    }
+    template <class F>
+    auto on_animation_end(AnimationId id, BindingGuard guard, F callback)
+        -> Result<empty, AnimationError> {
+        return on_animation_end(id, [guard, callback = rstd::move(callback)](
+                                        UiDocument &document, const AnimationEvent &event) mutable {
+            if (!guard.alive())
+                return;
+            if (event.reason == AnimationEndReason::Finished) {
+                auto mount = document.mount_state(event.target);
+                if (mount.is_err() || mount.unwrap().generation != event.mount_generation)
+                    return;
+            }
+            callback(document, event);
+        });
+    }
+    template <class T, class F>
+    auto on_animation_end(AnimationId id, BindingGuard guard, rstd::rc::Weak<T> receiver,
+                          F callback) -> Result<empty, AnimationError> {
+        return on_animation_end(
+            id, [guard, receiver = rstd::move(receiver), callback = rstd::move(callback)](
+                    UiDocument &document, const AnimationEvent &event) mutable {
+                auto value = receiver.upgrade();
+                if (!guard.alive() || value.is_none())
+                    return;
+                if (event.reason == AnimationEndReason::Finished) {
+                    auto mount = document.mount_state(event.target);
+                    if (mount.is_err() || mount.unwrap().generation != event.mount_generation)
+                        return;
+                }
+                callback(*value->get(), document, event);
+            });
     }
     auto animations_active() const -> bool { return !animations_.is_empty(); }
     auto animation_sample_time() const -> Option<Serial> { return animation_time_; }
@@ -1362,7 +1873,7 @@ class UiDocument {
     auto sample_animations(Serial time) -> Result<empty, AnimationError> {
         if (!can_route())
             return Err(AnimationError::Reentrant);
-        if (layout_active_)
+        if ((layout_active_ || painting_))
             return Err(AnimationError::Reentrant);
         if (animations_closed_)
             return Ok(empty{});
@@ -1391,7 +1902,7 @@ class UiDocument {
         return Ok(empty{});
     }
     auto dispatch_animation_callbacks() -> Result<empty, AnimationError> {
-        if (routing_ || draining_ || animation_dispatching_ || layout_active_)
+        if (routing_ || draining_ || animation_dispatching_ || (layout_active_ || painting_))
             return Err(AnimationError::Reentrant);
         animation_dispatching_ = true;
         auto pending = rstd::exchange(animation_completions_, Vec<AnimationCompletion>{});
@@ -1414,7 +1925,7 @@ class UiDocument {
         return dispatch_animation_callbacks();
     }
     auto set_scene_source(UiId id, Option<ContentSource> source) -> Result<empty, UiError> {
-        if (layout_active_)
+        if ((layout_active_ || painting_))
             return Err(UiError::Routing);
         auto node = resolve(id);
         if (!node)
@@ -1433,7 +1944,7 @@ class UiDocument {
     auto set_scene_presentation(UiId id, ImageFit fit, ImageSampling sampling,
                                 Color placeholder = {0.15, 0.15, 0.15, 1})
         -> Result<empty, UiError> {
-        if (layout_active_)
+        if ((layout_active_ || painting_))
             return Err(UiError::Routing);
         auto node = resolve(id);
         if (!node)
@@ -1476,7 +1987,7 @@ class UiDocument {
         return Ok(Some(ScenePlacement{info, placed.unwrap()}));
     }
     auto set_image(UiId id, Option<ImageData> data) -> Result<empty, UiError> {
-        if (layout_active_)
+        if ((layout_active_ || painting_))
             return Err(UiError::Routing);
         auto node = resolve(id);
         if (!node)
@@ -1495,7 +2006,7 @@ class UiDocument {
         return Ok(empty{});
     }
     auto set_image_fit(UiId id, ImageFit fit) -> Result<empty, UiError> {
-        if (layout_active_)
+        if ((layout_active_ || painting_))
             return Err(UiError::Routing);
         auto node = resolve(id);
         if (!node)
@@ -1511,7 +2022,7 @@ class UiDocument {
         return Ok(empty{});
     }
     auto set_image_sampling(UiId id, ImageSampling sampling) -> Result<empty, UiError> {
-        if (layout_active_)
+        if ((layout_active_ || painting_))
             return Err(UiError::Routing);
         auto node = resolve(id);
         if (!node)
@@ -1537,13 +2048,13 @@ class UiDocument {
         return Ok(place_image_content(*node));
     }
     auto set_text_service(Box<TextService> service) -> Result<empty, UiError> {
-        if (routing_ || layout_active_)
+        if (routing_ || (layout_active_ || painting_))
             return Err(UiError::Routing);
         text_service_ = Some(rstd::move(service));
         return text_fonts_changed();
     }
     auto text_fonts_changed() -> Result<empty, UiError> {
-        if (routing_ || layout_active_)
+        if (routing_ || (layout_active_ || painting_))
             return Err(UiError::Routing);
         for (usize index{}; index < slots_.len(); ++index) {
             auto &slot = slots_[index];
@@ -1558,7 +2069,7 @@ class UiDocument {
         return Ok(empty{});
     }
     auto set_text(UiId id, ref<str> value) -> Result<empty, UiError> {
-        if (layout_active_)
+        if ((layout_active_ || painting_))
             return Err(UiError::Routing);
         auto node = resolve(id);
         if (!node)
@@ -1574,7 +2085,7 @@ class UiDocument {
         return Ok(empty{});
     }
     auto set_text_format(UiId id, TextFormat format) -> Result<empty, UiError> {
-        if (layout_active_)
+        if ((layout_active_ || painting_))
             return Err(UiError::Routing);
         auto node = resolve(id);
         if (!node)
@@ -1601,7 +2112,7 @@ class UiDocument {
         return Ok(empty{});
     }
     auto set_text_color(UiId id, Color color) -> Result<empty, UiError> {
-        if (layout_active_)
+        if ((layout_active_ || painting_))
             return Err(UiError::Routing);
         auto node = resolve(id);
         if (!node)
@@ -1641,20 +2152,136 @@ class UiDocument {
             return Err(UiError::InvalidValue);
         return Ok(Option<TextError>((*node->text)->error));
     }
-    auto set_layout_strategy(UiId id, Box<LayoutStrategy> strategy) -> Result<empty, UiError> {
-        if (layout_active_ || routing_)
+    template <class T>
+        requires rstd::Impled<T, Layout>
+    auto install_layout(UiId id, T strategy) -> Result<empty, UiError> {
+        if (layout_active_ || painting_ || routing_)
             return Err(UiError::Routing);
         auto node = resolve(id);
         if (!node)
             return Err(UiError::InvalidId);
-        if (node->kind != LayoutKind::Custom)
-            return Err(UiError::InvalidValue);
-        node->layout_strategy = Some(rstd::move(strategy));
+        node->layout_strategy = Some(Box<rstd::dyn<Layout>>::make(rstd::move(strategy)));
+        node->layout_binding = None();
         changed(true, Some(id));
         return Ok(empty{});
     }
+    auto set_layout_strategy(UiId id, Box<LayoutStrategy> strategy) -> Result<empty, UiError> {
+        struct Adapter {
+            Box<LayoutStrategy> strategy;
+            auto measure(LayoutMeasureContext &context, LayoutConstraints c)
+                -> Result<Size, UiError> {
+                return strategy->measure(context, c);
+            }
+            auto arrange(LayoutArrangeContext &context, Size size) -> Result<empty, UiError> {
+                return strategy->arrange(context, size);
+            }
+        };
+        return install_layout(id, Adapter{rstd::move(strategy)});
+    }
+    template <class T>
+        requires rstd::Impled<T, Layout>
+    auto attach_layout(UiId id) -> Result<empty, UiError> {
+        if (!state<T>(id))
+            return Err(UiError::InvalidId);
+        struct Adapter {
+            UiDocument *document;
+            UiId id;
+            auto measure(LayoutMeasureContext &context, LayoutConstraints c)
+                -> Result<Size, UiError> {
+                auto receiver = document->state<T>(id);
+                if (!receiver)
+                    return Err(UiError::Cancelled);
+                return rstd::as<Layout>(*receiver).measure(context, c);
+            }
+            auto arrange(LayoutArrangeContext &context, Size size) -> Result<empty, UiError> {
+                auto receiver = document->state<T>(id);
+                if (!receiver)
+                    return Err(UiError::Cancelled);
+                return rstd::as<Layout>(*receiver).arrange(context, size);
+            }
+        };
+        return install_layout(id, Adapter{this, id});
+    }
+    template <class T>
+        requires rstd::Impled<T, Layout>
+    auto bind_layout(UiId id, rstd::rc::Weak<T> receiver) -> Result<Binding, UiError> {
+        auto binding = bindings_.make(receiver);
+        struct Adapter {
+            rstd::rc::Weak<T> receiver;
+            BindingGuard guard;
+            auto measure(LayoutMeasureContext &context, LayoutConstraints c)
+                -> Result<Size, UiError> {
+                auto value = receiver.upgrade();
+                if (!guard.alive() || value.is_none())
+                    return Err(UiError::Cancelled);
+                return rstd::as<Layout>(*value->get()).measure(context, c);
+            }
+            auto arrange(LayoutArrangeContext &context, Size size) -> Result<empty, UiError> {
+                auto value = receiver.upgrade();
+                if (!guard.alive() || value.is_none())
+                    return Err(UiError::Cancelled);
+                return rstd::as<Layout>(*value->get()).arrange(context, size);
+            }
+        };
+        auto result = install_layout(id, Adapter{rstd::move(receiver), binding.guard()});
+        if (result.is_err())
+            return Err(result.unwrap_err());
+        resolve(id)->layout_binding = Some(binding.guard());
+        track_binding(id);
+        return Ok(rstd::move(binding));
+    }
+    template <class T>
+        requires rstd::Impled<T, Paint>
+    auto install_paint(UiId id, T painter) -> Result<empty, UiError> {
+        if (layout_active_ || painting_ || routing_)
+            return Err(UiError::Routing);
+        auto node = resolve(id);
+        if (!node)
+            return Err(UiError::InvalidId);
+        node->painter = Some(Box<rstd::dyn<Paint>>::make(rstd::move(painter)));
+        node->paint_binding = None();
+        return invalidate_paint(id);
+    }
+    template <class T>
+        requires rstd::Impled<T, Paint>
+    auto attach_paint(UiId id) -> Result<empty, UiError> {
+        if (!state<T>(id))
+            return Err(UiError::InvalidId);
+        struct Adapter {
+            UiDocument *document;
+            UiId id;
+            auto paint(PaintContext &context) -> Result<empty, UiError> {
+                auto receiver = document->state<T>(id);
+                if (!receiver)
+                    return Err(UiError::Cancelled);
+                return rstd::as<Paint>(*receiver).paint(context);
+            }
+        };
+        return install_paint(id, Adapter{this, id});
+    }
+    template <class T>
+        requires rstd::Impled<T, Paint>
+    auto bind_paint(UiId id, rstd::rc::Weak<T> receiver) -> Result<Binding, UiError> {
+        auto binding = bindings_.make(receiver);
+        struct Adapter {
+            rstd::rc::Weak<T> receiver;
+            BindingGuard guard;
+            auto paint(PaintContext &context) -> Result<empty, UiError> {
+                auto value = receiver.upgrade();
+                if (!guard.alive() || value.is_none())
+                    return Err(UiError::Cancelled);
+                return rstd::as<Paint>(*value->get()).paint(context);
+            }
+        };
+        auto result = install_paint(id, Adapter{rstd::move(receiver), binding.guard()});
+        if (result.is_err())
+            return Err(result.unwrap_err());
+        resolve(id)->paint_binding = Some(binding.guard());
+        track_binding(id);
+        return Ok(rstd::move(binding));
+    }
     auto invalidate_layout(UiId id) -> Result<empty, UiError> {
-        if (layout_active_)
+        if ((layout_active_ || painting_))
             return Err(UiError::Routing);
         if (!resolve(id))
             return Err(UiError::InvalidId);
@@ -1665,11 +2292,16 @@ class UiDocument {
         return layout_diagnostics_.as_slice();
     }
     auto set_layout(UiId id, LayoutStyle value) -> Result<empty, UiError> {
-        if (layout_active_)
+        if ((layout_active_ || painting_))
             return Err(UiError::Routing);
         auto node = resolve(id);
         if (!node)
             return Err(UiError::InvalidId);
+        if ((property_occupied(*node, PresentationProperty::Width) &&
+             value.width != node->style.layout.width) ||
+            (property_occupied(*node, PresentationProperty::Height) &&
+             value.height != node->style.layout.height))
+            return Err(UiError::PropertyOwned);
         if (!value.valid())
             return Err(UiError::InvalidValue);
         auto before = effective_style(*node);
@@ -1694,11 +2326,13 @@ class UiDocument {
         return Ok(empty{});
     }
     auto set_background(UiId id, Color value, Scalar radius = 0) -> Result<empty, UiError> {
-        if (layout_active_)
+        if ((layout_active_ || painting_))
             return Err(UiError::Routing);
         auto node = resolve(id);
         if (!node)
             return Err(UiError::InvalidId);
+        if (property_occupied(*node, PresentationProperty::Background))
+            return Err(UiError::PropertyOwned);
         if (!value.valid() || !finite(radius) || radius < 0)
             return Err(UiError::InvalidValue);
         auto before = effective_style(*node);
@@ -1707,44 +2341,50 @@ class UiDocument {
         auto after = effective_style(*node);
         if (before.background != after.background || before.radius != after.radius) {
             node->paint_dirty = true;
-            changed(false);
+            changed(false, Some(id));
         }
         return Ok(empty{});
     }
     auto set_transform(UiId id, Transform value) -> Result<empty, UiError> {
-        if (layout_active_)
+        if ((layout_active_ || painting_))
             return Err(UiError::Routing);
         auto node = resolve(id);
         if (!node)
             return Err(UiError::InvalidId);
+        if (property_occupied(*node, PresentationProperty::Transform))
+            return Err(UiError::PropertyOwned);
         if (!value.valid())
             return Err(UiError::InvalidValue);
         auto before = effective_style(*node).transform;
         node->style.transform = value;
         if (before != effective_style(*node).transform)
-            changed(false);
+            changed(false, Some(id));
         return Ok(empty{});
     }
     auto set_opacity(UiId id, Scalar value) -> Result<empty, UiError> {
-        if (layout_active_)
+        if ((layout_active_ || painting_))
             return Err(UiError::Routing);
         auto node = resolve(id);
         if (!node)
             return Err(UiError::InvalidId);
+        if (property_occupied(*node, PresentationProperty::Opacity))
+            return Err(UiError::PropertyOwned);
         if (!finite(value) || value < 0 || value > 1)
             return Err(UiError::InvalidValue);
         auto before = effective_style(*node).opacity;
         node->style.opacity = value;
         if (before != effective_style(*node).opacity)
-            changed(false);
+            changed(false, Some(id));
         return Ok(empty{});
     }
     auto set_clip(UiId id, Clip value) -> Result<empty, UiError> {
-        if (layout_active_)
+        if ((layout_active_ || painting_))
             return Err(UiError::Routing);
         auto node = resolve(id);
         if (!node)
             return Err(UiError::InvalidId);
+        if (property_occupied(*node, PresentationProperty::Clip))
+            return Err(UiError::PropertyOwned);
         if (!value.valid() || (node->viewport.is_some() && value.enabled))
             return Err(UiError::InvalidValue);
         if (node->style.clip != value) {
@@ -1754,20 +2394,20 @@ class UiDocument {
         return Ok(empty{});
     }
     auto set_visible(UiId id, bool value) -> Result<empty, UiError> {
-        if (layout_active_)
+        if ((layout_active_ || painting_))
             return Err(UiError::Routing);
         auto node = resolve(id);
         if (!node)
             return Err(UiError::InvalidId);
         if (node->style.visible != value) {
             node->style.visible = value;
-            changed(false);
+            changed(false, Some(id));
         }
         return Ok(empty{});
     }
     auto set_interaction(UiId id, bool hit_test_visible, bool enabled, bool focusable)
         -> Result<empty, UiError> {
-        if (layout_active_)
+        if ((layout_active_ || painting_))
             return Err(UiError::Routing);
         auto node = resolve(id);
         if (!node)
@@ -1777,12 +2417,12 @@ class UiDocument {
             node->style.hit_test_visible = hit_test_visible;
             node->style.enabled = enabled;
             node->style.focusable = focusable;
-            changed(false);
+            changed(false, Some(id));
         }
         return Ok(empty{});
     }
     auto set_viewport_axes(UiId id, ScrollAxes axes) -> Result<empty, UiError> {
-        if (layout_active_)
+        if ((layout_active_ || painting_))
             return Err(UiError::Routing);
         auto node = resolve(id);
         if (!node)
@@ -1797,11 +2437,13 @@ class UiDocument {
         return Ok(empty{});
     }
     auto set_viewport_offset(UiId id, Point offset) -> Result<empty, UiError> {
-        if (layout_active_)
+        if ((layout_active_ || painting_))
             return Err(UiError::Routing);
         auto node = resolve(id);
         if (!node)
             return Err(UiError::InvalidId);
+        if (property_occupied(*node, PresentationProperty::ViewportOffset))
+            return Err(UiError::PropertyOwned);
         if (node->viewport.is_none() || !finite(offset.x) || !finite(offset.y))
             return Err(UiError::InvalidValue);
         auto &view = **node->viewport;
@@ -1812,7 +2454,7 @@ class UiDocument {
             view.requested = offset;
             if (!layout_dirty_ && mounted(id))
                 clamp_viewport(view);
-            changed(false);
+            changed(false, Some(id));
         }
         return Ok(empty{});
     }
@@ -1834,7 +2476,8 @@ class UiDocument {
             return Err(UiError::InvalidValue);
         return Ok(node->children.is_empty() ? None<UiId>() : Some(UiId(node->children[usize()])));
     }
-    auto bring_into_view(const UiUpdate &update, UiId target, Option<Rect> region = {})
+    template <class Snapshot>
+    auto bring_into_view(const Snapshot &update, UiId target, Option<Rect> region = {})
         -> Result<BringIntoViewResult, UiError> {
         if (!can_route())
             return Err(UiError::Routing);
@@ -1948,15 +2591,14 @@ class UiDocument {
             view.requested = change.offset;
             view.metrics.offset = change.offset;
             ++result.scrolled_viewports;
+            changed(false, Some(UiId(change.id)));
         }
-        if (!changes.is_empty())
-            changed(false);
         return Ok(result);
     }
 
   private:
-    auto update_impl(Size viewport) -> Result<UiUpdate::Data, UiError> {
-        if (routing_ || animation_dispatching_ || layout_active_)
+    auto update_impl(Size viewport, bool recording = true) -> Result<UiUpdate::Data, UiError> {
+        if (routing_ || animation_dispatching_ || (layout_active_ || painting_))
             return Err(UiError::Routing);
         if (!viewport.valid())
             return Err(UiError::InvalidValue);
@@ -1964,6 +2606,8 @@ class UiDocument {
             viewport_ = viewport;
             changed(true, root_);
         }
+        paint_diagnostics_ = {};
+        sweep_bindings();
         UiUpdate::Data output{session_, revision_, root_, {}, {}, {}, layout_revision_, {}};
         output.indices.reserve(slots_.len());
         for (usize i{}; i < slots_.len(); ++i)
@@ -2004,7 +2648,7 @@ class UiDocument {
             }
             layout_diagnostics_ = {};
             CpuTimer collect_time(active_timings_ ? &active_timings_->collect : nullptr);
-            auto error = collect(*root_, output, 0);
+            auto error = collect(*root_, output, 0, recording);
             if (error.is_some())
                 return Err(*error);
         }
@@ -2021,8 +2665,38 @@ class UiDocument {
     }
 
   public:
+    auto input_stats() const -> UpdateStats { return input_stats_; }
+    auto input_snapshot(Size viewport, DiagnosticsOptions options = {})
+        -> Result<InputSnapshot, UiError> {
+        if (updating_ || !can_route())
+            return Err(UiError::Routing);
+        input_stats_ = {};
+        sweep_bindings();
+        if (layout_dirty_ || viewport != viewport_ || input_base_.is_none()) {
+            auto base = update(viewport, options, false);
+            if (base.is_err())
+                return Err(base.unwrap_err());
+            auto frozen = rstd::move(base).unwrap();
+            input_stats_ = frozen.stats();
+            return Ok(InputSnapshot(rstd::move(frozen)));
+        }
+        Vec<UiVisual> changes;
+        last_timings_ = None();
+        for (auto id : input_changes_) {
+            auto node = resolve(id);
+            if (!node || !mounted(id))
+                continue;
+            auto visual = make_visual(id);
+            if (visual.is_err())
+                return Err(visual.unwrap_err());
+            changes.push(rstd::move(visual).unwrap());
+            ++input_stats_.geometry_overrides;
+        }
+        return Ok(InputSnapshot(UiUpdate(*input_base_), rstd::move(changes), revision_));
+    }
     auto last_update_timings() const -> Option<UpdateTimings> { return last_timings_; }
-    auto update(Size viewport, DiagnosticsOptions options = {}) -> Result<UiUpdate, UiError> {
+    auto update(Size viewport, DiagnosticsOptions options = {}, bool recording = true)
+        -> Result<UiUpdate, UiError> {
         if (updating_)
             return Err(UiError::Routing);
         updating_ = true;
@@ -2030,7 +2704,7 @@ class UiDocument {
         UpdateTimings sample;
         active_timings_ = options.timings ? &sample : nullptr;
         CpuTimer timer(active_timings_ ? &sample.update : nullptr);
-        auto result = update_impl(viewport);
+        auto result = update_impl(viewport, recording);
         timer.pause();
         active_timings_ = nullptr;
         updating_ = false;
@@ -2048,7 +2722,10 @@ class UiDocument {
             return Err(result.unwrap_err());
         auto output = result.unwrap();
         output.timings = last_timings_;
-        return Ok(UiUpdate(rstd::move(output)));
+        auto snapshot = UiUpdate(rstd::move(output));
+        input_base_ = Some(UiUpdate(snapshot));
+        input_changes_.clear();
+        return Ok(rstd::move(snapshot));
     }
 };
 } // namespace vui

@@ -14,6 +14,7 @@ link-stdlib = false
 options = ["-Wall", "-Wextra", "-Wno-missing-field-initializers", "-Werror=return-type"]
 
 [dependencies]
+vui-controls = { workspace = true }
 rstd-std = { workspace = true }
 vui-examples = { workspace = true }
 rstd-nostd = { workspace = true, usage = "link" }

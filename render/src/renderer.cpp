@@ -387,14 +387,20 @@ struct UploadExecutor {
 auto resolve_items(OwnedFrame &frame, GlyphCache &cache, ImageCache &images, Index max_extent,
                    const vk::DeviceSession &session) -> Result<empty, Error> {
     auto surface = frame.plan.surface();
+    auto raster_scale = std::max(Scalar(frame.extent.width) / surface.logical_size.width,
+                                 Scalar(frame.extent.height) / surface.logical_size.height);
+    if (!finite(raster_scale) || raster_scale <= 0)
+        return Err(Error{Stage::State});
+    auto coverage_scale = std::min(Scalar(frame.extent.width) / surface.logical_size.width,
+                                   Scalar(frame.extent.height) / surface.logical_size.height);
     Serial total{};
     for (usize pass{}; pass < frame.plan.pass_count(); ++pass) {
         Vec<PaintItem> items;
         for (const auto &draw : frame.plan.draws(static_cast<Index>(pass.to_primitive()))) {
             PaintItem item;
-            item.data.surface[0] = static_cast<float>(frame.extent.width / surface.scale);
-            item.data.surface[1] = static_cast<float>(frame.extent.height / surface.scale);
-            item.data.surface[2] = static_cast<float>(surface.scale);
+            item.data.surface[0] = static_cast<float>(surface.logical_size.width);
+            item.data.surface[1] = static_cast<float>(surface.logical_size.height);
+            item.data.surface[2] = static_cast<float>(coverage_scale);
             auto color = [&](Color c) {
                 item.data.color[0] = c.r;
                 item.data.color[1] = c.g;
@@ -414,8 +420,8 @@ auto resolve_items(OwnedFrame &frame, GlyphCache &cache, ImageCache &images, Ind
                 item.source_pass = value.source_pass;
                 item.data.params[3] = 1;
                 item.data.params[1] = static_cast<float>(value.opacity);
-                rectangle_values(item.data.rect, {0, 0, frame.extent.width / surface.scale,
-                                                  frame.extent.height / surface.scale});
+                rectangle_values(item.data.rect,
+                                 {0, 0, surface.logical_size.width, surface.logical_size.height});
                 transform_values(item.data, {});
                 item.clip = value.clip;
             } else if (draw.is_Image()) {
@@ -489,7 +495,7 @@ auto resolve_items(OwnedFrame &frame, GlyphCache &cache, ImageCache &images, Ind
                 const auto &value = draw.as_Text();
                 if (value.color.a == 0 || value.transform.inverse().is_none())
                     continue;
-                auto scaled = glyph_scale(value.transform, surface.scale);
+                auto scaled = glyph_scale(value.transform, raster_scale);
                 if (scaled.is_err())
                     return Err(scaled.unwrap_err());
                 Scalar scale = scaled.unwrap();
@@ -566,7 +572,9 @@ auto cull_items(OwnedFrame &frame, slice<GpuClip> clips) -> Result<empty, Error>
                 auto clip = item.clip;
                 while (clip != no_clip) {
                     const auto &value = clips[usize(clip)];
-                    if (visibility::clipped(pixels, value, item.data.surface[2])) {
+                    if (visibility::clipped(pixels, value,
+                                            frame.extent.width / item.data.surface[0],
+                                            frame.extent.height / item.data.surface[1])) {
                         discard = true;
                         ++frame.stats.clip_culled;
                         break;
@@ -719,7 +727,7 @@ struct Renderer::Impl {
         }
         return false;
     }
-    template<class T> auto observe_result(Result<T, Error> result) -> Result<T, Error> {
+    template <class T> auto observe_result(Result<T, Error> result) -> Result<T, Error> {
         if (result.is_err()) {
             auto error = result.unwrap_err();
             if (error.result == VK_ERROR_DEVICE_LOST && session.is_some())
@@ -738,7 +746,8 @@ struct Renderer::Impl {
             if (frame.is_some() && (**frame).acquired) {
                 result = session->observe_result((**frame).acquire_fence.Wait(timeout));
                 if (result != VK_SUCCESS && result != VK_ERROR_DEVICE_LOST)
-                    return Err(Error{result == VK_TIMEOUT ? Stage::Timeout : Stage::Acquire, result});
+                    return Err(
+                        Error{result == VK_TIMEOUT ? Stage::Timeout : Stage::Acquire, result});
             }
             for (auto &sync : presents) {
                 if (!sync.pending)
@@ -902,17 +911,17 @@ struct Renderer::Impl {
         vvk::ShaderModule vertex, rect, compose, glyph_fragment, image_fragment;
         result = shader(handle, shaders::quad.words, sizeof(shaders::quad.words), vertex);
         if (result == VK_SUCCESS)
-            result = shader(handle, shaders::rectangle.words,
-                            sizeof(shaders::rectangle.words), rect);
+            result =
+                shader(handle, shaders::rectangle.words, sizeof(shaders::rectangle.words), rect);
         if (result == VK_SUCCESS)
-            result = shader(handle, shaders::composite.words,
-                            sizeof(shaders::composite.words), compose);
+            result =
+                shader(handle, shaders::composite.words, sizeof(shaders::composite.words), compose);
         if (result == VK_SUCCESS)
-            result = shader(handle, shaders::glyph.words, sizeof(shaders::glyph.words),
-                            glyph_fragment);
+            result =
+                shader(handle, shaders::glyph.words, sizeof(shaders::glyph.words), glyph_fragment);
         if (result == VK_SUCCESS)
-            result = shader(handle, shaders::image.words, sizeof(shaders::image.words),
-                            image_fragment);
+            result =
+                shader(handle, shaders::image.words, sizeof(shaders::image.words), image_fragment);
         if (result != VK_SUCCESS)
             return Err(Error{Stage::Shader, result});
         auto make_pipeline = [&](VkShaderModule fragment, vvk::Pipeline &output) {
@@ -1080,7 +1089,8 @@ auto Renderer::initialize(vk::DeviceSession session, bool readback) -> Result<em
         impl_ = Box<Impl>::make();
     return impl_->observe_result(initialize_session_impl(rstd::move(session), readback));
 }
-auto Renderer::initialize_session_impl(vk::DeviceSession session, bool readback) -> Result<empty, Error> {
+auto Renderer::initialize_session_impl(vk::DeviceSession session, bool readback)
+    -> Result<empty, Error> {
     auto &self = *impl_;
     if (self.state != Impl::State::Empty || !session.valid())
         return Err(Error{Stage::State});
@@ -1095,7 +1105,8 @@ auto Renderer::device_epoch() const -> Serial {
     return impl_->session.is_some() ? impl_->session->epoch() : 0;
 }
 auto Renderer::device_lost() const -> bool {
-    return impl_->state == Impl::State::Lost || (impl_->session.is_some() && impl_->session->lost());
+    return impl_->state == Impl::State::Lost ||
+           (impl_->session.is_some() && impl_->session->lost());
 }
 auto Renderer::device_session() const -> Result<vk::DeviceSession, Error> {
     if (device_lost())
@@ -1662,7 +1673,8 @@ auto Renderer::poll_impl() -> Result<Option<Completion>, Error> {
             return Err(Error{Stage::Lost, result});
         }
         (**self.frame).collect_timestamps();
-        if (self.session->observe_result((**self.frame).timings.query_result) == VK_ERROR_DEVICE_LOST)
+        if (self.session->observe_result((**self.frame).timings.query_result) ==
+            VK_ERROR_DEVICE_LOST)
             return Err(Error{Stage::Lost, VK_ERROR_DEVICE_LOST});
         (**self.frame).release_uploads();
         (**self.frame).recyclable = true;
@@ -1703,7 +1715,8 @@ auto Renderer::wait_impl(Serial timeout_nanoseconds) -> Result<Completion, Error
             return Err(Error{Stage::Lost, result});
         }
         (**self.frame).collect_timestamps();
-        if (self.session->observe_result((**self.frame).timings.query_result) == VK_ERROR_DEVICE_LOST)
+        if (self.session->observe_result((**self.frame).timings.query_result) ==
+            VK_ERROR_DEVICE_LOST)
             return Err(Error{Stage::Lost, VK_ERROR_DEVICE_LOST});
         (**self.frame).release_uploads();
         (**self.frame).recyclable = true;

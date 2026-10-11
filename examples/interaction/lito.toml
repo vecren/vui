@@ -1,0 +1,15 @@
+[package]
+name = "vui-interaction"
+version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "vui-interaction"
+module = "vui.examples.interaction"
+sources = ["main.cppm", "view.cppm"]
+link-stdlib = false
+
+[dependencies]
+rstd-std = { workspace = true }
+vui-examples = { workspace = true }
+rstd-nostd = { workspace = true, usage = "link" }

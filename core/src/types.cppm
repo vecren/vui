@@ -6,6 +6,28 @@ using Scalar = double;
 using Serial = rstd::uint64_t;
 using Index = rstd::uint32_t;
 
+struct FrameTiming {
+    Serial now_ns{};
+    rstd::Option<Serial> expected_present_ns;
+};
+
+enum class UiError {
+    InvalidId,
+    InvalidValue,
+    Cycle,
+    Root,
+    MissingChild,
+    Limit,
+    Routing,
+    Cancelled,
+    LayoutPending,
+    TextServiceMissing,
+    TextLayoutFailed,
+    LayoutFailed,
+    PaintFailed,
+    PropertyOwned
+};
+
 inline auto finite(Scalar value) -> bool { return __builtin_isfinite(value); }
 
 struct Point {
@@ -98,6 +120,11 @@ struct UiTag;
 struct RenderTag;
 using UiId = Identity<UiTag>;
 using RenderId = Identity<RenderTag>;
+struct UiRelation {
+    UiId parent, child;
+    Serial generation{};
+    friend auto operator==(const UiRelation &, const UiRelation &) -> bool = default;
+};
 
 inline auto new_session() -> Serial {
     static Serial next = 1;
