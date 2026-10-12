@@ -70,11 +70,13 @@ struct TextCacheStats {
 struct ImageCacheLimits {
     Index max_entries{1024};
     Serial max_bytes{64 * 1024 * 1024};
+    bool evict_unused{};
 };
 struct ImageCacheStats {
     Serial hits{}, misses{}, uploads{}, uploaded_bytes{}, clears{};
     Index entries{};
     Serial cpu_bytes{}, gpu_bytes{}, retained_gpu_bytes{}, staging_bytes{};
+    Serial evictions{};
 };
 struct DrawOptions {
     bool batching{true}, culling{true}, timings{false};

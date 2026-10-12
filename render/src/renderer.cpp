@@ -1248,6 +1248,8 @@ auto Renderer::prepare_impl(FramePlan plan, DrawOptions options) -> Result<empty
         clip_data.push(rstd::move(clip));
     }
     CpuSample resolve(frame.metric(&FrameTimings::resolve));
+    auto reserved = self.image_cache.reserve_frame(frame.plan, self.device().limits().maxImageDimension2D);
+    if (reserved.is_err()) return reserved;
     auto resolved = resolve_items(frame, self.glyph_cache, self.image_cache,
                                   self.device().limits().maxImageDimension2D, *self.session);
     resolve.pause();
