@@ -3,6 +3,14 @@ import :layout;
 using namespace rstd::prelude;
 
 export namespace vui {
+struct LayoutPlacement {
+    Rect slot;
+    Size local_size;
+    Transform local_to_slot;
+    auto valid() const -> bool {
+        return slot.valid() && local_size.valid() && local_to_slot.valid();
+    }
+};
 class LayoutMeasureContext {
   public:
     virtual ~LayoutMeasureContext() = default;
@@ -24,6 +32,10 @@ class LayoutArrangeContext {
     virtual auto child_relation(usize) const -> Result<UiRelation, UiError> = 0;
     virtual auto desired_child(usize) -> Result<Size, UiError> = 0;
     virtual auto arrange_child(usize, Rect) -> Result<empty, UiError> = 0;
+    virtual auto place_child(usize, LayoutPlacement) -> Result<empty, UiError> {
+        return Err(UiError::InvalidValue);
+    }
+    virtual auto set_clip(Clip) -> Result<empty, UiError> { return Err(UiError::InvalidValue); }
     virtual void request_layout() = 0;
 };
 class LayoutStrategy {

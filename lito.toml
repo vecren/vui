@@ -1,6 +1,6 @@
 [workspace]
 name = "vui"
-members = ["core", "controls", "host", "render", "sdl"]
+members = ["core", "controls", "host", "render", "sdl", "image"]
 
 [workspace.package]
 version = "0.1.0"

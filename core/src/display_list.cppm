@@ -3,6 +3,7 @@ module;
 export module vui:display_list;
 import :text;
 import :image;
+import :image.nine_patch;
 import :content;
 
 using namespace rstd::prelude;
@@ -12,7 +13,8 @@ class DrawOp {
     RSTD_ENUM(DrawOp, (Save), (Restore), (Transform, (vui::Transform value;)),
               (Clip, (vui::Clip value;)), (Rect, (vui::Rect rect; Color color; Scalar radius;)),
               (Text, (TextLayout layout; Point origin; Color color;)),
-              (Image, (ImageData data; Rect destination; Rect source; ImageSampling sampling;)),
+              (Image, (ImageData data; Rect destination; Rect source; ImageSampling sampling;
+                       Color tint; ImageEdges edges; bool clamp_source;)),
               (External, (ContentSource source; Rect destination; ImageFit fit;
                           ImageSampling sampling; Color placeholder;)),
               (Children))
@@ -175,17 +177,33 @@ class DisplayListRecorder {
         operations_.push(DrawOp::Text(rstd::move(layout), origin, color));
     }
     void image(ImageData data, Rect destination, Rect source,
-               ImageSampling sampling = ImageSampling::Linear) {
+               ImageSampling sampling = ImageSampling::Linear, Color tint = {1, 1, 1, 1},
+               ImageEdges edges = ImageEdges::All, bool clamp_source = false) {
         if (!active())
             return;
-        if (!destination.valid() || !source.valid() || source.x < 0 || source.y < 0 ||
+        if (static_cast<unsigned>(edges) > 15 || !tint.valid() || !destination.valid() ||
+            !source.valid() || source.x < 0 || source.y < 0 ||
             source.x + source.width > data.width() || source.y + source.height > data.height() ||
             (sampling != ImageSampling::Nearest && sampling != ImageSampling::Linear)) {
             reject(RecordingError::InvalidValue);
             return;
         }
         include(destination);
-        operations_.push(DrawOp::Image(rstd::move(data), destination, source, sampling));
+        operations_.push(DrawOp::Image(rstd::move(data), destination, source, sampling, tint, edges,
+                                       clamp_source));
+    }
+    void nine_patch(const ImageRegion &region, const NinePatchSpec &spec, Rect destination,
+                    Color tint = {1, 1, 1, 1}, ImageSampling sampling = ImageSampling::Linear) {
+        if (!active())
+            return;
+        auto pieces = compute_nine_patch(region, spec, destination);
+        if (pieces.is_err()) {
+            reject(RecordingError::InvalidValue);
+            return;
+        }
+        for (const auto &piece : pieces.unwrap())
+            image(ImageData(region.image), piece.destination, piece.source, sampling, tint,
+                  piece.edges, true);
     }
     void external(ContentSource source, Rect destination, ImageFit fit = ImageFit::Contain,
                   ImageSampling sampling = ImageSampling::Linear,

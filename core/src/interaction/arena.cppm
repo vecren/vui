@@ -1,6 +1,7 @@
 export module vui:interaction.arena;
 import :document;
 import :input.protocol;
+import :input.scopes;
 using namespace rstd::prelude;
 
 export namespace vui {
@@ -136,6 +137,7 @@ class InputArena {
     Box<rstd::dyn<ArbitrationPolicy>> policy_{
         Box<rstd::dyn<ArbitrationPolicy>>::make(PriorityArbitration{})};
     bool busy_{};
+    Option<UiId> scope_root_;
     InputWork work_;
     auto entry(ParticipantId id) -> Entry * {
         if (id.session != owner_ || usize(id.slot) >= slots_.len())
@@ -162,6 +164,8 @@ class InputArena {
         return false;
     }
     auto eligible(const InputSnapshot &snapshot, UiId target) -> bool {
+        if (scope_root_.is_some() && !input_descendant(snapshot, *scope_root_, target))
+            return false;
         auto node = snapshot.get(target);
         auto mount = document_.mount_state(target);
         if (!node || mount.is_err())
@@ -192,6 +196,7 @@ class InputArena {
 
   public:
     explicit InputArena(UiDocument &document) : document_(document) {}
+    void set_scope_root(Option<UiId> root) { scope_root_ = root; }
     auto work() const -> InputWork { return work_; }
     auto has_stream(PointerKey key) -> bool { return stream(key) != nullptr; }
     template <class T>
@@ -311,8 +316,12 @@ class InputArena {
                 }
                 auto before = previous.get(value->target), after = next.get(value->target);
                 if (!before || !after || before->mount_generation != after->mount_generation ||
-                    !after->enabled || !after->properties.visible)
-                    cancel_candidate(candidate, context, CancelReason::Detached);
+                    !eligible(next, value->target))
+                    cancel_candidate(candidate, context,
+                                     scope_root_.is_some() &&
+                                             !input_descendant(next, *scope_root_, value->target)
+                                         ? CancelReason::ScopeChanged
+                                         : CancelReason::Detached);
             }
         }
         return Ok(empty{});
@@ -416,7 +425,7 @@ class InputArena {
             for (usize i{}; i < slots_.len(); ++i) {
                 const auto &slot = slots_[i];
                 if (slot.entry.is_some() && slot.entry->guard.alive() &&
-                    snapshot.get(slot.entry->target) &&
+                    eligible(snapshot, slot.entry->target) &&
                     (slot.entry->global || ancestor(snapshot, slot.entry->target, packet.target)))
                     next.candidates.push(
                         {{owner_, static_cast<Index>(i.to_primitive()), slot.generation}});
@@ -427,7 +436,8 @@ class InputArena {
         Vec<ClaimRequest> requests;
         for (auto &candidate : state->candidates) {
             auto value = entry(candidate.id);
-            if (candidate.state == InputDecisionState::Reject || !value || !value->guard.alive())
+            if (candidate.state == InputDecisionState::Reject || !value || !value->guard.alive() ||
+                !eligible(snapshot, value->target))
                 continue;
             ++work_.observations;
             auto decision = value->participant->observe(context, packet);

@@ -188,7 +188,7 @@ class FrameLoop {
     auto wait_milliseconds(bool animating = false, FrameTiming timing = {},
                            Option<Serial> deadline = {}) const -> Index {
         auto animation_wait = [&]() -> Index {
-            if (!animating)
+            if (!animating && deadline.is_none())
                 return 1000;
             auto target = deadline.is_some() ? deadline : timing.expected_present_ns;
             auto duration = target.is_some()

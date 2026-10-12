@@ -31,8 +31,14 @@ class PaintContext {
         recorder_.text(rstd::move(value), origin, color);
     }
     void image(ImageData value, Rect destination, Rect source,
-               ImageSampling sampling = ImageSampling::Linear) {
-        recorder_.image(rstd::move(value), destination, source, sampling);
+               ImageSampling sampling = ImageSampling::Linear, Color tint = {1, 1, 1, 1},
+               ImageEdges edges = ImageEdges::All, bool clamp_source = false) {
+        recorder_.image(rstd::move(value), destination, source, sampling, tint, edges,
+                        clamp_source);
+    }
+    void nine_patch(const ImageRegion &region, const NinePatchSpec &spec, Rect destination,
+                    Color tint = {1, 1, 1, 1}, ImageSampling sampling = ImageSampling::Linear) {
+        recorder_.nine_patch(region, spec, destination, tint, sampling);
     }
     void external(ContentSource source, Rect destination, ImageFit fit = ImageFit::Contain,
                   ImageSampling sampling = ImageSampling::Linear,

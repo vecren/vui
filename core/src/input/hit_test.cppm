@@ -22,14 +22,16 @@ class HitTest {
         if (inverse.is_none())
             return None();
         auto local = inverse->map(parent_point);
-        if (!finite(local.x) || !finite(local.y) || !node->properties.clip.contains(local))
+        if (!finite(local.x) || !finite(local.y) || !node->properties.clip.contains(local) ||
+            !node->properties.layout_clip.contains(local))
             return None();
         for (auto i = node->children.len(); i > usize(); --i) {
             auto hit = target(update, node->children[i - usize(1)], local, depth + 1);
             if (hit.is_some())
                 return hit;
         }
-        return node->layout_bounds.contains(local) ? Some(UiId(id)) : None<UiId>();
+        return node->hit_self && node->layout_bounds.contains(local) ? Some(UiId(id))
+                                                                     : None<UiId>();
     }
 
   public:

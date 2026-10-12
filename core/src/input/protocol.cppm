@@ -61,7 +61,8 @@ enum class CancelReason {
     ReceiverLost,
     Explicit,
     DeviceLost,
-    Closed
+    Closed,
+    ScopeChanged
 };
 enum class NativeCaptureResult { Succeeded, Failed, Unsupported };
 enum class ScrollPhase { Unknown, Begin, Update, End };

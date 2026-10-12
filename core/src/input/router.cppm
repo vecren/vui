@@ -2,6 +2,7 @@ export module vui:events;
 import :input;
 import :input.protocol;
 import :interaction.arena;
+import :input.scopes;
 using namespace rstd::prelude;
 
 export namespace vui {
@@ -83,6 +84,7 @@ class EventRouter {
         EventType type;
         RoutePhase phase;
         bool active{true}, owns_binding{};
+        ScopeAccess access{ScopeAccess::Scoped};
         Option<BindingGuard> binding;
         Handler(ConnectionId id, UiId target, EventType type, RoutePhase phase)
             : id(id), target(target), type(type), phase(phase) {}
@@ -165,6 +167,7 @@ class EventRouter {
     Vec<Pointer> pointers_;
     Vec<PointerContact> contacts_;
     InputArena arena_{document_};
+    InputScopes scopes_{document_};
     SequenceId next_sequence_{1};
     Vec<Command> commands_;
     struct Transfer {
@@ -210,20 +213,14 @@ class EventRouter {
         path(update, id, result);
         return result;
     }
-    static auto eligible(const InputSnapshot &update, UiId id, bool pointer,
-                         bool require_focus = true) -> bool {
-        auto cursor = Some(id);
-        for (unsigned depth{}; cursor.is_some() && depth < 256; ++depth) {
-            auto node = update.get(*cursor);
-            if (!node || !node->enabled || !node->properties.visible ||
-                (pointer &&
-                 (!node->hit_test_visible || node->properties.transform.inverse().is_none())))
-                return false;
-            if (cursor == update.root())
-                return pointer || !require_focus || update.get(id)->focusable;
-            cursor = node->parent;
-        }
-        return false;
+    auto eligible(const InputSnapshot &update, UiId id, bool pointer,
+                  bool require_focus = true) const -> bool {
+        return input_eligible(update, id, pointer, require_focus) &&
+               scopes_.allows(update, id, pointer);
+    }
+    auto hit_at(const InputSnapshot &snapshot, Point position) const -> Option<UiId> {
+        auto target = HitTest::target_at(snapshot, position);
+        return target.is_some() && scopes_.allows(snapshot, *target, true) ? target : None<UiId>();
     }
     static auto local(const InputSnapshot &update, slice<UiId> route, usize index, Point point)
         -> Point {
@@ -288,6 +285,13 @@ class EventRouter {
                           local(update, route, index, input.position),
                           update.revision()};
         EventContext context(*this, event, stopped, prevented, remaining);
+        bool cleanup = input.type == EventType::PointerCancel ||
+                       input.type == EventType::CaptureLost || input.type == EventType::FocusLost ||
+                       input.type == EventType::PointerLeave;
+        bool pointer_input = input.type != EventType::KeyDown && input.type != EventType::KeyUp &&
+                             input.type != EventType::FocusGained &&
+                             input.type != EventType::FocusLost;
+        bool allowed = cleanup || scopes_.allows(update, event.current, pointer_input);
         auto row = node_routes(event.current);
         if (row)
             for (auto index : row->handlers) {
@@ -295,10 +299,12 @@ class EventRouter {
                 ++work_.handlers_examined;
                 if (handler->active && (handler->binding.is_none() || handler->binding->alive()) &&
                     handler->id.value < cutoff && handler->target == event.current &&
-                    handler->type == input.type && handler->phase == phase)
+                    handler->type == input.type && handler->phase == phase &&
+                    (allowed || handler->access == ScopeAccess::Global))
                     handler->invoke(context, event);
             }
-        behavior(context, event, prevented);
+        if (allowed)
+            behavior(context, event, prevented);
     }
     auto route(const InputSnapshot &update, UiId target, InputEvent input, bool direct = false)
         -> bool {
@@ -666,7 +672,8 @@ class EventRouter {
     }
     template <class T, class F>
     auto bind_on(UiId target, EventType type, rstd::rc::Weak<T> receiver, F function,
-                 RoutePhase phase = RoutePhase::Target) -> Result<Binding, InputError> {
+                 RoutePhase phase = RoutePhase::Target, ScopeAccess access = ScopeAccess::Scoped)
+        -> Result<Binding, InputError> {
         auto binding = document_.bindings().make(receiver);
         auto guard = binding.guard();
         auto result = on(
@@ -677,7 +684,7 @@ class EventRouter {
                 if (guard.alive() && value.is_some())
                     function(*value->get(), context, event);
             },
-            phase);
+            phase, access);
         if (result.is_err())
             return Err(result.unwrap_err());
         for (auto &handler : handlers_)
@@ -688,8 +695,8 @@ class EventRouter {
         return Ok(rstd::move(binding));
     }
     template <class F>
-    auto on(UiId target, EventType type, F callback, RoutePhase phase = RoutePhase::Target)
-        -> Result<ConnectionId, InputError> {
+    auto on(UiId target, EventType type, F callback, RoutePhase phase = RoutePhase::Target,
+            ScopeAccess access = ScopeAccess::Scoped) -> Result<ConnectionId, InputError> {
         if (closed_)
             return Err(InputError::Unavailable);
         if (!document_.valid(target))
@@ -700,20 +707,22 @@ class EventRouter {
         prune_requested_ = true;
         ConnectionId id{owner_, next_handler_++};
         auto handler = Box<Callback<F>>::make(id, target, type, phase, rstd::move(callback));
+        handler->access = access;
         handlers_.push(
             Box<Handler>::from_raw(rstd::move(handler).into_raw().template cast<Handler>()));
         return Ok(id);
     }
     template <class F>
     auto on(UiId target, EventType type, BindingGuard guard, F callback,
-            RoutePhase phase = RoutePhase::Target) -> Result<ConnectionId, InputError> {
+            RoutePhase phase = RoutePhase::Target, ScopeAccess access = ScopeAccess::Scoped)
+        -> Result<ConnectionId, InputError> {
         auto result = on(
             target, type,
             [guard, callback = rstd::move(callback)](auto &context, const auto &event) mutable {
                 if (guard.alive())
                     callback(context, event);
             },
-            phase);
+            phase, access);
         if (result.is_ok())
             for (auto &handler : handlers_)
                 if (handler->id == result.unwrap())
@@ -815,6 +824,28 @@ class EventRouter {
                 return state.capture;
         return None();
     }
+    auto open_scope(UiId root, InputScopeOptions options, BindingGuard guard)
+        -> Result<InputScopeRegistration, InputError> {
+        return scopes_.open(root, options, guard);
+    }
+    auto focus_when_ready(UiId target, Option<ScopeId> scope, BindingGuard guard)
+        -> Result<FocusRequestId, InputError> {
+        return scopes_.request(target, scope, guard);
+    }
+    auto focus_when_ready(UiId target, ScopeId scope, BindingGuard guard)
+        -> Result<FocusRequestId, InputError> {
+        return scopes_.request(target, Some(scope), guard);
+    }
+    auto bookmark_focus() const -> FocusBookmark {
+        return update_.is_some() ? scopes_.bookmark(*update_, focus_) : FocusBookmark{};
+    }
+    auto poll_scope_events() -> Vec<ScopeEvent> { return scopes_.poll_events(); }
+    auto poll_focus_events() -> Vec<FocusRequestEvent> { return scopes_.poll_focus_events(); }
+    auto scope_diagnostics() const -> ScopeDiagnostics { return scopes_.diagnostics(); }
+    auto focus_request_result(FocusRequestId id) const -> Option<FocusRequestEvent> {
+        return scopes_.focus_result(id);
+    }
+    auto pending_sync() const -> bool { return scopes_.pending(); }
     auto request_focus(Option<UiId> target) -> Result<empty, InputError> {
         return command({CommandType::Focus, 0, target});
     }
@@ -830,6 +861,8 @@ class EventRouter {
             prune_requested_ = true;
         begin();
         controls_ = false;
+        auto restore = scopes_.synchronize(update);
+        arena_.set_scope_root(scopes_.pointer_root());
         if (update_.is_some()) {
             auto synchronized = arena_.synchronize(*update_, update, contacts_.as_slice());
             if (synchronized.is_err()) {
@@ -848,10 +881,16 @@ class EventRouter {
                 bool lost_hover = state.hover.is_some() && !same_mount(update, *state.hover, true);
                 bool lost_sequence = state.capture.is_none() && state.sequence_target.is_some() &&
                                      !same_mount(update, *state.sequence_target, true);
-                if (lost_capture || lost_sequence || (state.capture.is_none() && lost_hover))
-                    cancel(state, state.capture.is_some() && lost_receiver(*state.capture)
+                if (lost_capture || lost_sequence || (state.capture.is_none() && lost_hover)) {
+                    bool outside = (state.capture.is_some() &&
+                                    !scopes_.allows(update, *state.capture, true)) ||
+                                   (state.sequence_target.is_some() &&
+                                    !scopes_.allows(update, *state.sequence_target, true));
+                    cancel(state, outside ? CancelReason::ScopeChanged
+                                  : state.capture.is_some() && lost_receiver(*state.capture)
                                       ? CancelReason::ReceiverLost
                                       : CancelReason::Detached);
+                }
                 if (lost_hover)
                     hover(state, None());
             }
@@ -867,10 +906,17 @@ class EventRouter {
             arena_.prune();
         update_ = Some(rstd::move(update));
         controls_ = true;
+        if (window_focused_) {
+            if (restore.is_some())
+                change_focus(scopes_.restore_target(*update_, *restore));
+            scopes_.resolve_focus(*update_, true,
+                                  [&](Option<UiId> target) { change_focus(target); });
+        } else
+            scopes_.resolve_focus(*update_, false, [](Option<UiId>) {});
         if (window_focused_)
             for (auto &state : pointers_) {
                 if (state.kind != PointerKind::Touch) {
-                    auto hit = HitTest::target_at(*update_, state.position);
+                    auto hit = hit_at(*update_, state.position);
                     hover(state, hit.is_some() ? Some(*hit) : None<UiId>());
                 }
             }
@@ -989,11 +1035,12 @@ class EventRouter {
             pointers_.retain([&](const Pointer &value) { return value.device != input.device; });
             controls_ = true;
         } else if (wheel_event) {
-            auto hit = HitTest::target_at(*update_, input.position);
+            auto hit = hit_at(*update_, input.position);
             if (hit.is_some())
                 route(*update_, *hit, input);
         } else if (key_event) {
-            bool prevented = focus_.is_some() && route(*update_, *focus_, input);
+            auto target = focus_.is_some() ? focus_ : scopes_.focus_root();
+            bool prevented = target.is_some() && route(*update_, *target, input);
             if (!prevented && navigation_.is_some())
                 (*navigation_)->operator()(*this, input);
         } else {
@@ -1008,7 +1055,7 @@ class EventRouter {
             } else {
                 auto hit = state->kind == PointerKind::Touch && input.type != EventType::PointerDown
                                ? None<UiId>()
-                               : HitTest::target_at(*update_, input.position);
+                               : hit_at(*update_, input.position);
                 if (state->kind != PointerKind::Touch)
                     hover(*state, hit.is_some() ? Some(*hit) : None<UiId>());
                 bool starting =
@@ -1021,7 +1068,7 @@ class EventRouter {
                     state->sequence = next_sequence_++;
                     state->sequence_target = hit.is_some() ? Some(UiId(*hit)) : None<UiId>();
                     state->claimed = false;
-                    state->relinquished = false;
+                    state->relinquished = hit.is_none() && scopes_.pointer_root().is_some();
                 }
                 if (input.type == EventType::PointerDown) {
                     if (state->kind == PointerKind::Touch)
@@ -1031,8 +1078,8 @@ class EventRouter {
                 }
                 input.sequence = state->sequence;
                 refresh_contacts();
-                if ((state->sequence_target.is_some() || arena_.has_global_participants()) &&
-                    !state->relinquished && (state->buttons || state->contact)) {
+                if ((state->buttons || state->contact) && !state->relinquished &&
+                    (state->sequence_target.is_some() || arena_.has_global_participants())) {
                     auto claims = arena_.process({input, state->sequence_target.is_some()
                                                              ? *state->sequence_target
                                                              : UiId{}},
@@ -1139,6 +1186,7 @@ class EventRouter {
                 behavior->binding->disconnect();
         handlers_.clear();
         behaviors_.clear();
+        scopes_.close();
         arena_.close();
         contacts_.clear();
         pointers_.clear();

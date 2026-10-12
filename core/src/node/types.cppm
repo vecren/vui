@@ -50,6 +50,7 @@ struct NodeStyle {
     Clip clip;
     Scalar opacity{1};
     bool visible{true}, hit_test_visible{true}, enabled{true}, focusable{};
+    bool hit_self{true};
     auto valid() const -> bool {
         return layout.valid() && background.valid() && finite(radius) && radius >= 0 &&
                RenderProperties{transform, {}, clip, opacity, visible}.valid();

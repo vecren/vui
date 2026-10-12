@@ -246,7 +246,7 @@ class UiSession {
             if (synced.is_err())
                 return Err(SessionError{SessionStage::Input, {}, Some(synced.unwrap_err())});
             if (revision == document_.revision() && document_.pending_mutations() == usize() &&
-                !document_.pending_animation_callbacks()) {
+                !document_.pending_animation_callbacks() && !input_.pending_sync()) {
                 auto revealed = reveal_focus(input_.snapshot().unwrap());
                 if (revealed.is_err())
                     return Err(revealed.unwrap_err());
@@ -299,7 +299,7 @@ class UiSession {
                 return Err(SessionError{SessionStage::Input, {}, Some(synced.unwrap_err())});
             if (document_.revision() == update_->revision() &&
                 document_.pending_mutations() == usize() &&
-                !document_.pending_animation_callbacks()) {
+                !document_.pending_animation_callbacks() && !input_.pending_sync()) {
                 auto revealed = reveal_focus(*update_);
                 if (revealed.is_err())
                     return Err(revealed.unwrap_err());

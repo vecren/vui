@@ -120,8 +120,12 @@ int main(int argc, char **argv) {
         .unwrap();
     auto button_style = block(100, 44, {});
     button_style.transform = {1, 0, 0, 1, 400, 260};
-    auto button = Button::create(session, button_style).unwrap();
-    ui.attach(root, button).unwrap();
+    auto reset_button =
+        examples::SkinnedButton::create(session, root, button_style,
+                                        ImageRegion::whole(examples::make_button_frame()),
+                                        {{1, 1, 1, 1}, Some(Insets{3, 3, 3, 3}), true})
+            .unwrap();
+    auto button = reset_button.id;
     text_label(button, "重置 / Reset"_str, {8, 10}, 14);
     click_bindings_.push(
         Button::on_clicked(session.document(), button, [&](auto &context, const auto &) {

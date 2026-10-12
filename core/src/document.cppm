@@ -28,6 +28,7 @@ struct UiVisual {
     Rect layout_bounds;
     Rect layout_rect;
     Option<Rect> layout_slot;
+    bool hit_self{true};
 };
 enum class RevealStatus { Contained, Partial, Hidden, NonInvertible };
 struct BringIntoViewResult {
@@ -291,6 +292,7 @@ class UiDocument {
         Option<ImageData> data;
         ImageFit fit{ImageFit::Contain};
         ImageSampling sampling{ImageSampling::Linear};
+        Color tint{1, 1, 1, 1};
     };
     struct SceneContent {
         Option<ContentSource> source;
@@ -338,6 +340,9 @@ class UiDocument {
         Option<Box<rstd::dyn<Paint>>> painter;
         Option<BindingGuard> paint_binding;
         Point position;
+        Transform layout_mapping;
+        Option<Size> layout_local_size;
+        Clip layout_clip;
         bool paint_dirty{true};
         DisplayList content;
         Serial mount_generation{1}, relation_generation{1};
@@ -386,6 +391,7 @@ class UiDocument {
     Option<UpdateTimings> last_timings_;
     Index depth_limit_{256};
     bool routing_{}, draining_{};
+    Serial rejected_cleanups_{};
     Serial next_mutation_{1};
     Vec<Box<Mutation>> mutations_;
 
@@ -897,6 +903,39 @@ class UiDocument {
             visited[index] = true;
             return Ok(empty{});
         }
+        auto place_child(usize index, LayoutPlacement placement)
+            -> Result<empty, UiError> override {
+            if (error.is_some())
+                return Err(*error);
+            if (index >= child_count() || visited[index] || !placement.valid()) {
+                error = document.layout_failure(id, LayoutIssue::InvalidChild);
+                return Err(*error);
+            }
+            placement.slot.x += padding;
+            placement.slot.y += padding;
+            auto child = node.children[index];
+            error = document.measure(child,
+                                     {Some(placement.local_size.width),
+                                      Some(placement.local_size.height), placement.local_size.width,
+                                      placement.local_size.height},
+                                     depth + 1);
+            if (error.is_none())
+                error = document.arrange(child, placement.slot, depth + 1, Some(placement));
+            if (error.is_some())
+                return Err(*error);
+            visited[index] = true;
+            return Ok(empty{});
+        }
+        auto set_clip(Clip clip) -> Result<empty, UiError> override {
+            if (!clip.valid()) {
+                error = document.layout_failure(id, LayoutIssue::InvalidChild);
+                return Err(*error);
+            }
+            clip.rect.x += padding;
+            clip.rect.y += padding;
+            node.layout_clip = clip;
+            return Ok(empty{});
+        }
         void request_layout() override { document.request_layout(id); }
         auto complete() -> bool {
             for (auto done : visited)
@@ -1038,17 +1077,30 @@ class UiDocument {
     static auto aligned_offset(Scalar remaining, Alignment align) -> Scalar {
         return align == Alignment::Center ? remaining / 2 : align == Alignment::End ? remaining : 0;
     }
-    auto arrange(UiId id, Rect slot, Index depth) -> Option<UiError> {
+    auto arrange(UiId id, Rect slot, Index depth, Option<LayoutPlacement> mapped = {})
+        -> Option<UiError> {
         if (depth >= depth_limit_ || ++layout_work_ > 1'000'000)
             return layout_failure(id, LayoutIssue::Limit, UiError::Limit);
         if (!slot.valid())
             return layout_failure(id, LayoutIssue::Strategy, UiError::InvalidValue);
         auto &node = *resolve(id);
         if (!node.arrange_dirty && !node.subtree_arrange_dirty &&
-            node.arranged_slot == Some(slot)) {
+            node.arranged_slot == Some(slot) &&
+            node.layout_mapping == (mapped.is_some() ? mapped->local_to_slot : Transform{}) &&
+            node.layout_local_size ==
+                (mapped.is_some() ? Some(mapped->local_size) : None<Size>())) {
             ++stats_.arrange_cache_hits;
             return None();
         }
+        auto allocated = slot;
+        auto mapping = mapped.is_some() ? mapped->local_to_slot : Transform{};
+        auto local_size = mapped.is_some() ? Some(mapped->local_size) : None<Size>();
+        if (mapped.is_some()) {
+            slot.width = mapped->local_size.width;
+            slot.height = mapped->local_size.height;
+        }
+        node.layout_mapping = mapping;
+        node.layout_local_size = local_size;
         const auto style = effective_style(node).layout;
         auto horizontal_stretch = style.horizontal == Alignment::Stretch && style.width.is_none();
         auto vertical_stretch = style.vertical == Alignment::Stretch && style.height.is_none();
@@ -1093,6 +1145,8 @@ class UiDocument {
                          slot.y + aligned_offset(slot.height - height, style.vertical)};
         Size inner{limit(width - 2 * style.padding, width),
                    limit(height - 2 * style.padding, height)};
+        if (visit_children)
+            node.layout_clip = {};
         if (visit_children && node.layout_strategy.is_some()) {
             ArrangeContext context(*this, node, id, depth, style.padding);
             auto result = (*node.layout_strategy)->arrange(context, inner);
@@ -1138,7 +1192,7 @@ class UiDocument {
                 view.axes.vertical ? maximum(view.metrics.extent.height - inner.height, 0) : 0};
             clamp_viewport(view);
         }
-        node.arranged_slot = Some(slot);
+        node.arranged_slot = Some(allocated);
         node.arrange_dirty = false;
         node.subtree_arrange_dirty = false;
         return None();
@@ -1179,7 +1233,7 @@ class UiDocument {
             auto &image = **node.image;
             auto placed = *place_image_content(node);
             recorder.image(ImageData(*image.data), placed.destination, placed.source,
-                           image.sampling);
+                           image.sampling, image.tint);
         }
         if (node.scene.is_some()) {
             const auto &scene = **node.scene;
@@ -1263,8 +1317,11 @@ class UiDocument {
                 (bottom > layout_bounds.height ? bottom : layout_bounds.height) - content_bounds.y;
         }
         auto style = effective_style(node);
-        RenderProperties properties{placement * style.transform, content_bounds, clip,
-                                    style.opacity, style.visible};
+        auto transform = node.layout_mapping == Transform{}
+                             ? placement * style.transform
+                             : placement * node.layout_mapping * style.transform;
+        RenderProperties properties{transform,     content_bounds, clip,
+                                    style.opacity, style.visible,  node.layout_clip};
         if (!properties.valid())
             return Err(UiError::InvalidValue);
         UiVisual visual{
@@ -1281,7 +1338,8 @@ class UiDocument {
                                     : None<ViewportMetrics>(),
             layout_bounds,
             {node.position.x, node.position.y, node.measured.width, node.measured.height},
-            node.arranged_slot};
+            node.arranged_slot,
+            node.style.hit_self};
         for (auto child : node.children)
             visual.children.push(UiId(child));
         return Ok(rstd::move(visual));
@@ -1381,16 +1439,27 @@ class UiDocument {
         return Ok(rstd::move(results));
     }
     template <class F> auto defer(F callback) -> Result<Serial, UiError> {
-        if ((layout_active_ || painting_))
+        if (layout_active_ || painting_)
             return Err(UiError::Routing);
-        if (mutations_.len() >= usize(1024) || next_mutation_ == ~Serial{})
+        if (mutations_.len() >= usize(1024))
             return Err(UiError::Limit);
+        return defer_cleanup(rstd::move(callback));
+    }
+    // A receiver's final reference can be released while layout or paint still runs.
+    template <class F> auto defer_cleanup(F callback) -> Result<Serial, UiError> {
+        if (mutations_.len() >= usize(4096) || next_mutation_ == ~Serial{}) {
+            if (rejected_cleanups_ != ~Serial{})
+                ++rejected_cleanups_;
+            return Err(UiError::Limit);
+        }
         auto id = next_mutation_++;
         auto item = Box<Deferred<F>>::make(id, rstd::move(callback));
         mutations_.push(
             Box<Mutation>::from_raw(rstd::move(item).into_raw().template cast<Mutation>()));
+        bindings_.wake();
         return Ok(id);
     }
+    auto rejected_cleanup_count() const -> Serial { return rejected_cleanups_; }
     template <class F>
     auto defer(UiId target, BindingGuard guard, F callback) -> Result<Serial, UiError> {
         auto mount = mount_state(target);
@@ -1487,6 +1556,31 @@ class UiDocument {
         changed(false);
         return Ok(
             UiId{session_, static_cast<Index>(index.to_primitive()), slots_[index].generation});
+    }
+    auto parent_relation(UiId child) -> Result<Option<UiRelation>, UiError> {
+        auto node = resolve(child);
+        if (!node)
+            return Err(UiError::InvalidId);
+        return Ok(node->parent.is_some()
+                      ? Some(UiRelation{*node->parent, child, node->relation_generation})
+                      : None<UiRelation>());
+    }
+    auto is_descendant(UiId root, UiId child) -> Result<bool, UiError> {
+        if (!resolve(root) || !resolve(child))
+            return Err(UiError::InvalidId);
+        auto cursor = Some(child);
+        for (Index depth{}; cursor.is_some() && depth < depth_limit_; ++depth) {
+            if (*cursor == root)
+                return Ok(true);
+            cursor = resolve(*cursor)->parent;
+        }
+        return Ok(false);
+    }
+    auto child_relation(UiId parent, UiId child) -> Result<UiRelation, UiError> {
+        auto p = resolve(parent), c = resolve(child);
+        if (!p || !c || c->parent != Some(parent))
+            return Err(UiError::InvalidId);
+        return Ok(UiRelation{parent, child, c->relation_generation});
     }
     auto attach(UiId parent, UiId child) -> Result<empty, UiError> {
         if (routing_ || (layout_active_ || painting_))
@@ -2005,6 +2099,21 @@ class UiDocument {
         changed(old_size != new_size, Some(id));
         return Ok(empty{});
     }
+    auto set_image_tint(UiId id, Color tint) -> Result<empty, UiError> {
+        if (layout_active_ || painting_)
+            return Err(UiError::Routing);
+        auto node = resolve(id);
+        if (!node)
+            return Err(UiError::InvalidId);
+        if (node->image.is_none() || !tint.valid())
+            return Err(UiError::InvalidValue);
+        if ((*node->image)->tint != tint) {
+            (*node->image)->tint = tint;
+            node->paint_dirty = true;
+            changed(false, Some(id));
+        }
+        return Ok(empty{});
+    }
     auto set_image_fit(UiId id, ImageFit fit) -> Result<empty, UiError> {
         if ((layout_active_ || painting_))
             return Err(UiError::Routing);
@@ -2405,6 +2514,18 @@ class UiDocument {
         }
         return Ok(empty{});
     }
+    auto set_hit_self(UiId id, bool value) -> Result<empty, UiError> {
+        if (layout_active_ || painting_)
+            return Err(UiError::Routing);
+        auto node = resolve(id);
+        if (!node)
+            return Err(UiError::InvalidId);
+        if (node->style.hit_self != value) {
+            node->style.hit_self = value;
+            changed(false, Some(id));
+        }
+        return Ok(empty{});
+    }
     auto set_interaction(UiId id, bool hit_test_visible, bool enabled, bool focusable)
         -> Result<empty, UiError> {
         if ((layout_active_ || painting_))
@@ -2550,22 +2671,24 @@ class UiDocument {
                 if (offset != metrics.offset)
                     changes.push(OffsetChange{id, offset});
             }
-            if (clip.enabled) {
-                auto right = rect.x + rect.width, bottom = rect.y + rect.height;
-                auto clip_right = clip.rect.x + clip.rect.width,
-                     clip_bottom = clip.rect.y + clip.rect.height;
-                if (rect.x < clip.rect.x || rect.y < clip.rect.y || right > clip_right ||
-                    bottom > clip_bottom)
-                    result.status = RevealStatus::Partial;
-                auto left = maximum(rect.x, clip.rect.x), top = maximum(rect.y, clip.rect.y);
-                right = right < clip_right ? right : clip_right;
-                bottom = bottom < clip_bottom ? bottom : clip_bottom;
-                if (right < left || bottom < top) {
-                    result.status = RevealStatus::Partial;
-                    break;
+            Clip clips[]{node.properties.clip, node.properties.layout_clip};
+            for (const auto &clip : clips)
+                if (clip.enabled) {
+                    auto right = rect.x + rect.width, bottom = rect.y + rect.height;
+                    auto clip_right = clip.rect.x + clip.rect.width,
+                         clip_bottom = clip.rect.y + clip.rect.height;
+                    if (rect.x < clip.rect.x || rect.y < clip.rect.y || right > clip_right ||
+                        bottom > clip_bottom)
+                        result.status = RevealStatus::Partial;
+                    auto left = maximum(rect.x, clip.rect.x), top = maximum(rect.y, clip.rect.y);
+                    right = right < clip_right ? right : clip_right;
+                    bottom = bottom < clip_bottom ? bottom : clip_bottom;
+                    if (right < left || bottom < top) {
+                        result.status = RevealStatus::Partial;
+                        break;
+                    }
+                    rect = {left, top, right - left, bottom - top};
                 }
-                rect = {left, top, right - left, bottom - top};
-            }
             if (node.parent.is_some()) {
                 auto matrix = node.properties.transform;
                 Point corners[]{matrix.map({rect.x, rect.y}),

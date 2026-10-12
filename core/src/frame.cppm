@@ -30,7 +30,8 @@ class FrameDraw {
               (Text, (TextLayout layout; Point origin; Color color; Transform transform; Index clip;
                       RenderId node;)),
               (Image, (ImageData data; Rect destination; Rect source; ImageSampling sampling;
-                       Transform transform; Index clip; RenderId node;)),
+                       Color tint; ImageEdges edges; bool clamp_source; Transform transform;
+                       Index clip; RenderId node;)),
               (External, (TextureFrame frame; Serial source_id; Rect destination; Rect source;
                           ImageSampling sampling; Transform transform; Index clip; RenderId node;)),
               (Composite, (Index source_pass; Scalar opacity; Index clip; RenderId node;)))
@@ -114,6 +115,7 @@ class FramePlanner {
         if (!world.valid())
             return Some(FrameError::InvalidTransform);
         auto node_clip = clip(node->properties.clip, world, inherited_clip);
+        node_clip = clip(node->properties.layout_clip, world, node_clip);
         auto target = destination;
         bool isolated = node->properties.opacity < 1;
         if (isolated) {
@@ -147,9 +149,9 @@ class FramePlanner {
                                     state.transform, state.clip, id));
             } else if (op.is_Image()) {
                 const auto &value = op.as_Image();
-                output_.passes[usize(target)].draws.push(
-                    FrameDraw::Image(ImageData(value.data), value.destination, value.source,
-                                     value.sampling, state.transform, state.clip, id));
+                output_.passes[usize(target)].draws.push(FrameDraw::Image(
+                    ImageData(value.data), value.destination, value.source, value.sampling,
+                    value.tint, value.edges, value.clamp_source, state.transform, state.clip, id));
             } else if (op.is_External()) {
                 const auto &value = op.as_External();
                 const auto &selected = select(value.source);

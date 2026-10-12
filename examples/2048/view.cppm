@@ -11,16 +11,6 @@ using namespace rstd::prelude;
 using namespace rstd::literals;
 
 class View {
-    struct CanvasLayout final : LayoutStrategy {
-        auto measure(LayoutMeasureContext &context, LayoutConstraints)
-            -> Result<Size, UiError> override {
-            return context.measure_child(usize(), {});
-        }
-        auto arrange(LayoutArrangeContext &context, Size) -> Result<empty, UiError> override {
-            auto size = context.desired_child(usize()).unwrap();
-            return context.arrange_child(usize(), {0, 0, size.width, size.height});
-        }
-    };
     UiSession &session_;
     Binding lifetime_{session_.document().bindings().make()};
     Vec<Binding> click_bindings_;
@@ -30,7 +20,7 @@ class View {
     MoveResult move_;
     unsigned pending_{};
     Serial generation_{};
-    bool busy_{}, continued_{}, focus_pending_{true};
+    bool busy_{}, continued_{};
     static constexpr Scalar cell = 96, gap = 12, board_size = 444;
     static constexpr Color ink{.019, .045, .095, 1};
     static constexpr Color background{.933, .953, .973, 1};
@@ -232,10 +222,9 @@ class View {
         auto root_style = examples::block(520, 720, background);
         root_style.focusable = true;
         root_ = ui().create<CustomLayout>(root_style).unwrap();
-        auto layout = Box<CanvasLayout>::make();
-        ui().set_layout_strategy(root_,
-                                 Box<LayoutStrategy>::from_raw(
-                                     rstd::move(layout).into_raw().template cast<LayoutStrategy>()))
+        ui().install_layout(
+                root_,
+                ReferenceCanvas{{500, 700}, CanvasFit::Contain, {.5, .5}, true, Some(Scalar(1.2))})
             .unwrap();
         panel_ = ui().append<Stack>(root_, examples::block(board_size, 650, {0, 0, 0, 0})).unwrap();
         label(panel_, "2048"_str, 54, {0, 0}, true);
@@ -287,35 +276,25 @@ class View {
                            [this](auto &) -> Result<empty, UiError> {
                                continued_ = true;
                                update_status();
-                               focus_pending_ = true;
+                               session_.input()
+                                   .focus_when_ready(root_, None<ScopeId>(), lifetime_.guard())
+                                   .unwrap();
                                return Ok(empty{});
                            })
                     .unwrap();
             }).unwrap());
         resize({{520, 720}, 1, 1});
+        session_.input().focus_when_ready(root_, None<ScopeId>(), lifetime_.guard()).unwrap();
     }
     View(const View &) = delete;
     auto operator=(const View &) -> View & = delete;
     auto game() const -> const Game & { return game_; }
     auto busy() const -> bool { return busy_; }
-    void after_update() {
-        if (focus_pending_) {
-            session_.input().request_focus(Some(root_)).unwrap();
-            focus_pending_ = false;
-        }
-    }
     void resize(const SurfaceInfo &surface) {
         auto size = surface.logical_size;
         if (size.width <= 0 || size.height <= 0)
             return;
         ui().set_layout(root_, {.width = Some(size.width), .height = Some(size.height)}).unwrap();
-        auto sx = size.width / 500, sy = size.height / 700;
-        auto scale = sx < sy ? sx : sy;
-        if (scale > 1.2)
-            scale = 1.2;
-        ui().set_transform(panel_, {scale, 0, 0, scale, (size.width - board_size * scale) / 2,
-                                    (size.height - 650 * scale) / 2})
-            .unwrap();
     }
 };
 } // namespace game2048

@@ -30,14 +30,21 @@ class ImageData {
     }
     ImageData(ImageData &&) = default;
     auto operator=(ImageData &&) -> ImageData & = default;
-    static auto rgba8_srgb(Index width, Index height, slice<unsigned char> pixels,
-                           Scalar density = 1) -> Result<ImageData, ImageError> {
+    static auto validate_dimensions(Index width, Index height, Scalar density = 1)
+        -> Result<empty, ImageError> {
         if (!width || !height || !finite(density) || density <= 0 || !finite(width / density) ||
             !finite(height / density))
             return Err(ImageError::InvalidValue);
         if (width > image_max_extent || height > image_max_extent ||
             Serial(width) * height > image_max_pixels)
             return Err(ImageError::Limit);
+        return Ok(empty{});
+    }
+    static auto rgba8_srgb(Index width, Index height, slice<unsigned char> pixels,
+                           Scalar density = 1) -> Result<ImageData, ImageError> {
+        auto valid = validate_dimensions(width, height, density);
+        if (valid.is_err())
+            return Err(valid.unwrap_err());
         if (pixels.len().to_primitive() != Serial(width) * height * 4)
             return Err(ImageError::InvalidValue);
         Vec<unsigned char> owned;
@@ -53,8 +60,13 @@ class ImageData {
     auto natural_size() const -> Size { return {width() / density(), height() / density()}; }
     auto pixels() const -> slice<unsigned char> { return data_->pixels.as_slice(); }
 };
+enum class ImageEdges : unsigned { None = 0, Left = 1, Top = 2, Right = 4, Bottom = 8, All = 15 };
+inline constexpr auto operator|(ImageEdges left, ImageEdges right) -> ImageEdges {
+    return static_cast<ImageEdges>(static_cast<unsigned>(left) | static_cast<unsigned>(right));
+}
 struct ImagePlacement {
     Rect destination, source;
+    ImageEdges edges{ImageEdges::All};
 };
 inline auto place_image(Size image, Rect box, ImageFit fit) -> Result<ImagePlacement, ImageError> {
     if (!image.valid() || !image.width || !image.height || !box.valid() ||

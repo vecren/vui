@@ -7,7 +7,7 @@ license.workspace = true
 name = "vui-sdl"
 module = "vui.sdl"
 archive = "vui-sdl"
-sources = ["src/lib.cppm", "src/frames.cppm", "src/window.cppm", "src/window.cpp"]
+sources = ["src/lib.cppm", "src/frames.cppm", "src/application.cppm", "src/window.cppm", "src/window.cpp"]
 
 [dependencies]
 vui-host = { workspace = true, pub = true }

@@ -80,6 +80,28 @@ struct Color {
         return finite(r) && finite(g) && finite(b) && finite(a) && r >= 0 && g >= 0 && b >= 0 &&
                a >= 0 && r <= a && g <= a && b <= a && a <= 1;
     }
+    static auto from_linear(float r, float g, float b, float a = 1)
+        -> rstd::Result<Color, UiError> {
+        if (!finite(r) || !finite(g) || !finite(b) || !finite(a) || r < 0 || g < 0 || b < 0 ||
+            a < 0 || r > 1 || g > 1 || b > 1 || a > 1)
+            return rstd::Err(UiError::InvalidValue);
+        return rstd::Ok(Color{r * a, g * a, b * a, a});
+    }
+    static auto from_srgba(float r, float g, float b, float a = 1) -> rstd::Result<Color, UiError> {
+        auto checked = from_linear(r, g, b, a);
+        if (checked.is_err())
+            return rstd::Err(checked.unwrap_err());
+        auto linear = [](float c) {
+            return c <= .04045f ? c / 12.92f : __builtin_powf((c + .055f) / 1.055f, 2.4f);
+        };
+        return from_linear(linear(r), linear(g), linear(b), a);
+    }
+    static auto from_srgba8(Index r, Index g, Index b, Index a = 255)
+        -> rstd::Result<Color, UiError> {
+        if (r > 255 || g > 255 || b > 255 || a > 255)
+            return rstd::Err(UiError::InvalidValue);
+        return from_srgba(r / 255.f, g / 255.f, b / 255.f, a / 255.f);
+    }
     friend auto operator==(const Color &, const Color &) -> bool = default;
 };
 struct Clip {

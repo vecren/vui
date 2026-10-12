@@ -25,6 +25,7 @@ auto frame_limit(int argc, char **argv, unsigned &limit) -> bool {
     return false;
 }
 class Application {
+    sdl::Application application_;
     Option<rstd::path::PathBuf> capture_path_;
 
     auto report(gpu::Error error) -> int {
@@ -59,110 +60,64 @@ class Application {
     }
 
   public:
-    sdl::Window window;
-    gpu::Renderer renderer;
-    UiSession session;
+    sdl::Window &window{application_.window()};
+    gpu::Renderer &renderer{application_.renderer()};
+    UiSession &session{application_.session()};
 
     auto open(const char *title, Index width, Index height) -> bool {
         capture_path_ = None();
         auto path = rstd::env::var_os("VUI_CAPTURE"_str);
         if (path.is_some() && !path->is_empty())
             capture_path_ = Some(rstd::path::PathBuf::from(rstd::move(path).unwrap()));
-        auto opened = window.open(title, width, height);
+        auto opened = application_.open({title, width, height, true, capture_path_.is_some()});
         if (opened.is_err()) {
             report(opened.unwrap_err());
             return false;
         }
-        auto initialized = renderer.initialize(window, true, capture_path_.is_some());
-        if (initialized.is_err()) {
-            report(initialized.unwrap_err());
-            return false;
-        }
-        session.set_frame_waker(window.frame_waker()).unwrap();
-        session.input().set_navigation(TabNavigation{});
-        session.input().set_native_capture(
-            [this](PointerKind kind, bool enabled) { return window.capture(kind, enabled); });
+        session.input().set_navigation([this](EventRouter &router, const InputEvent &input) {
+            if (input.type == EventType::KeyDown && input.key == Key::Escape && !input.repeat)
+                application_.request_close();
+            else
+                TabNavigation{}(router, input);
+        });
         return true;
     }
     template <class BeforeUpdate, class AfterUpdate, class Presented>
     auto run(unsigned limit, BeforeUpdate before_update, AfterUpdate after_update,
              Presented presented) -> int {
-        host::FrameLoop frames_loop(session, renderer);
-        bool dirty = true, closing{}, animating = session.document().animations_active();
         unsigned frames{};
-        auto close = [&] {
-            closing = true;
-            session.close().unwrap();
-            frames_loop.close();
-        };
-        while (!frames_loop.status().closed) {
-            auto events =
-                window.wait(dirty && !closing ? 0
-                                              : frames_loop.wait_milliseconds(animating && !closing,
-                                                                              window.timing(),
-                                                                              session.next_tick()));
-            bool requested_close = events.close_requested;
-            for (const auto &event : events.input)
-                if (event.type == EventType::KeyDown && event.key == Key::Escape)
-                    requested_close = true;
-            if (requested_close && !closing)
-                close();
-            if (!closing) {
+        auto hooks = host::callback_hooks(
+            [&](const host::HostEvents &events) -> Result<empty, UiError> {
                 before_update(events.surface);
-                auto update =
-                    session.advance(events.input.as_slice(), window.timing(), events.surface);
-                if (update.is_err()) {
-                    auto error = update.unwrap_err();
-                    rstd::io::eprintln("session stage={} processed={}", unsigned(error.stage),
-                                       error.processed_events);
-                    return 1;
-                }
-                auto outcome = update.unwrap();
-                animating = outcome.animations_active;
-                after_update(outcome);
-                // Completion events are observations; callbacks have already run in
-                // advance().
+                return Ok(empty{});
+            },
+            [&](const AdvanceResult &result) -> Result<empty, UiError> {
+                after_update(result);
                 (void)session.document().poll_animation_events();
                 (void)session.motion().poll_events();
-                for (const auto &mutation : session.poll_mutations())
-                    if (mutation.error.is_some()) {
-                        rstd::io::eprintln("UI mutation failed: {}", unsigned(*mutation.error));
-                        return 1;
-                    }
-                frames_loop.set_surface(events.minimized ? VkExtent2D{} : window.pixel_extent(),
-                                        events.surface.generation);
-                dirty = dirty || events.redraw || outcome.frame_needed;
-                if (dirty) {
-                    auto requested = frames_loop.request();
-                    if (requested.is_ok())
-                        dirty = false;
-                    else if (requested.unwrap_err() != host::FrameRequestError::Busy)
-                        return 1;
-                }
-            }
-            auto pumped = frames_loop.pump();
-            if (pumped.is_err())
-                return report(pumped.unwrap_err());
-            for (const auto &event : frames_loop.poll_events()) {
-                if (event.type == host::FrameEventType::Failed) {
-                    if (event.error.is_some())
-                        return report(*event.error);
-                    rstd::io::eprintln("frame planning failed");
-                    return 1;
-                }
-                if (event.present.is_some() && *event.present != gpu::PresentStatus::Queued)
-                    dirty = true;
+                return Ok(empty{});
+            },
+            [&](const host::FrameEvent &event) -> Result<empty, UiError> {
                 if (event.type != host::FrameEventType::GpuComplete)
-                    continue;
+                    return Ok(empty{});
                 if (capture_path_.is_some() && frames == 0 && !capture(capture_path_->as_path()))
-                    return 1;
+                    return Err(UiError::InvalidValue);
                 presented();
                 ++frames;
-                if (limit && frames >= limit && !closing)
-                    close();
-                else if (limit && !closing)
-                    dirty = true;
-            }
+                if (limit && frames >= limit)
+                    application_.request_close();
+                else if (limit)
+                    application_.request_redraw();
+                return Ok(empty{});
+            },
+            [] { return true; });
+        auto result = application_.run(hooks);
+        if (result.is_err()) {
+            auto error = result.unwrap_err();
+            if (error.gpu.is_some())
+                return report(*error.gpu);
+            rstd::io::eprintln("runner stage={}", unsigned(error.stage));
+            return 1;
         }
         rstd::io::println("GPU completed requests={}, validation errors={}", frames,
                           renderer.validation_errors());

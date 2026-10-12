@@ -239,8 +239,7 @@ auto UiExecutor::prepare(const UiPass &pass, const rg::DeclaredTextures &resourc
                     source_view = *page.gpu->view;
             if (paint.kind == DrawKind::External &&
                 usize(paint.resource_index) < frame.externals.len())
-                source_view = frame.externals[usize(paint.resource_index)]
-                                  .prepared.native;
+                source_view = frame.externals[usize(paint.resource_index)].prepared.native;
             if (!source_view)
                 return Err(rg::ExecutionError::Prepare);
         }
@@ -436,6 +435,12 @@ auto resolve_items(OwnedFrame &frame, GlyphCache &cache, ImageCache &images, Ind
                 item.kind = DrawKind::Image;
                 item.resource_index = resolved.unwrap();
                 item.sampling = value.sampling;
+                item.data.params[2] = static_cast<unsigned>(value.edges);
+                item.data.params[3] = value.clamp_source ? 1 : 0;
+                item.data.color[0] = value.tint.r;
+                item.data.color[1] = value.tint.g;
+                item.data.color[2] = value.tint.b;
+                item.data.color[3] = value.tint.a;
                 item.clip = value.clip;
                 transform_values(item.data, value.transform);
                 rectangle_values(item.data.rect, value.destination);
@@ -459,8 +464,7 @@ auto resolve_items(OwnedFrame &frame, GlyphCache &cache, ImageCache &images, Ind
                     (decode || info.alpha == ContentAlpha::Straight))
                     return Err(Error{Stage::Unsupported});
                 auto prepared = vrento::vulkan::prepare_texture_read(
-                    session, native->native(),
-                    vrento::texture::Stages::Fragment,
+                    session, native->native(), vrento::texture::Stages::Fragment,
                     value.sampling == ImageSampling::Linear);
                 if (prepared.is_err()) {
                     Error error{Stage::ExternalContent};
@@ -476,6 +480,9 @@ auto resolve_items(OwnedFrame &frame, GlyphCache &cache, ImageCache &images, Ind
                 if (usize(index) == frame.externals.len())
                     frame.externals.push(ExternalBinding{value.frame, prepared.unwrap(), {}});
                 item.kind = DrawKind::External;
+                item.data.params[2] = 15;
+                for (auto &component : item.data.color)
+                    component = 1;
                 item.resource_index = index;
                 item.sampling = value.sampling;
                 item.clip = value.clip;
@@ -655,8 +662,7 @@ auto prepare_images(OwnedFrame &frame, ImageCache &cache) -> Result<empty, Error
 struct CompletionTimeline {
     vk::DeviceSession session;
     vvk::Semaphore semaphore;
-    explicit CompletionTimeline(vk::DeviceSession owner)
-        : session(rstd::move(owner)) {}
+    explicit CompletionTimeline(vk::DeviceSession owner) : session(rstd::move(owner)) {}
 };
 
 struct Renderer::Impl {
@@ -668,9 +674,7 @@ struct Renderer::Impl {
     vvk::Pipeline rectangle, composite, glyph, image;
     vvk::Sampler sampler, glyph_sampler;
     Option<rstd::sync::Arc<CompletionTimeline>> completion_timeline;
-    auto completion_semaphore() const -> VkSemaphore {
-        return *(*completion_timeline)->semaphore;
-    }
+    auto completion_semaphore() const -> VkSemaphore { return *(*completion_timeline)->semaphore; }
     GlyphCache glyph_cache;
     ImageCache image_cache;
     FrameResources frame_resources;
@@ -773,8 +777,7 @@ struct Renderer::Impl {
         }
         if (frame.is_some() && (**frame).uncertain_submission != VK_SUCCESS) {
             if (!timeout)
-                return Err(
-                    Error{Stage::Submit, (**frame).uncertain_submission});
+                return Err(Error{Stage::Submit, (**frame).uncertain_submission});
             auto result = session->wait_idle();
             if (result != VK_SUCCESS && result != VK_ERROR_DEVICE_LOST)
                 return Err(Error{Stage::Submit, result});
@@ -1167,8 +1170,7 @@ auto Renderer::finish_initialize() -> Result<empty, Error> {
     VkSemaphoreCreateInfo semaphore{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
     semaphore.pNext = &type;
     auto completion = rstd::sync::Arc<CompletionTimeline>::make(*self.session);
-    auto status = self.device().handle().CreateSemaphore(semaphore,
-                                                         completion->semaphore);
+    auto status = self.device().handle().CreateSemaphore(semaphore, completion->semaphore);
     if (status != VK_SUCCESS)
         return Err(Error{Stage::Allocation, status});
     self.completion_timeline = Some(rstd::move(completion));
@@ -1619,8 +1621,7 @@ auto Renderer::submit_impl() -> Result<Serial, Error> {
         if (!external.texture.valid())
             continue;
         auto prepared_wait = vrento::vulkan::dependency_wait(
-            *self.session, external.prepared.dependency,
-            external.prepared.stages);
+            *self.session, external.prepared.dependency, external.prepared.stages);
         if (prepared_wait.is_err()) {
             Error error{Stage::ExternalContent};
             error.content = Some(prepared_wait.unwrap_err());
@@ -1653,11 +1654,9 @@ auto Renderer::submit_impl() -> Result<Serial, Error> {
     info.pNext = &timeline;
     auto completion = vk::import_dependency(
         *self.session, self.completion_semaphore(), self.submission + 1,
-        rstd::sync::Arc<dyn<rstd::any::Any>>::make(
-            self.completion_timeline->clone()));
+        rstd::sync::Arc<dyn<rstd::any::Any>>::make(self.completion_timeline->clone()));
     if (completion.is_err())
-        return Err(
-            Error{Stage::Submit, VkResult(completion.unwrap_err().native)});
+        return Err(Error{Stage::Submit, VkResult(completion.unwrap_err().native)});
     auto completion_token = completion.unwrap();
     frame.recyclable = false;
     if (frame.queries)
@@ -1672,15 +1671,12 @@ auto Renderer::submit_impl() -> Result<Serial, Error> {
             self.state = Impl::State::Lost;
         if (result == VK_ERROR_DEVICE_LOST)
             frame.fail_timestamps(result);
-        return Err(
-            Error{result == VK_ERROR_DEVICE_LOST ? Stage::Lost : Stage::Submit,
-                  result});
+        return Err(Error{result == VK_ERROR_DEVICE_LOST ? Stage::Lost : Stage::Submit, result});
     }
     for (const auto &external : frame.externals) {
         if (!external.texture.valid())
             continue;
-        auto committed =
-            vk::commit_texture_read(external.prepared, completion_token);
+        auto committed = vk::commit_texture_read(external.prepared, completion_token);
         if (committed.is_err())
             rstd::panic("cannot commit submitted texture read");
     }

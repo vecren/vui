@@ -26,9 +26,10 @@ struct RenderProperties {
     Clip clip;
     Scalar opacity{1};
     bool visible{true};
+    Clip layout_clip;
     auto valid() const -> bool {
-        return transform.valid() && bounds.valid() && clip.valid() && finite(opacity) &&
-               opacity >= 0 && opacity <= 1;
+        return transform.valid() && bounds.valid() && clip.valid() && layout_clip.valid() &&
+               finite(opacity) && opacity >= 0 && opacity <= 1;
     }
     friend auto operator==(const RenderProperties &, const RenderProperties &) -> bool = default;
 };
