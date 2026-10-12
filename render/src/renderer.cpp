@@ -1056,12 +1056,12 @@ auto session_error(vk::DeviceSessionError error) -> Error {
     }
     return {Stage::State, error.result};
 }
-struct SurfaceAdapter : vk::SessionSurfaceFactory {
+struct SurfaceAdapter {
     SurfaceHost &host;
     Option<Error> error;
     explicit SurfaceAdapter(SurfaceHost &host) : host(host) {}
     auto create(VkInstance instance)
-        -> Result<vk::SessionSurface, vk::DeviceSessionError> override {
+        -> Result<vk::SessionSurface, vk::DeviceSessionError> {
         auto result = host.create_surface(instance);
         if (result.is_err()) {
             error = Some(result.unwrap_err());
@@ -1099,7 +1099,10 @@ auto Renderer::initialize_impl(SurfaceHost *host, bool validation, bool readback
     Option<SurfaceAdapter> adapter;
     if (host)
         adapter = Some(SurfaceAdapter(*host));
-    auto created = vk::DeviceSession::create(options, adapter.is_some() ? &*adapter : nullptr);
+    Option<mut_ref<dyn<vk::SessionSurfaceFactory>>> surface;
+    if (adapter.is_some())
+        surface = Some(dyn<vk::SessionSurfaceFactory>::from_ref(*adapter).as_mut_ref());
+    auto created = vk::DeviceSession::create(options, surface);
     if (created.is_err()) {
         if (adapter.is_some() && adapter->error.is_some())
             return Err(*adapter->error);

@@ -15,7 +15,7 @@ struct NativeWindow {
         SDL_QuitSubSystem(SDL_INIT_VIDEO | SDL_INIT_EVENTS);
     }
 };
-struct NativeLease : gpu::SurfaceLifetime {
+struct NativeLease {
     rstd::sync::Arc<NativeWindow> native;
     explicit NativeLease(rstd::sync::Arc<NativeWindow> value) : native(rstd::move(value)) {}
 };
@@ -474,9 +474,7 @@ auto Window::create_surface(VkInstance instance) -> Result<gpu::NativeSurface, g
     VkSurfaceKHR surface{};
     if (!impl_->window || !SDL_Vulkan_CreateSurface(impl_->window, instance, &surface))
         return Err(gpu::Error{gpu::Stage::Surface});
-    auto lifetime = Box<NativeLease>::make(impl_->native->clone());
     return Ok(gpu::NativeSurface{
-        surface, Box<gpu::SurfaceLifetime>::from_raw(
-                     rstd::move(lifetime).into_raw().template cast<gpu::SurfaceLifetime>())});
+        surface, Box<dyn<gpu::SurfaceLifetime>>::make(NativeLease(impl_->native->clone()))});
 }
 } // namespace vui::sdl
