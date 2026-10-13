@@ -8,6 +8,7 @@ import :binding;
 import :layout.protocol;
 import :paint.protocol;
 import :motion.properties;
+import :state.targets;
 using namespace rstd::prelude;
 using namespace rstd::literals;
 
@@ -353,6 +354,7 @@ class UiDocument {
         Option<Box<SceneContent>> scene;
         AnimatedStyle animated;
         rstd::rc::Weak<PropertyLeaseState> property_owner[7];
+        rstd::rc::Weak<UiValueWriterState> value_writer[3];
         Node(LayoutKind value, NodeStyle properties) : kind(value), style(properties) {}
     };
     struct Slot {
@@ -385,6 +387,7 @@ class UiDocument {
     bool updating_{}, painting_{};
     BindingRegistry bindings_;
     Binding lease_owner_{bindings_.make()};
+    Vec<rstd::rc::Weak<UiTargetState>> value_targets_;
     Serial next_lease_{1};
     Vec<PaintDiagnostic> paint_diagnostics_;
     UpdateTimings *active_timings_{};
@@ -394,6 +397,93 @@ class UiDocument {
     Serial rejected_cleanups_{};
     Serial next_mutation_{1};
     Vec<Box<Mutation>> mutations_;
+
+    void notify_targets() {
+        Vec<rstd::rc::Rc<UiTargetState>> changed_targets;
+        for (auto &weak : value_targets_) {
+            auto target = weak.upgrade();
+            if (target.is_none())
+                continue;
+            auto &state = *target->get();
+            auto node = resolve(state.node);
+            UiTargetStatus next{node != nullptr, node && mounted(state.node),
+                                node ? node->mount_generation : 0};
+            if (state.status != next) {
+                state.status = next;
+                changed_targets.push(rstd::move(*target));
+            }
+        }
+        value_targets_.retain([](const auto &weak) { return !weak.expired(); });
+        for (auto &target : changed_targets) {
+            auto &state = *target.get();
+            Vec<rstd::rc::Rc<UiTargetObserver>> callbacks;
+            for (auto &observer : state.observers)
+                if (observer->guard.alive())
+                    callbacks.push(observer.clone());
+            for (auto &observer : callbacks)
+                if (observer->guard.alive())
+                    observer.get()->callback->operator()(state.status);
+            state.observers.retain([](const auto &observer) { return observer->guard.alive(); });
+        }
+    }
+    auto value_occupied(Node &node, UiValueProperty property) -> bool {
+        auto writer = node.value_writer[unsigned(property)].upgrade();
+        return writer.is_some() && (*writer)->active;
+    }
+    auto write_text(UiId id, Node &node, String value) -> bool {
+        auto &text = **node.text;
+        if (text.value.as_str() == value.as_str())
+            return false;
+        text.value = rstd::move(value);
+        text.dirty = true;
+        changed(true, Some(id));
+        return true;
+    }
+    auto write_visible(UiId id, Node &node, bool value) -> bool {
+        if (node.style.visible == value)
+            return false;
+        node.style.visible = value;
+        changed(false, Some(id));
+        return true;
+    }
+    auto write_image(UiId id, Node &node, Option<ImageData> data) -> bool {
+        auto &image = **node.image;
+        if (image.data.is_some() == data.is_some() &&
+            (data.is_none() || image.data->id() == data->id()))
+            return false;
+        auto old_size = image.data.is_some() ? image.data->natural_size() : Size{};
+        auto new_size = data.is_some() ? data->natural_size() : Size{};
+        image.data = rstd::move(data);
+        node.paint_dirty = true;
+        changed(old_size != new_size, Some(id));
+        return true;
+    }
+    template <class T>
+    auto value_target(UiId id, UiValueProperty property) -> Result<UiPropertyTarget<T>, UiError> {
+        auto node = resolve(id);
+        if (!node)
+            return Err(UiError::InvalidId);
+        if ((property == UiValueProperty::Text && node->text.is_none()) ||
+            (property == UiValueProperty::Image && node->image.is_none()))
+            return Err(UiError::InvalidValue);
+        value_targets_.retain([](const auto &weak) { return !weak.expired(); });
+        for (auto &weak : value_targets_) {
+            auto target = weak.upgrade();
+            if (target.is_some() && (*target)->node == id && (*target)->property == property)
+                return Ok(UiPropertyTarget<T>(rstd::move(*target)));
+        }
+        if (value_targets_.len() >= usize(4096))
+            return Err(UiError::Limit);
+        auto target = rstd::rc::make_rc<UiTargetState>(
+            UiTargetState{session_,
+                          id,
+                          property,
+                          lease_owner_.guard(),
+                          {true, mounted(id), node->mount_generation},
+                          {}});
+        value_targets_.push(target.downgrade());
+        return Ok(UiPropertyTarget<T>(rstd::move(target)));
+    }
 
     void sweep_bindings() {
         for (auto id : bound_nodes_) {
@@ -1400,10 +1490,12 @@ class UiDocument {
         }
     };
     UiDocument() = default;
+    ~UiDocument() { bindings_.close(); }
     UiDocument(const UiDocument &) = delete;
     auto operator=(const UiDocument &) -> UiDocument & = delete;
     auto session() const -> Serial { return session_; }
     auto bindings() -> BindingRegistry & { return bindings_; }
+    auto lifetime() const -> BindingGuard { return lease_owner_.guard(); }
     auto paint_diagnostics() const -> slice<PaintDiagnostic> {
         return paint_diagnostics_.as_slice();
     }
@@ -1629,6 +1721,7 @@ class UiDocument {
         p->children.push(UiId(child));
         remount(child);
         changed(true, Some(parent));
+        notify_targets();
         return Ok(empty{});
     }
     template <class T> auto append(UiId parent, NodeStyle style = {}) -> Result<UiId, UiError> {
@@ -1661,6 +1754,7 @@ class UiDocument {
         root_ = Some(root);
         node->position = {};
         changed(true, Some(root));
+        notify_targets();
         return Ok(empty{});
     }
     auto detach(UiId id) -> Result<empty, UiError> {
@@ -1679,6 +1773,7 @@ class UiDocument {
         if (root_.is_some() && *root_ == id)
             root_ = None();
         changed(true, Some(id));
+        notify_targets();
         return Ok(empty{});
     }
     auto destroy(UiId id) -> Result<empty, UiError> {
@@ -1686,6 +1781,7 @@ class UiDocument {
         if (result.is_err())
             return result;
         erase(id);
+        notify_targets();
         return Ok(empty{});
     }
     auto reorder(UiId parent, UiId child, usize destination) -> Result<empty, UiError> {
@@ -1719,6 +1815,81 @@ class UiDocument {
         if (!node)
             return Err(UiError::InvalidId);
         return Ok(UiMountState{mounted(id), node->mount_generation});
+    }
+    auto text_target(UiId id) -> Result<UiPropertyTarget<String>, UiError> {
+        return value_target<String>(id, UiValueProperty::Text);
+    }
+    auto visible_target(UiId id) -> Result<UiPropertyTarget<bool>, UiError> {
+        return value_target<bool>(id, UiValueProperty::Visible);
+    }
+    auto image_target(UiId id) -> Result<UiPropertyTarget<Option<ImageData>>, UiError> {
+        return value_target<Option<ImageData>>(id, UiValueProperty::Image);
+    }
+    template <class T>
+    auto claim_value_writer(const UiPropertyTarget<T> &target)
+        -> Result<UiValueWriter<T>, UiError> {
+        if (layout_active_ || painting_)
+            return Err(UiError::Routing);
+        if (target.document() != session_ || !target.status().valid)
+            return Err(UiError::InvalidId);
+        auto node = resolve(target.node());
+        if (value_occupied(*node, target.state_->property))
+            return Err(UiError::PropertyOwned);
+        auto writer = rstd::rc::make_rc<UiValueWriterState>(target.state_);
+        node->value_writer[unsigned(target.state_->property)] = writer.downgrade();
+        return Ok(UiValueWriter<T>(rstd::move(writer)));
+    }
+    template <class T, class F>
+    auto observe_target(UiPropertyTarget<T> target, F callback)
+        -> Result<UiTargetSubscription, UiError> {
+        if (target.document() != session_ || !target.status().valid)
+            return Err(UiError::InvalidId);
+        auto &state = *target.state_.get();
+        state.observers.retain([](const auto &observer) { return observer->guard.alive(); });
+        if (state.observers.len() >= usize(4096))
+            return Err(UiError::Limit);
+        auto lifetime = bindings_.make();
+        state.observers.push(rstd::rc::make_rc<UiTargetObserver>(UiTargetObserver{
+            lifetime.guard(),
+            Box<rstd::dyn<rstd::FnMut<void(UiTargetStatus)>>>::make(rstd::move(callback))}));
+        return Ok(rstd::move(lifetime));
+    }
+    auto apply_values(UiValueBatch batch) -> Result<usize, UiValueBatchError> {
+        if (layout_active_ || painting_)
+            return Err(UiValueBatchError{usize(), UiError::Routing});
+        if (batch.size() > usize(4096))
+            return Err(UiValueBatchError{usize(), UiError::Limit});
+        for (usize i{}; i < batch.entries_.len(); ++i) {
+            const auto &entry = batch.entries_[i];
+            if (!entry.writer || !entry.writer->active)
+                return Err(UiValueBatchError{i, UiError::Cancelled});
+            const auto &target = *entry.writer->target;
+            auto node = resolve(target.node);
+            if (target.document != session_ || !node)
+                return Err(UiValueBatchError{i, UiError::InvalidId});
+            if (!mounted(target.node) || node->mount_generation != entry.generation)
+                return Err(UiValueBatchError{i, UiError::Cancelled});
+            auto owner = node->value_writer[unsigned(target.property)].upgrade();
+            if (owner.is_none() || owner->get() != entry.writer.get())
+                return Err(UiValueBatchError{i, UiError::PropertyOwned});
+        }
+        usize changed_count{};
+        for (auto &entry : batch.entries_) {
+            const auto &target = *entry.writer->target;
+            auto node = resolve(target.node);
+            switch (target.property) {
+            case UiValueProperty::Text:
+                changed_count += usize(write_text(target.node, *node, rstd::move(entry.text)));
+                break;
+            case UiValueProperty::Visible:
+                changed_count += usize(write_visible(target.node, *node, entry.visible));
+                break;
+            case UiValueProperty::Image:
+                changed_count += usize(write_image(target.node, *node, rstd::move(entry.image)));
+                break;
+            }
+        }
+        return Ok(changed_count);
     }
     auto take_over(slice<PropertyKey> keys, TakeoverPolicy policy = TakeoverPolicy::PreserveCurrent)
         -> Result<PresentationLease, UiError> {
@@ -2088,15 +2259,9 @@ class UiDocument {
             return Err(UiError::InvalidId);
         if (node->image.is_none())
             return Err(UiError::InvalidValue);
-        auto &image = **node->image;
-        if (image.data.is_some() == data.is_some() &&
-            (data.is_none() || image.data->id() == data->id()))
-            return Ok(empty{});
-        auto old_size = image.data.is_some() ? image.data->natural_size() : Size{};
-        auto new_size = data.is_some() ? data->natural_size() : Size{};
-        image.data = rstd::move(data);
-        node->paint_dirty = true;
-        changed(old_size != new_size, Some(id));
+        if (value_occupied(*node, UiValueProperty::Image))
+            return Err(UiError::PropertyOwned);
+        write_image(id, *node, rstd::move(data));
         return Ok(empty{});
     }
     auto set_image_tint(UiId id, Color tint) -> Result<empty, UiError> {
@@ -2185,12 +2350,10 @@ class UiDocument {
             return Err(UiError::InvalidId);
         if (node->text.is_none())
             return Err(UiError::InvalidValue);
-        auto &text = **node->text;
-        if (text.value.as_str() != value) {
-            text.value = String::make(value);
-            text.dirty = true;
-            changed(true, Some(id));
-        }
+        if (value_occupied(*node, UiValueProperty::Text))
+            return Err(UiError::PropertyOwned);
+        if ((**node->text).value.as_str() != value)
+            write_text(id, *node, String::make(value));
         return Ok(empty{});
     }
     auto set_text_format(UiId id, TextFormat format) -> Result<empty, UiError> {
@@ -2508,10 +2671,9 @@ class UiDocument {
         auto node = resolve(id);
         if (!node)
             return Err(UiError::InvalidId);
-        if (node->style.visible != value) {
-            node->style.visible = value;
-            changed(false, Some(id));
-        }
+        if (value_occupied(*node, UiValueProperty::Visible))
+            return Err(UiError::PropertyOwned);
+        write_visible(id, *node, value);
         return Ok(empty{});
     }
     auto set_hit_self(UiId id, bool value) -> Result<empty, UiError> {

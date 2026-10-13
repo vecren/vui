@@ -3,6 +3,7 @@ import :events;
 import :motion.drivers;
 import :visual;
 import :frame;
+import :state.bindings;
 using namespace rstd::prelude;
 
 export namespace vui {
@@ -34,6 +35,7 @@ struct AdvanceResult {
     bool frame_needed{};
     usize processed_events{};
     bool animations_active{};
+    bool state_pending{};
 };
 struct AdvanceTimings {
     Serial document{}, ui_revision{}, render_revision{};
@@ -86,6 +88,7 @@ class UiSession {
     UiDocument document_;
     MotionRuntime motion_{document_};
     EventRouter input_{document_};
+    UiStateBindings state_bindings_{document_};
     Serial render_session_{new_session()};
     VisualBuilder visual_{render_session_};
     RenderEndpoint endpoint_{render_session_};
@@ -228,6 +231,9 @@ class UiSession {
                 return Err(rstd::move(e));
             }
             CpuTimer geometry(active_timings_ ? &active_timings_->geometry : nullptr);
+            auto state = state_bindings_.drain(true);
+            if (state.is_err())
+                return Err(SessionError{SessionStage::Update, Some(state.unwrap_err())});
             auto next = document_.input_snapshot(size, {active_timings_ != nullptr});
             geometry.pause();
             stats.add(document_.input_stats());
@@ -246,7 +252,8 @@ class UiSession {
             if (synced.is_err())
                 return Err(SessionError{SessionStage::Input, {}, Some(synced.unwrap_err())});
             if (revision == document_.revision() && document_.pending_mutations() == usize() &&
-                !document_.pending_animation_callbacks() && !input_.pending_sync()) {
+                !document_.pending_animation_callbacks() && !input_.pending_sync() &&
+                !state_bindings_.pending()) {
                 auto revealed = reveal_focus(input_.snapshot().unwrap());
                 if (revealed.is_err())
                     return Err(revealed.unwrap_err());
@@ -281,6 +288,10 @@ class UiSession {
                 error.animation = Some(callbacks.unwrap_err());
                 return Err(rstd::move(error));
             }
+            auto state = state_bindings_.drain();
+            if (state.is_err())
+                return Err(SessionError{SessionStage::Update, Some(state.unwrap_err())});
+            auto state_result = state.unwrap();
             auto next = document_.update(size, {active_timings_ != nullptr});
             if (active_timings_) {
                 const auto sample = document_.last_update_timings().unwrap();
@@ -299,7 +310,8 @@ class UiSession {
                 return Err(SessionError{SessionStage::Input, {}, Some(synced.unwrap_err())});
             if (document_.revision() == update_->revision() &&
                 document_.pending_mutations() == usize() &&
-                !document_.pending_animation_callbacks() && !input_.pending_sync()) {
+                !document_.pending_animation_callbacks() && !input_.pending_sync() &&
+                (!state_result.pending || state_result.groups >= usize(16))) {
                 auto revealed = reveal_focus(*update_);
                 if (revealed.is_err())
                     return Err(revealed.unwrap_err());
@@ -313,11 +325,16 @@ class UiSession {
 
   public:
     UiSession() = default;
+    ~UiSession() {
+        document_.bindings().set_waker(None());
+        state_bindings_.close();
+    }
     UiSession(const UiSession &) = delete;
     auto operator=(const UiSession &) -> UiSession & = delete;
     auto document() -> UiDocument & { return document_; }
     auto input() -> EventRouter & { return input_; }
     auto motion() -> MotionRuntime & { return motion_; }
+    auto state_bindings() -> UiStateBindings & { return state_bindings_; }
     auto next_tick() const -> Option<Serial> { return motion_.next_tick(); }
     auto render_scene() const -> const RenderScene & { return endpoint_.scene(); }
     auto set_frame_waker(Option<FrameWaker> waker) -> Result<empty, SessionError> {
@@ -330,6 +347,8 @@ class UiSession {
         document_.bindings().set_waker(waker.is_some() ? Some(FrameWaker(*waker))
                                                        : None<FrameWaker>());
         frame_waker_ = rstd::move(waker);
+        state_bindings_.set_waker(frame_waker_.is_some() ? Some(FrameWaker(*frame_waker_))
+                                                         : None<FrameWaker>());
         for (auto &observed : content_) {
             observed.subscription = None();
             if (frame_waker_.is_some() && frame_waker_->valid() && !observed.source.closed())
@@ -435,7 +454,7 @@ class UiSession {
                    history.len() + events[last].history.len() +
                            events[last + usize(1)].history.len() <
                        usize(512) &&
-                   !document_.pending_mutations().to_primitive() &&
+                   !document_.pending_mutations().to_primitive() && !state_bindings_.pending() &&
                    input_.can_coalesce(events[last], events[last + usize(1)])) {
                 for (const auto &sample : events[last].history)
                     history.push(PointerSample(sample));
@@ -536,7 +555,8 @@ class UiSession {
         bool content_changed = observe_content();
         return Ok(AdvanceResult{update_->revision(), visual_.applied_revision(), stats,
                                 changed || surface_changed || content_changed, processed,
-                                document_.animations_active() || motion_.active()});
+                                document_.animations_active() || motion_.active(),
+                                state_bindings_.pending()});
     }
 
   public:
@@ -554,6 +574,7 @@ class UiSession {
         if (advancing_ || !document_.can_route())
             return Err(SessionError{SessionStage::Reentrant});
         closing_ = true;
+        state_bindings_.close();
         motion_.close();
         auto animations = document_.close_animations();
         if (animations.is_err()) {
