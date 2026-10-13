@@ -17,6 +17,7 @@ using namespace rstd::literals;
 namespace vui::gpu {
 namespace rg = ::vrento::rg;
 namespace vk = ::vrento::vulkan;
+namespace tex = ::vrento::texture;
 namespace {
 using namespace detail;
 using CpuSample = vui::CpuTimer;
@@ -35,39 +36,12 @@ struct SampleBinding {
     Index cache_index;
     rstd::sync::Arc<SampledImage> gpu;
     Option<vvk::AllocatedBuffer> upload;
-    rg::TextureNodeRef texture;
+    rg::ResourceId texture;
 };
 struct ExternalBinding {
     TextureFrame frame;
-    vrento::vulkan::TextureRead prepared;
-    rg::TextureNodeRef texture;
-};
-struct UploadPass : rg::Pass {
-    struct Source {
-        Index binding;
-        rg::TextureNodeRef texture;
-        bool upload;
-    };
-    struct Desc {
-        Vec<Source> pages;
-    };
-    Desc desc;
-    explicit UploadPass(Desc value) : desc(rstd::move(value)) {}
-};
-struct UiPass : rg::Pass {
-    struct Source {
-        Index index;
-        rg::TextureNodeRef texture;
-        DrawKind kind{DrawKind::Composite};
-    };
-    struct Desc {
-        Index index{};
-        rg::TextureNodeRef target;
-        Vec<Source> sources;
-        Vec<Source> samples;
-    };
-    Desc desc;
-    explicit UiPass(Desc value) : desc(rstd::move(value)) {}
+    tex::TextureViewRef view;
+    rg::ResourceId texture;
 };
 struct OwnedFrame;
 struct PrepareContext {
@@ -79,7 +53,6 @@ struct PrepareContext {
 struct RecordContext {
     VkCommandBuffer command;
     const vvk::DeviceDispatch &dispatch;
-    VkRenderPass render_pass;
     VkPipelineLayout layout;
     VkPipeline rectangle, composite, glyph, image;
 };
@@ -88,22 +61,47 @@ struct PreparedDraw {
     DrawKind kind;
     Index first{}, count{1};
 };
+struct FrameGpu {
+    vk::DeviceSession session;
+    rstd::sync::Arc<FrameResources> resources;
+    Option<tex::SubmissionReceipt> receipt;
+    bool recyclable{true};
+    Vec<Target> targets;
+    FrameBuffer clips, instances, readback;
+    VkDescriptorPool pool{};
+    FrameGpu(vk::DeviceSession owner, rstd::sync::Arc<FrameResources> cache)
+        : session(rstd::move(owner)), resources(rstd::move(cache)) {}
+    ~FrameGpu() {
+        recyclable &=
+            !session.lost() && (!receipt || receipt->status() != tex::SubmissionStatus::Uncertain);
+        if (pool)
+            session.device().handle().Dispatch().vkDestroyDescriptorPool(*session.device().handle(),
+                                                                         pool, nullptr);
+        for (auto &target : targets)
+            resources->release(rstd::move(target), recyclable);
+        resources->release(rstd::move(clips), recyclable);
+        resources->release(rstd::move(instances), recyclable);
+        resources->release(rstd::move(readback), recyclable);
+    }
+};
+struct FrameFence {
+    vk::DeviceSession session;
+    vvk::Fence value;
+    explicit FrameFence(vk::DeviceSession owner) : session(rstd::move(owner)) {}
+};
 struct UiExecutor {
-    VkFramebuffer framebuffer{};
-    VkExtent2D extent{};
     Vec<PreparedDraw> draws;
-    auto prepare(const UiPass &, const rg::DeclaredTextures &, PrepareContext &)
-        -> Result<empty, rg::ExecutionError>;
-    auto record(RecordContext &) -> Result<empty, rg::ExecutionError>;
+    auto prepare(Index, const rg::PassDescription &, const vk::GraphBindings &, PrepareContext &)
+        -> Result<empty, vk::GraphExecutionError>;
+    auto record(RecordContext &) const -> Result<empty, vk::GraphExecutionError>;
 };
 struct OwnedFrame {
     const vk::Device &device;
-    FrameResources &resources;
     bool recyclable{true};
     VkResult uncertain_submission{VK_SUCCESS};
     FramePlan plan;
-    rg::RenderGraph graph;
-    rg::GraphExecutor<PrepareContext, RecordContext> executor;
+    rstd::sync::Arc<FrameGpu> gpu;
+    Option<vk::PreparedGraphProgram> program;
     Vec<Vec<PaintItem>> items;
     Vec<Index> item_offsets;
     DrawOptions options;
@@ -144,45 +142,30 @@ struct OwnedFrame {
     }
     Vec<SampleBinding> samples;
     Vec<ExternalBinding> externals;
-    Vec<Target> targets;
-    Vec<rg::TextureNodeRef> textures;
-    FrameBuffer clips, instances, readback;
-    VkDescriptorPool pool{};
-    VkCommandBuffer command{};
-    vvk::Fence fence, acquire_fence;
+    Vec<rg::ResourceId> textures;
+    rstd::sync::Arc<FrameFence> fence;
+    vvk::Fence acquire_fence;
     vvk::Semaphore acquire_semaphore;
     Index image_index{};
     bool acquired{}, presented{}, suboptimal{};
     VkExtent2D extent{};
     VkResult error{VK_SUCCESS};
-    explicit OwnedFrame(const vk::Device &device, FrameResources &resources, FramePlan plan)
-        : device(device), resources(resources), plan(rstd::move(plan)) {}
+    explicit OwnedFrame(vk::DeviceSession session, rstd::sync::Arc<FrameResources> resources,
+                        FramePlan plan)
+        : device(session.device()), plan(rstd::move(plan)),
+          gpu(rstd::sync::Arc<FrameGpu>::make(session, rstd::move(resources))),
+          fence(rstd::sync::Arc<FrameFence>::make(rstd::move(session))) {}
     void release_uploads() {
         for (auto &page : samples)
             page.upload = None();
     }
     ~OwnedFrame() {
         const auto &d = device.handle().Dispatch();
-        if (command)
-            d.vkFreeCommandBuffers(*device.handle(), *device.cmd_pool(), 1, &command);
-        if (pool)
-            d.vkDestroyDescriptorPool(*device.handle(), pool, nullptr);
         if (queries)
             d.vkDestroyQueryPool(*device.handle(), queries, nullptr);
-        for (auto &target : targets)
-            resources.release(rstd::move(target), recyclable);
-        resources.release(rstd::move(clips), recyclable);
-        resources.release(rstd::move(instances), recyclable);
-        resources.release(rstd::move(readback), recyclable);
+        gpu->recyclable = recyclable;
     }
 };
-auto shader(const vvk::Device &device, const unsigned *code, rstd::size_t bytes,
-            vvk::ShaderModule &output) -> VkResult {
-    VkShaderModuleCreateInfo info{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
-    info.codeSize = bytes;
-    info.pCode = code;
-    return device.CreateShaderModule(info, output);
-}
 void rectangle_values(float *output, Rect rect) {
     output[0] = static_cast<float>(rect.x);
     output[1] = static_cast<float>(rect.y);
@@ -197,51 +180,42 @@ void transform_values(DrawData &output, Transform transform) {
     output.row1[1] = static_cast<float>(transform.d);
     output.row1[2] = static_cast<float>(transform.ty);
 }
-auto UiExecutor::prepare(const UiPass &pass, const rg::DeclaredTextures &resources,
-                         PrepareContext &context) -> Result<empty, rg::ExecutionError> {
+auto UiExecutor::prepare(Index index, const rg::PassDescription &pass,
+                         const vk::GraphBindings &bindings, PrepareContext &context)
+    -> Result<empty, vk::GraphExecutionError> {
     auto &frame = context.frame;
-    if (resources.write(pass.desc.target).is_none())
-        return Err(rg::ExecutionError::Prepare);
-    for (const auto &source : pass.desc.sources)
-        if (resources.read(source.texture).is_none())
-            return Err(rg::ExecutionError::Prepare);
-    framebuffer = *frame.targets[usize(pass.desc.index)].framebuffer;
-    extent = frame.extent;
     const auto &d = context.device.handle().Dispatch();
     draws.clear();
-    for (const auto &source : pass.desc.samples)
-        if (resources.read(source.texture).is_none())
-            return Err(rg::ExecutionError::Prepare);
     VkImageView previous_view{};
     VkSampler previous_sampler{};
-    Index instance = frame.item_offsets[usize(pass.desc.index)];
-    for (const auto &paint : frame.items[usize(pass.desc.index)]) {
+    Index instance = frame.item_offsets[usize(index)];
+    for (const auto &paint : frame.items[usize(index)]) {
         PreparedDraw item{{}, paint.kind, instance++, 1};
         VkImageView source_view{};
-        if (paint.kind == DrawKind::Composite) {
-            bool declared{};
-            for (const auto &source : pass.desc.sources)
-                if (source.index == paint.source_pass)
-                    declared = true;
-            if (!declared || usize(paint.source_pass) >= frame.targets.len())
-                return Err(rg::ExecutionError::Prepare);
-            source_view = *frame.targets[usize(paint.source_pass)].view;
-        } else if (paint.kind == DrawKind::Glyph || paint.kind == DrawKind::Image ||
-                   paint.kind == DrawKind::External) {
-            bool declared{};
-            for (const auto &source : pass.desc.samples)
-                if (source.index == paint.resource_index && source.kind == paint.kind)
-                    declared = true;
-            if (!declared)
-                return Err(rg::ExecutionError::Prepare);
+        rg::ResourceId source{};
+        if (paint.kind == DrawKind::Composite)
+            source = frame.textures[usize(paint.source_pass)];
+        else if (paint.kind == DrawKind::External)
+            source = frame.externals[usize(paint.resource_index)].texture;
+        else if (paint.kind == DrawKind::Glyph || paint.kind == DrawKind::Image)
             for (const auto &page : frame.samples)
                 if (page.cache_index == paint.resource_index && page.kind == paint.kind)
-                    source_view = *page.gpu->view;
-            if (paint.kind == DrawKind::External &&
-                usize(paint.resource_index) < frame.externals.len())
-                source_view = frame.externals[usize(paint.resource_index)].prepared.native;
-            if (!source_view)
-                return Err(rg::ExecutionError::Prepare);
+                    source = page.texture;
+        if (item.kind != DrawKind::Rectangle) {
+            bool declared{};
+            for (const auto &use : pass.uses)
+                declared |= use.resource == source && use.access == rg::GraphAccess::Read;
+            auto bound = bindings.resolve(source);
+            if (!declared || bound.is_none() || (*bound)->Texture().is_none())
+                return Err(vk::GraphExecutionError{vk::GraphExecutionStage::Prepare});
+            auto native = vk::native_view(*(*bound)->Texture());
+            if (native.is_err())
+                return Err(vk::GraphExecutionError{vk::GraphExecutionStage::Prepare,
+                                                   {},
+                                                   source,
+                                                   VK_SUCCESS,
+                                                   Some(native.unwrap_err())});
+            source_view = native.unwrap();
         }
         auto sampler =
             paint.kind == DrawKind::Glyph ||
@@ -271,15 +245,16 @@ auto UiExecutor::prepare(const UiPass &pass, const rg::DeclaredTextures &resourc
         previous_sampler = sampler;
         ++frame.stats.batches;
         VkDescriptorSetAllocateInfo allocate{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-        allocate.descriptorPool = frame.pool;
+        allocate.descriptorPool = frame.gpu->pool;
         allocate.descriptorSetCount = 1;
         allocate.pSetLayouts = &context.layout;
         frame.error =
             d.vkAllocateDescriptorSets(*context.device.handle(), &allocate, &item.descriptor);
         if (frame.error != VK_SUCCESS)
-            return Err(rg::ExecutionError::Prepare);
-        VkDescriptorBufferInfo buffer{frame.clips.handle(), 0, VK_WHOLE_SIZE};
-        VkDescriptorBufferInfo instances{frame.instances.handle(), 0, VK_WHOLE_SIZE};
+            return Err(
+                vk::GraphExecutionError{vk::GraphExecutionStage::Prepare, {}, {}, frame.error});
+        VkDescriptorBufferInfo buffer{frame.gpu->clips.handle(), 0, VK_WHOLE_SIZE};
+        VkDescriptorBufferInfo instances{frame.gpu->instances.handle(), 0, VK_WHOLE_SIZE};
         VkWriteDescriptorSet writes[3]{};
         writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         writes[0].dstSet = item.descriptor;
@@ -305,21 +280,8 @@ auto UiExecutor::prepare(const UiPass &pass, const rg::DeclaredTextures &resourc
     }
     return Ok(empty{});
 }
-auto UiExecutor::record(RecordContext &context) -> Result<empty, rg::ExecutionError> {
+auto UiExecutor::record(RecordContext &context) const -> Result<empty, vk::GraphExecutionError> {
     const auto &d = context.dispatch;
-    VkClearValue clear{};
-    VkRenderPassBeginInfo begin{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
-    begin.renderPass = context.render_pass;
-    begin.framebuffer = framebuffer;
-    begin.renderArea.extent = extent;
-    begin.clearValueCount = 1;
-    begin.pClearValues = &clear;
-    d.vkCmdBeginRenderPass(context.command, &begin, VK_SUBPASS_CONTENTS_INLINE);
-    VkViewport viewport{0, 0, static_cast<float>(extent.width), static_cast<float>(extent.height),
-                        0, 1};
-    VkRect2D scissor{{0, 0}, extent};
-    d.vkCmdSetViewport(context.command, 0, 1, &viewport);
-    d.vkCmdSetScissor(context.command, 0, 1, &scissor);
     for (const auto &draw : draws) {
         d.vkCmdBindPipeline(context.command, VK_PIPELINE_BIND_POINT_GRAPHICS,
                             draw.kind == DrawKind::Image || draw.kind == DrawKind::External
@@ -331,57 +293,130 @@ auto UiExecutor::record(RecordContext &context) -> Result<empty, rg::ExecutionEr
                                   0, 1, &draw.descriptor, 0, nullptr);
         d.vkCmdDraw(context.command, 6, draw.count, 0, draw.first);
     }
-    d.vkCmdEndRenderPass(context.command);
     return Ok(empty{});
 }
-struct UploadExecutor {
-    struct Upload {
-        VkImage image;
-        VkBuffer buffer;
+constexpr rg::GraphSerial ui_kind = 0x5655494452415701ull;
+constexpr rg::GraphSerial upload_kind = 0x56554955504c4401ull;
+struct UiAssets {
+    vk::DeviceSession session;
+    vrento::resource_registry::DescriptorLayoutRegistry &descriptors;
+    vrento::resource_registry::PipelineLayoutRegistry &layouts;
+    vrento::resource_registry::RenderPassRegistry &passes;
+    vrento::resource_registry::PipelineRegistry &pipelines;
+    Option<vrento::resource_registry::PipelineLayoutResult> layout;
+    vvk::Sampler sampler, glyph_sampler;
+    Vec<vrento::resource::PipelineRecipeHandle> recipes;
+    Vec<vrento::resource_registry::PipelineResourceResult> warmed;
+    explicit UiAssets(vk::DeviceSession owner)
+        : session(rstd::move(owner)), descriptors(session.graphics_resources().descriptors),
+          layouts(session.graphics_resources().layouts),
+          passes(session.graphics_resources().passes),
+          pipelines(session.graphics_resources().pipelines) {}
+    ~UiAssets() {
+        for (const auto &recipe : recipes)
+            pipelines.ReleaseRecipe(recipe);
+    }
+    auto descriptor() const -> VkDescriptorSetLayout {
+        return *(**descriptors.Resolve(layout->physical->descriptor_layouts[usize()])).layout;
+    }
+    auto initialize() -> Result<empty, Error>;
+};
+struct UiPrepared {
+    rstd::sync::Arc<FrameGpu> gpu;
+    rstd::sync::Arc<UiAssets> assets;
+    Vec<vrento::resource_registry::PipelineResourceResult> pipelines;
+    UiExecutor executor;
+    RecordContext native;
+    auto Record(vk::GraphRecordContext &context) const -> Result<empty, vk::GraphExecutionError> {
+        auto command = vk::native_recording(context.submission, context.session);
+        if (command.is_err())
+            return Err(vk::GraphExecutionError{
+                vk::GraphExecutionStage::Record, {}, {}, VK_SUCCESS, Some(command.unwrap_err())});
+        auto state = native;
+        state.command = command.unwrap();
+        return executor.record(state);
+    }
+};
+struct UploadPrepared {
+    struct Item {
+        vvk::AllocatedBuffer staging;
+        tex::TextureViewRef target;
         VkExtent2D extent;
     };
-    Vec<Upload> uploads;
-    auto prepare(const UploadPass &pass, const rg::DeclaredTextures &resources,
-                 PrepareContext &context) -> Result<empty, rg::ExecutionError> {
-        for (const auto &source : pass.desc.pages) {
-            const auto &binding = context.frame.samples[usize(source.binding)];
-            if (source.upload) {
-                if (resources.write(source.texture).is_none() || binding.upload.is_none())
-                    return Err(rg::ExecutionError::Prepare);
-                uploads.push(Upload{binding.gpu->image.handle(), binding.upload->handle(),
-                                    binding.gpu->extent});
-            } else if (resources.read(source.texture).is_none())
-                return Err(rg::ExecutionError::Prepare);
+    Vec<Item> items;
+    auto Record(vk::GraphRecordContext &context) const -> Result<empty, vk::GraphExecutionError> {
+        auto command = vk::native_recording(context.submission, context.session);
+        if (command.is_err())
+            return Err(vk::GraphExecutionError{
+                vk::GraphExecutionStage::Record, {}, {}, VK_SUCCESS, Some(command.unwrap_err())});
+        for (const auto &item : items) {
+            auto image = vk::native_texture(item.target.texture());
+            if (image.is_err())
+                return Err(vk::GraphExecutionError{
+                    vk::GraphExecutionStage::Record, {}, {}, VK_SUCCESS, Some(image.unwrap_err())});
+            VkBufferImageCopy copy{};
+            copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            copy.imageExtent = {item.extent.width, item.extent.height, 1};
+            context.session.device().handle().Dispatch().vkCmdCopyBufferToImage(
+                command.unwrap(), item.staging.handle(), image.unwrap(),
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
         }
         return Ok(empty{});
     }
-    auto record(RecordContext &context) -> Result<empty, rg::ExecutionError> {
-        const auto &d = context.dispatch;
-        for (const auto &upload : uploads) {
-            VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
-            barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-            barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-            barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-            barrier.srcQueueFamilyIndex = barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            barrier.image = upload.image;
-            barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-            d.vkCmdPipelineBarrier(context.command, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                                   VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1,
-                                   &barrier);
-            VkBufferImageCopy copy{};
-            copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-            copy.imageExtent = {upload.extent.width, upload.extent.height, 1};
-            d.vkCmdCopyBufferToImage(context.command, upload.buffer, upload.image,
-                                     VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
-            barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-            barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-            barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-            barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-            d.vkCmdPipelineBarrier(context.command, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                                   VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr,
-                                   1, &barrier);
-        }
+};
+struct HostBufferBinding {
+    vk::DeviceSession session;
+    vvk::AllocatedBuffer buffer;
+    Serial bytes;
+    auto Info() const -> vk::GraphBindingInfo {
+        return {rg::GraphResourceKind::Buffer,
+                {session.epoch(), session.epoch(),
+                 Serial(reinterpret_cast<rstd::uintptr_t>(buffer.handle()))},
+                bytes};
+    }
+    auto Texture() const -> Option<tex::TextureViewRef> { return None(); }
+    auto Freeze(bool) const
+        -> Result<rstd::sync::Arc<dyn<vk::GraphBinding>>, vk::GraphExecutionError>;
+    auto Use(tex::Submission &work, const rg::ResourceUse &use) const
+        -> Result<empty, vk::GraphExecutionError> {
+        if (use.access != rg::GraphAccess::Read || use.version ||
+            (use.usage != rg::GraphUsage::Storage && use.usage != rg::GraphUsage::Transfer))
+            return Err(vk::GraphExecutionError{vk::GraphExecutionStage::Access});
+        auto command = vk::native_recording(work, session);
+        if (command.is_err())
+            return Err(vk::GraphExecutionError{
+                vk::GraphExecutionStage::Access, {}, {}, VK_SUCCESS, Some(command.unwrap_err())});
+        VkBufferMemoryBarrier barrier{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+        barrier.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
+        barrier.dstAccessMask = use.usage == rg::GraphUsage::Storage ? VK_ACCESS_SHADER_READ_BIT
+                                                                     : VK_ACCESS_TRANSFER_READ_BIT;
+        barrier.srcQueueFamilyIndex = barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.buffer = buffer.handle();
+        barrier.offset = use.range.offset;
+        barrier.size = use.range.size;
+        session.device().handle().Dispatch().vkCmdPipelineBarrier(
+            command.unwrap(), VK_PIPELINE_STAGE_HOST_BIT,
+            vk::texture_stages(vk::graph_stages(use.stages)), 0, 0, nullptr, 1, &barrier, 0,
+            nullptr);
         return Ok(empty{});
+    }
+};
+struct UiBackend {
+    PrepareContext &context;
+    rstd::sync::Arc<UiAssets> assets;
+    auto Prepare(const rg::PassDescription &pass, const vk::GraphPrepareContext &inputs)
+        -> Result<rstd::sync::Arc<dyn<vk::PreparedVulkanPass>>, vk::GraphExecutionError>;
+};
+struct UploadBackend {
+    OwnedFrame &frame;
+    auto Prepare(const rg::PassDescription &pass, const vk::GraphPrepareContext &inputs)
+        -> Result<rstd::sync::Arc<dyn<vk::PreparedVulkanPass>>, vk::GraphExecutionError>;
+};
+struct ScopeBackend {
+    vk::GraphicsScopeCache &cache;
+    auto Prepare(const rg::GraphicsDescription &description, const vk::GraphPrepareContext &context)
+        -> Result<rstd::sync::Arc<dyn<vk::PreparedGraphicsScope>>, vk::GraphExecutionError> {
+        return cache.Prepare(description, context);
     }
 };
 auto resolve_items(OwnedFrame &frame, GlyphCache &cache, ImageCache &images, Index max_extent,
@@ -463,7 +498,7 @@ auto resolve_items(OwnedFrame &frame, GlyphCache &cache, ImageCache &images, Ind
                 if (value.sampling == ImageSampling::Linear &&
                     (decode || info.alpha == ContentAlpha::Straight))
                     return Err(Error{Stage::Unsupported});
-                auto prepared = vrento::vulkan::prepare_texture_read(
+                auto prepared = vrento::vulkan::validate_sampled_texture(
                     session, native->native(), vrento::texture::Stages::Fragment,
                     value.sampling == ImageSampling::Linear);
                 if (prepared.is_err()) {
@@ -478,7 +513,7 @@ auto resolve_items(OwnedFrame &frame, GlyphCache &cache, ImageCache &images, Ind
                         break;
                     }
                 if (usize(index) == frame.externals.len())
-                    frame.externals.push(ExternalBinding{value.frame, prepared.unwrap(), {}});
+                    frame.externals.push(ExternalBinding{value.frame, native->native(), {}});
                 item.kind = DrawKind::External;
                 item.data.image_edges = 15;
                 for (auto &component : item.data.color)
@@ -598,7 +633,8 @@ auto cull_items(OwnedFrame &frame, slice<GpuClip> clips) -> Result<empty, Error>
     }
     return Ok(empty{});
 }
-auto prepare_atlas(OwnedFrame &frame, GlyphCache &cache) -> Result<empty, Error> {
+auto prepare_atlas(OwnedFrame &frame, GlyphCache &cache, vk::TextureContext &textures)
+    -> Result<empty, Error> {
     for (usize i{}; i < cache.pages.len(); ++i) {
         bool used{};
         for (const auto &items : frame.items)
@@ -608,8 +644,7 @@ auto prepare_atlas(OwnedFrame &frame, GlyphCache &cache) -> Result<empty, Error>
             continue;
         auto &page = cache.pages[i];
         if (page.gpu.is_none()) {
-            auto created =
-                make_sampled(frame.device, {page.width, page.height}, VK_FORMAT_R8_UNORM);
+            auto created = make_sampled(textures, {page.width, page.height}, VK_FORMAT_R8_UNORM);
             if (created.is_err())
                 return Err(created.unwrap_err());
             page.gpu = Some(rstd::move(created).unwrap());
@@ -627,7 +662,8 @@ auto prepare_atlas(OwnedFrame &frame, GlyphCache &cache) -> Result<empty, Error>
     }
     return Ok(empty{});
 }
-auto prepare_images(OwnedFrame &frame, ImageCache &cache) -> Result<empty, Error> {
+auto prepare_images(OwnedFrame &frame, ImageCache &cache, vk::TextureContext &textures)
+    -> Result<empty, Error> {
     for (usize i{}; i < cache.entries.len(); ++i) {
         bool used{};
         for (const auto &items : frame.items)
@@ -638,7 +674,7 @@ auto prepare_images(OwnedFrame &frame, ImageCache &cache) -> Result<empty, Error
         auto &entry = cache.entries[i];
         if (entry.gpu.is_none()) {
             auto created =
-                make_sampled(frame.device, {entry.data.width(), entry.data.height()}, format);
+                make_sampled(textures, {entry.data.width(), entry.data.height()}, format);
             if (created.is_err())
                 return Err(created.unwrap_err());
             entry.gpu = Some(rstd::move(created).unwrap());
@@ -659,26 +695,228 @@ auto prepare_images(OwnedFrame &frame, ImageCache &cache) -> Result<empty, Error
 }
 } // namespace
 
-struct CompletionTimeline {
-    vk::DeviceSession session;
-    vvk::Semaphore semaphore;
-    explicit CompletionTimeline(vk::DeviceSession owner) : session(rstd::move(owner)) {}
+} // namespace vui::gpu
+namespace rstd {
+template <>
+struct Impl<vrento::vulkan::GraphicsScopeBackend, vui::gpu::ScopeBackend>
+    : ImplBase<vui::gpu::ScopeBackend> {
+    auto Prepare(const vrento::rg::GraphicsDescription &description,
+                 const vrento::vulkan::GraphPrepareContext &context)
+        -> Result<sync::Arc<dyn<vrento::vulkan::PreparedGraphicsScope>>,
+                  vrento::vulkan::GraphExecutionError> {
+        return self().Prepare(description, context);
+    }
 };
+template <>
+struct Impl<vrento::vulkan::PreparedVulkanPass, vui::gpu::UiPrepared>
+    : ImplBase<vui::gpu::UiPrepared> {
+    auto Record(vrento::vulkan::GraphRecordContext &context) const
+        -> Result<empty, vrento::vulkan::GraphExecutionError> {
+        return self().Record(context);
+    }
+};
+template <>
+struct Impl<vrento::vulkan::PreparedVulkanPass, vui::gpu::UploadPrepared>
+    : ImplBase<vui::gpu::UploadPrepared> {
+    auto Record(vrento::vulkan::GraphRecordContext &context) const
+        -> Result<empty, vrento::vulkan::GraphExecutionError> {
+        return self().Record(context);
+    }
+};
+template <>
+struct Impl<vrento::vulkan::GraphBinding, vui::gpu::HostBufferBinding>
+    : ImplBase<vui::gpu::HostBufferBinding> {
+    auto Info() const -> vrento::vulkan::GraphBindingInfo { return self().Info(); }
+    auto Texture() const -> Option<vrento::texture::TextureViewRef> { return self().Texture(); }
+    auto Use(vrento::texture::Submission &work, const vrento::rg::ResourceUse &use) const
+        -> Result<empty, vrento::vulkan::GraphExecutionError> {
+        return self().Use(work, use);
+    }
+    auto Freeze(bool read_only) const -> Result<sync::Arc<dyn<vrento::vulkan::GraphBinding>>,
+                                                vrento::vulkan::GraphExecutionError> {
+        return self().Freeze(read_only);
+    }
+};
+template <>
+struct Impl<vrento::vulkan::VulkanPassBackend, vui::gpu::UiBackend>
+    : ImplBase<vui::gpu::UiBackend> {
+    auto Prepare(const vrento::rg::PassDescription &pass,
+                 const vrento::vulkan::GraphPrepareContext &context)
+        -> Result<sync::Arc<dyn<vrento::vulkan::PreparedVulkanPass>>,
+                  vrento::vulkan::GraphExecutionError> {
+        return self().Prepare(pass, context);
+    }
+};
+template <>
+struct Impl<vrento::vulkan::VulkanPassBackend, vui::gpu::UploadBackend>
+    : ImplBase<vui::gpu::UploadBackend> {
+    auto Prepare(const vrento::rg::PassDescription &pass,
+                 const vrento::vulkan::GraphPrepareContext &context)
+        -> Result<sync::Arc<dyn<vrento::vulkan::PreparedVulkanPass>>,
+                  vrento::vulkan::GraphExecutionError> {
+        return self().Prepare(pass, context);
+    }
+};
+} // namespace rstd
+namespace vui::gpu {
+namespace {
+auto HostBufferBinding::Freeze(bool) const
+    -> Result<rstd::sync::Arc<dyn<vk::GraphBinding>>, vk::GraphExecutionError> {
+    return Ok(rstd::sync::Arc<dyn<vk::GraphBinding>>::make(
+        HostBufferBinding{session, buffer.clone(), bytes}));
+}
+auto UiBackend::Prepare(const rg::PassDescription &pass, const vk::GraphPrepareContext &inputs)
+    -> Result<rstd::sync::Arc<dyn<vk::PreparedVulkanPass>>, vk::GraphExecutionError> {
+    if (pass.parameters.len() != usize(4) || inputs.scope.is_none())
+        return Err(vk::GraphExecutionError{vk::GraphExecutionStage::Schema});
+    Index index{};
+    for (unsigned i{}; i < 4; ++i)
+        index |= Index(pass.parameters[usize(i)]) << (i * 8);
+    if (usize(index) >= context.frame.items.len())
+        return Err(vk::GraphExecutionError{vk::GraphExecutionStage::Prepare});
+    UiExecutor executor;
+    auto prepared = executor.prepare(index, pass, inputs.bindings, context);
+    if (prepared.is_err())
+        return Err(prepared.unwrap_err());
+    Vec<vrento::resource_registry::PipelineResourceResult> pipelines;
+    for (const auto &recipe : assets->recipes) {
+        auto pipeline = assets->pipelines.EnsureRecipe(inputs.session.device(), recipe,
+                                                       (*inputs.scope)->Info().signature,
+                                                       assets->passes, assets->layouts);
+        if (pipeline.is_none())
+            return Err(vk::GraphExecutionError{vk::GraphExecutionStage::Prepare});
+        pipelines.push(rstd::move(pipeline).unwrap());
+    }
+    RecordContext native{VK_NULL_HANDLE,
+                         inputs.session.device().handle().Dispatch(),
+                         *assets->layout->physical->layout,
+                         *pipelines[usize()].pipeline->pipeline.handle,
+                         *pipelines[usize(1)].pipeline->pipeline.handle,
+                         *pipelines[usize(2)].pipeline->pipeline.handle,
+                         *pipelines[usize(3)].pipeline->pipeline.handle};
+    return Ok(rstd::sync::Arc<dyn<vk::PreparedVulkanPass>>::make(
+        UiPrepared{context.frame.gpu.clone(), assets.clone(), rstd::move(pipelines),
+                   rstd::move(executor), native}));
+}
+auto UploadBackend::Prepare(const rg::PassDescription &pass, const vk::GraphPrepareContext &)
+    -> Result<rstd::sync::Arc<dyn<vk::PreparedVulkanPass>>, vk::GraphExecutionError> {
+    if (!pass.parameters.is_empty() || pass.graphics.is_some())
+        return Err(vk::GraphExecutionError{vk::GraphExecutionStage::Schema});
+    UploadPrepared output;
+    for (const auto &sample : frame.samples) {
+        if (sample.upload.is_none())
+            continue;
+        bool declared{};
+        for (const auto &use : pass.uses)
+            declared |= use.resource == sample.texture && use.access == rg::GraphAccess::Write;
+        if (!declared)
+            return Err(vk::GraphExecutionError{vk::GraphExecutionStage::Prepare});
+        output.items.push({sample.upload->clone(), sample.gpu->view, sample.gpu->extent});
+    }
+    return Ok(rstd::sync::Arc<dyn<vk::PreparedVulkanPass>>::make(rstd::move(output)));
+}
+} // namespace
+
+namespace {
+template <rstd::size_t N>
+auto ui_shader(const unsigned (&words)[N], vrento::ShaderType type) -> vk::Uni_ShaderSpv {
+    auto result = Box<vk::ShaderSpv>::make();
+    result->stage = type;
+    for (auto word : words)
+        result->spirv.push(unsigned(word));
+    return result;
+}
+auto UiAssets::initialize() -> Result<empty, Error> {
+    vrento::resource_registry::PipelineLayoutRequest request;
+    vk::DescriptorSetInfo set;
+    set.bindings.push(
+        {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});
+    set.bindings.push(
+        {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});
+    set.bindings.push({2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
+                       VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});
+    request.descriptor_sets.push(rstd::move(set));
+    auto created = layouts.Ensure(session.device(), request, descriptors);
+    if (created.is_err())
+        return Err(Error{Stage::Pipeline});
+    layout = Some(created.unwrap());
+    VkSamplerCreateInfo sample{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+    sample.magFilter = sample.minFilter = VK_FILTER_NEAREST;
+    sample.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    sample.addressModeU = sample.addressModeV = sample.addressModeW =
+        VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    auto result = session.device().handle().CreateSampler(sample, sampler);
+    if (result != VK_SUCCESS)
+        return Err(Error{Stage::Pipeline, result});
+    sample.magFilter = sample.minFilter = VK_FILTER_LINEAR;
+    result = session.device().handle().CreateSampler(sample, glyph_sampler);
+    if (result != VK_SUCCESS)
+        return Err(Error{Stage::Pipeline, result});
+    auto add = [&](const auto &fragment) -> bool {
+        vk::GraphicsPipeline defaults;
+        vk::PipelineResourceRequest description;
+        description.pipeline_layout = layout->handle;
+        description.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        description.depth = defaults.depth;
+        description.raster = defaults.raster;
+        description.multisample = defaults.multisample;
+        description.color_format = format;
+        description.color_load_op = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        description.color_initial_layout = description.color_final_layout =
+            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        description.color_blend.blendEnable = VK_TRUE;
+        description.color_blend.srcColorBlendFactor = description.color_blend.srcAlphaBlendFactor =
+            VK_BLEND_FACTOR_ONE;
+        description.color_blend.dstColorBlendFactor = description.color_blend.dstAlphaBlendFactor =
+            VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        description.color_blend.colorBlendOp = description.color_blend.alphaBlendOp =
+            VK_BLEND_OP_ADD;
+        description.color_blend.colorWriteMask = 15;
+        description.shader_stages.push(ui_shader(shaders::quad.words, vrento::ShaderType::VERTEX));
+        description.shader_stages.push(ui_shader(fragment.words, vrento::ShaderType::FRAGMENT));
+        auto signature = vk::MakeRenderPassResourceDesc(description);
+        auto recipe = pipelines.RegisterRecipe(rstd::move(description), layouts);
+        if (recipe.is_none())
+            return false;
+        auto pipeline =
+            pipelines.EnsureRecipe(session.device(), *recipe, signature, passes, layouts);
+        if (pipeline.is_none())
+            return false;
+        recipes.push(rstd::move(recipe).unwrap());
+        warmed.push(rstd::move(pipeline).unwrap());
+        return true;
+    };
+    if (!add(shaders::rectangle) || !add(shaders::composite) || !add(shaders::glyph) ||
+        !add(shaders::image))
+        return Err(Error{Stage::Pipeline});
+    return Ok(empty{});
+}
+} // namespace
 
 struct Renderer::Impl {
     Option<vk::DeviceSession> session;
+    Option<vk::TextureContext> textures;
+    vk::GraphicsScopeCache scopes;
     auto device() const -> const vk::Device & { return session->device(); }
-    vvk::RenderPass render_pass;
-    vvk::DescriptorSetLayout descriptor_layout;
-    vvk::PipelineLayout layout;
-    vvk::Pipeline rectangle, composite, glyph, image;
-    vvk::Sampler sampler, glyph_sampler;
-    Option<rstd::sync::Arc<CompletionTimeline>> completion_timeline;
-    auto completion_semaphore() const -> VkSemaphore { return *(*completion_timeline)->semaphore; }
-    GlyphCache glyph_cache;
-    ImageCache image_cache;
-    FrameResources frame_resources;
-    Option<Box<OwnedFrame>> frame;
+    Option<rstd::sync::Arc<UiAssets>> assets;
+    mutable GlyphCache glyph_cache;
+    mutable ImageCache image_cache;
+    void acknowledge_uploads() const {
+        for (auto &page : glyph_cache.pages)
+            if (!page.resident && page.gpu && (*page.gpu)->image.ready().valid()) {
+                page.resident = true;
+                ++glyph_cache.stats.uploads;
+                glyph_cache.stats.uploaded_bytes += Serial(page.width) * page.height;
+            }
+        for (auto &entry : image_cache.entries)
+            if (!entry.resident && entry.gpu && (*entry.gpu)->image.ready().valid()) {
+                entry.resident = true;
+                ++image_cache.stats.uploads;
+                image_cache.stats.uploaded_bytes += entry.data.pixels().len().to_primitive();
+            }
+    }
+    rstd::sync::Arc<FrameResources> frame_resources{rstd::sync::Arc<FrameResources>::make()};
+    Option<rstd::sync::Arc<OwnedFrame>> frame;
     struct PresentSync {
         vvk::Semaphore semaphore;
         vvk::Fence fence;
@@ -784,12 +1022,15 @@ struct Renderer::Impl {
             (**frame).uncertain_submission = VK_SUCCESS;
         }
         if (state == State::Submitted) {
-            auto result = session->observe_result((**frame).fence.Wait(timeout));
+            auto result = session->observe_result((**frame).fence->value.Wait(timeout));
             if (result != VK_SUCCESS) {
                 if (result != VK_TIMEOUT)
                     (**frame).fail_timestamps(result);
                 return Err(Error{result == VK_TIMEOUT ? Stage::Timeout : Stage::Lost, result});
             }
+            auto retired = textures->Poll();
+            if (retired.is_err())
+                return Err(Error{Stage::Submit, VkResult(retired.unwrap_err().native)});
             (**frame).collect_timestamps();
             if (session->observe_result((**frame).timings.query_result) == VK_ERROR_DEVICE_LOST)
                 return Err(Error{Stage::Lost, VK_ERROR_DEVICE_LOST});
@@ -841,194 +1082,23 @@ struct Renderer::Impl {
             session->release_surface();
     }
     void clear_resources() {
+        textures = None();
         frame = None();
-        frame_resources.clear();
-        completion_timeline = None();
+        scopes = vk::GraphicsScopeCache{};
+        frame_resources->clear();
         presents.clear();
         glyph_cache.clear();
         image_cache.clear();
-        image.reset();
-        glyph_sampler.reset();
-        glyph.reset();
-        sampler.reset();
-        composite.reset();
-        rectangle.reset();
-        layout.reset();
-        descriptor_layout.reset();
-        render_pass.reset();
-    }
-    auto pipelines() -> Result<empty, Error> {
-        const auto &handle = device().handle();
-        VkAttachmentDescription attachment{};
-        attachment.format = format;
-        attachment.samples = VK_SAMPLE_COUNT_1_BIT;
-        attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-        attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-        attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-        attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        attachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        attachment.finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        VkAttachmentReference color{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
-        VkSubpassDescription subpass{};
-        subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-        subpass.colorAttachmentCount = 1;
-        subpass.pColorAttachments = &color;
-        VkSubpassDependency dependencies[2]{};
-        dependencies[0] = {VK_SUBPASS_EXTERNAL,
-                           0,
-                           VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                           VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-                           VK_ACCESS_SHADER_READ_BIT,
-                           VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-                           VK_DEPENDENCY_BY_REGION_BIT};
-        dependencies[1] = {0,
-                           VK_SUBPASS_EXTERNAL,
-                           VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-                           VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
-                           VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-                           VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT,
-                           VK_DEPENDENCY_BY_REGION_BIT};
-        VkRenderPassCreateInfo pass_info{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
-        pass_info.attachmentCount = 1;
-        pass_info.pAttachments = &attachment;
-        pass_info.subpassCount = 1;
-        pass_info.pSubpasses = &subpass;
-        pass_info.dependencyCount = 2;
-        pass_info.pDependencies = dependencies;
-        auto result = handle.CreateRenderPass(pass_info, render_pass);
-        if (result != VK_SUCCESS)
-            return Err(Error{Stage::Pipeline, result});
-        VkDescriptorSetLayoutBinding bindings[3]{};
-        bindings[0] = {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
-                       VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
-        bindings[1] = {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT,
-                       nullptr};
-        bindings[2] = {2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
-                       VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
-        VkDescriptorSetLayoutCreateInfo descriptor_info{
-            VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-        descriptor_info.bindingCount = 3;
-        descriptor_info.pBindings = bindings;
-        result = handle.CreateDescriptorSetLayout(descriptor_info, descriptor_layout);
-        if (result != VK_SUCCESS)
-            return Err(Error{Stage::Pipeline, result});
-        auto set_layout = *descriptor_layout;
-        VkPipelineLayoutCreateInfo layout_info{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
-        layout_info.setLayoutCount = 1;
-        layout_info.pSetLayouts = &set_layout;
-        result = handle.CreatePipelineLayout(layout_info, layout);
-        if (result != VK_SUCCESS)
-            return Err(Error{Stage::Pipeline, result});
-        VkSamplerCreateInfo sampler_info{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
-        sampler_info.magFilter = sampler_info.minFilter = VK_FILTER_NEAREST;
-        sampler_info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
-        sampler_info.addressModeU = sampler_info.addressModeV = sampler_info.addressModeW =
-            VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-        sampler_info.maxLod = 0;
-        result = handle.CreateSampler(sampler_info, sampler);
-        if (result != VK_SUCCESS)
-            return Err(Error{Stage::Pipeline, result});
-        sampler_info.magFilter = sampler_info.minFilter = VK_FILTER_LINEAR;
-        result = handle.CreateSampler(sampler_info, glyph_sampler);
-        if (result != VK_SUCCESS)
-            return Err(Error{Stage::Pipeline, result});
-        vvk::ShaderModule vertex, rect, compose, glyph_fragment, image_fragment;
-        result = shader(handle, shaders::quad.words, sizeof(shaders::quad.words), vertex);
-        if (result == VK_SUCCESS)
-            result =
-                shader(handle, shaders::rectangle.words, sizeof(shaders::rectangle.words), rect);
-        if (result == VK_SUCCESS)
-            result =
-                shader(handle, shaders::composite.words, sizeof(shaders::composite.words), compose);
-        if (result == VK_SUCCESS)
-            result =
-                shader(handle, shaders::glyph.words, sizeof(shaders::glyph.words), glyph_fragment);
-        if (result == VK_SUCCESS)
-            result =
-                shader(handle, shaders::image.words, sizeof(shaders::image.words), image_fragment);
-        if (result != VK_SUCCESS)
-            return Err(Error{Stage::Shader, result});
-        auto make_pipeline = [&](VkShaderModule fragment, vvk::Pipeline &output) {
-            VkPipelineShaderStageCreateInfo stages[2]{};
-            stages[0] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-                         nullptr,
-                         0,
-                         VK_SHADER_STAGE_VERTEX_BIT,
-                         *vertex,
-                         "main",
-                         nullptr};
-            stages[1] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-                         nullptr,
-                         0,
-                         VK_SHADER_STAGE_FRAGMENT_BIT,
-                         fragment,
-                         "main",
-                         nullptr};
-            VkPipelineVertexInputStateCreateInfo input{
-                VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
-            VkPipelineInputAssemblyStateCreateInfo assembly{
-                VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
-            assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-            VkPipelineViewportStateCreateInfo viewport{
-                VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
-            viewport.viewportCount = viewport.scissorCount = 1;
-            VkPipelineRasterizationStateCreateInfo raster{
-                VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
-            raster.polygonMode = VK_POLYGON_MODE_FILL;
-            raster.cullMode = VK_CULL_MODE_NONE;
-            raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
-            raster.lineWidth = 1;
-            VkPipelineMultisampleStateCreateInfo multisample{
-                VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
-            multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
-            VkPipelineColorBlendAttachmentState blend{};
-            blend.blendEnable = VK_TRUE;
-            blend.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
-            blend.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-            blend.colorBlendOp = VK_BLEND_OP_ADD;
-            blend.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
-            blend.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-            blend.alphaBlendOp = VK_BLEND_OP_ADD;
-            blend.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
-                                   VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
-            VkPipelineColorBlendStateCreateInfo blend_info{
-                VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
-            blend_info.attachmentCount = 1;
-            blend_info.pAttachments = &blend;
-            VkDynamicState dynamic_states[]{VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
-            VkPipelineDynamicStateCreateInfo dynamic{
-                VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
-            dynamic.dynamicStateCount = 2;
-            dynamic.pDynamicStates = dynamic_states;
-            VkGraphicsPipelineCreateInfo info{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
-            info.stageCount = 2;
-            info.pStages = stages;
-            info.pVertexInputState = &input;
-            info.pInputAssemblyState = &assembly;
-            info.pViewportState = &viewport;
-            info.pRasterizationState = &raster;
-            info.pMultisampleState = &multisample;
-            info.pColorBlendState = &blend_info;
-            info.pDynamicState = &dynamic;
-            info.layout = *layout;
-            info.renderPass = *render_pass;
-            return handle.CreateGraphicsPipeline(info, output);
-        };
-        result = make_pipeline(*rect, rectangle);
-        if (result == VK_SUCCESS)
-            result = make_pipeline(*compose, composite);
-        if (result == VK_SUCCESS)
-            result = make_pipeline(*glyph_fragment, glyph);
-        if (result == VK_SUCCESS)
-            result = make_pipeline(*image_fragment, image);
-        if (result != VK_SUCCESS)
-            return Err(Error{Stage::Pipeline, result});
-        return Ok(empty{});
+        assets = None();
     }
 };
 
 Renderer::Renderer() : impl_(Box<Impl>::make()) {}
 Renderer::~Renderer() = default;
+auto Renderer::pipeline_cache_stats() const -> vrento::resource_registry::PipelineCacheStats {
+    return impl_->assets ? (*impl_->assets)->pipelines.stats()
+                         : vrento::resource_registry::PipelineCacheStats{};
+}
 auto Renderer::initialize(bool validation) -> Result<empty, Error> {
     if (impl_->state == Impl::State::Closed)
         impl_ = Box<Impl>::make();
@@ -1060,8 +1130,7 @@ struct SurfaceAdapter {
     SurfaceHost &host;
     Option<Error> error;
     explicit SurfaceAdapter(SurfaceHost &host) : host(host) {}
-    auto create(VkInstance instance)
-        -> Result<vk::SessionSurface, vk::DeviceSessionError> {
+    auto create(VkInstance instance) -> Result<vk::SessionSurface, vk::DeviceSessionError> {
         auto result = host.create_surface(instance);
         if (result.is_err()) {
             error = Some(result.unwrap_err());
@@ -1145,6 +1214,10 @@ auto Renderer::device_session() const -> Result<vk::DeviceSession, Error> {
 }
 auto Renderer::finish_initialize() -> Result<empty, Error> {
     auto &self = *impl_;
+    auto textures = vk::TextureContext::create(*self.session);
+    if (textures.is_err())
+        return Err(Error{Stage::Allocation, VkResult(textures.unwrap_err().native)});
+    self.textures = Some(rstd::move(textures).unwrap());
     auto features = self.device().gpu().GetFormatProperties(format).optimalTilingFeatures;
     if ((features &
          (VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT)) !=
@@ -1165,18 +1238,11 @@ auto Renderer::finish_initialize() -> Result<empty, Error> {
         if (sync.is_err())
             return sync;
     }
-    auto result = self.pipelines();
+    auto assets = rstd::sync::Arc<UiAssets>::make(*self.session);
+    auto result = assets->initialize();
     if (result.is_err())
         return result;
-    VkSemaphoreTypeCreateInfo type{VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO};
-    type.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
-    VkSemaphoreCreateInfo semaphore{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
-    semaphore.pNext = &type;
-    auto completion = rstd::sync::Arc<CompletionTimeline>::make(*self.session);
-    auto status = self.device().handle().CreateSemaphore(semaphore, completion->semaphore);
-    if (status != VK_SUCCESS)
-        return Err(Error{Stage::Allocation, status});
-    self.completion_timeline = Some(rstd::move(completion));
+    self.assets = Some(rstd::move(assets));
     self.initialized = true;
     self.state = Impl::State::Ready;
     return Ok(empty{});
@@ -1187,10 +1253,41 @@ auto Renderer::prepare(FramePlan plan, DrawOptions options) -> Result<empty, Err
         return Err(Error{Stage::Lost, VK_ERROR_DEVICE_LOST});
     return impl_->observe_result(prepare_impl(rstd::move(plan), options));
 }
-auto Renderer::prepare_impl(FramePlan plan, DrawOptions options) -> Result<empty, Error> {
+auto Renderer::record(tex::Submission &work, FramePlan plan, tex::TextureViewRef target,
+                      rg::AttachmentLoad load, DrawOptions options) -> Result<empty, Error> {
+    auto &self = *impl_;
+    if (self.is_lost())
+        return Err(Error{Stage::Lost, VK_ERROR_DEVICE_LOST});
+    if (self.windowed)
+        return Err(Error{Stage::Unsupported});
+    auto prepared = prepare_impl(rstd::move(plan), options, Some(rstd::move(target)), load);
+    if (prepared.is_err())
+        return self.observe_result(rstd::move(prepared));
+    auto frame = self.frame->clone();
+    frame->gpu->receipt = Some(work.receipt());
+    work.retain(frame.clone());
+    auto recorded = frame->program->record(work);
+    self.frame = None();
+    self.state = Impl::State::Ready;
+    if (recorded.is_err()) {
+        auto error = recorded.unwrap_err();
+        Error result{Stage::Record, error.native};
+        result.content = error.texture;
+        Result<empty, Error> failed = Err(result);
+        return self.observe_result(rstd::move(failed));
+    }
+    return Ok(empty{});
+}
+auto Renderer::prepare_impl(FramePlan plan, DrawOptions options,
+                            Option<tex::TextureViewRef> target_override, rg::AttachmentLoad load)
+    -> Result<empty, Error> {
     auto &self = *impl_;
     if (self.state != Impl::State::Ready && self.state != Impl::State::Complete)
         return Err(Error{Stage::State});
+    self.acknowledge_uploads();
+    self.scopes.collect();
+    if (self.assets)
+        (*self.assets)->pipelines.PruneExpired();
     if (self.frame.is_some() && (**self.frame).acquired && !(**self.frame).presented)
         return Err(Error{Stage::State});
     if (self.frame.is_some() && (**self.frame).acquired) {
@@ -1208,7 +1305,8 @@ auto Renderer::prepare_impl(FramePlan plan, DrawOptions options) -> Result<empty
         height > self.device().limits().maxImageDimension2D || plan.pass_count() > usize(1024) ||
         plan.clips().len() > usize(65535))
         return Err(Error{Stage::Unsupported});
-    auto candidate = Box<OwnedFrame>::make(self.device(), self.frame_resources, rstd::move(plan));
+    auto candidate = rstd::sync::Arc<OwnedFrame>::make(*self.session, self.frame_resources.clone(),
+                                                       rstd::move(plan));
     auto &frame = *candidate;
     frame.options = options;
     frame.stats.frame = frame.plan.identity();
@@ -1248,8 +1346,10 @@ auto Renderer::prepare_impl(FramePlan plan, DrawOptions options) -> Result<empty
         clip_data.push(rstd::move(clip));
     }
     CpuSample resolve(frame.metric(&FrameTimings::resolve));
-    auto reserved = self.image_cache.reserve_frame(frame.plan, self.device().limits().maxImageDimension2D);
-    if (reserved.is_err()) return reserved;
+    auto reserved =
+        self.image_cache.reserve_frame(frame.plan, self.device().limits().maxImageDimension2D);
+    if (reserved.is_err())
+        return reserved;
     auto resolved = resolve_items(frame, self.glyph_cache, self.image_cache,
                                   self.device().limits().maxImageDimension2D, *self.session);
     resolve.pause();
@@ -1260,29 +1360,47 @@ auto Renderer::prepare_impl(FramePlan plan, DrawOptions options) -> Result<empty
     visibility.pause();
     if (culled.is_err())
         return culled;
-    auto atlas_ready = prepare_atlas(frame, self.glyph_cache);
+    auto atlas_ready = prepare_atlas(frame, self.glyph_cache, *self.textures);
     if (atlas_ready.is_err())
         return atlas_ready;
-    auto images_ready = prepare_images(frame, self.image_cache);
+    auto images_ready = prepare_images(frame, self.image_cache, *self.textures);
     if (images_ready.is_err())
         return images_ready;
+    if (target_override) {
+        const auto &view = *target_override;
+        if (!view.valid())
+            return Err(Error{Stage::State});
+        const auto &desc = view.texture().description();
+        auto extent = tex::mip_extent(desc, view.description().range.first_mip);
+        if (extent.width != frame.extent.width || extent.height != frame.extent.height ||
+            (desc.format != vrento::TextureFormat::RGBA8 &&
+             desc.format != vrento::TextureFormat::RGBA8_SRGB) ||
+            desc.samples != 1)
+            return Err(Error{Stage::Unsupported});
+    }
     for (usize i{}; i < frame.plan.pass_count(); ++i) {
-        auto target = self.frame_resources.target(self.device(), *self.render_pass, frame.extent);
+        if (i == usize() && target_override) {
+            frame.gpu->targets.push(
+                Target{target_override->texture(), *target_override, frame.extent, false});
+            frame.textures.push(rg::ResourceId{});
+            continue;
+        }
+        auto target = self.frame_resources->target(*self.textures, frame.extent);
         if (target.is_err())
             return Err(target.unwrap_err());
-        frame.targets.push(target.unwrap());
-        frame.textures.push(rg::TextureNodeRef{});
+        frame.gpu->targets.push(target.unwrap());
+        frame.textures.push(rg::ResourceId{});
     }
     if (clip_data.is_empty())
         clip_data.push(GpuClip{});
     auto buffer_bytes = clip_data.len().to_primitive() * sizeof(GpuClip);
     auto allocation =
-        self.frame_resources.buffer(self.device(), buffer_bytes, FrameBufferKind::Storage);
+        self.frame_resources->buffer(self.device(), buffer_bytes, FrameBufferKind::Storage);
     if (allocation.is_err())
         return Err(allocation.unwrap_err());
-    frame.clips = allocation.unwrap();
+    frame.gpu->clips = allocation.unwrap();
     {
-        auto memory = frame.clips.allocation();
+        auto memory = frame.gpu->clips.allocation();
         auto mapped = memory.map();
         if (mapped.is_err())
             return fail(Stage::Allocation, mapped.unwrap_err().api_result);
@@ -1308,12 +1426,13 @@ auto Renderer::prepare_impl(FramePlan plan, DrawOptions options) -> Result<empty
     if (buffer_bytes > self.device().limits().maxStorageBufferRange)
         return Err(Error{Stage::DrawLimit});
     frame.stats.instance_bytes = buffer_bytes;
-    allocation = self.frame_resources.buffer(self.device(), buffer_bytes, FrameBufferKind::Storage);
+    allocation =
+        self.frame_resources->buffer(self.device(), buffer_bytes, FrameBufferKind::Storage);
     if (allocation.is_err())
         return Err(allocation.unwrap_err());
-    frame.instances = allocation.unwrap();
+    frame.gpu->instances = allocation.unwrap();
     {
-        auto memory = frame.instances.allocation();
+        auto memory = frame.gpu->instances.allocation();
         auto mapped = memory.map();
         if (mapped.is_err())
             return fail(Stage::Allocation, mapped.unwrap_err().api_result);
@@ -1326,10 +1445,10 @@ auto Renderer::prepare_impl(FramePlan plan, DrawOptions options) -> Result<empty
     if (self.readback_enabled) {
         buffer_bytes = VkDeviceSize(frame.extent.width) * frame.extent.height * 4;
         allocation =
-            self.frame_resources.buffer(self.device(), buffer_bytes, FrameBufferKind::Readback);
+            self.frame_resources->buffer(self.device(), buffer_bytes, FrameBufferKind::Readback);
         if (allocation.is_err())
             return Err(allocation.unwrap_err());
-        frame.readback = allocation.unwrap();
+        frame.gpu->readback = allocation.unwrap();
     }
     unsigned count{};
     for (usize pass{}; pass < frame.plan.pass_count(); ++pass)
@@ -1342,17 +1461,10 @@ auto Renderer::prepare_impl(FramePlan plan, DrawOptions options) -> Result<empty
     pool_info.maxSets = count;
     pool_info.poolSizeCount = 2;
     pool_info.pPoolSizes = pool_sizes;
-    auto result = d.vkCreateDescriptorPool(*device, &pool_info, nullptr, &frame.pool);
+    auto result = d.vkCreateDescriptorPool(*device, &pool_info, nullptr, &frame.gpu->pool);
     if (result != VK_SUCCESS)
         return fail(Stage::Allocation, result);
-    VkCommandBufferAllocateInfo command_info{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
-    command_info.commandPool = *self.device().cmd_pool();
-    command_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    command_info.commandBufferCount = 1;
-    result = d.vkAllocateCommandBuffers(*device, &command_info, &frame.command);
-    if (result != VK_SUCCESS)
-        return fail(Stage::Allocation, result);
-    result = device.CreateFence({VK_STRUCTURE_TYPE_FENCE_CREATE_INFO}, frame.fence);
+    result = device.CreateFence({VK_STRUCTURE_TYPE_FENCE_CREATE_INFO}, frame.fence->value);
     if (result != VK_SUCCESS)
         return fail(Stage::Allocation, result);
     if (self.windowed) {
@@ -1363,81 +1475,130 @@ auto Renderer::prepare_impl(FramePlan plan, DrawOptions options) -> Result<empty
         if (result != VK_SUCCESS)
             return fail(Stage::Allocation, result);
     }
-    if (!frame.samples.is_empty()) {
-        auto pass = frame.graph.addPass<UploadPass>(
-            "ui.sample_upload"_str, rg::PassNode::Type::Extension,
-            [&](rg::RenderGraphBuilder &builder, UploadPass::Desc &desc) {
-                for (usize i{}; i < frame.samples.len(); ++i) {
-                    auto &page = frame.samples[i];
-                    auto name = rstd::format("ui.sample.{}", i.to_primitive());
-                    page.texture = builder.createTexture(
-                        {name.clone(), name.clone(), rg::TextureKind::Imported},
-                        page.upload.is_some());
-                    if (page.upload.is_some())
-                        builder.write(page.texture);
-                    else
-                        builder.read(page.texture);
-                    desc.pages.push({static_cast<Index>(i.to_primitive()), page.texture,
-                                     page.upload.is_some()});
-                }
-            });
-        if (frame.executor.bind<UploadPass>(frame.graph, pass, UploadExecutor{}).is_err())
-            return Err(Error{Stage::Graph});
+    rg::GraphData graph;
+    graph.scope = 1;
+    vk::GraphBindings bindings(graph.scope);
+    auto texture = [&](tex::TextureViewRef view, bool imported) -> rg::ResourceId {
+        rg::ResourceId id{graph.resources.len().to_primitive() + 1, 1};
+        const auto &range = view.description().range;
+        graph.resources.push({id, rg::GraphResourceKind::Texture, 0, range.mip_count,
+                              range.layer_count, 1, imported, view.texture().content_revision(),
+                              imported});
+        bindings
+            .bind(id, rstd::sync::Arc<dyn<vk::GraphBinding>>::make(
+                          vk::GraphTextureBinding(rstd::move(view))))
+            .unwrap();
+        return id;
+    };
+    auto host_buffer = [&](const FrameBuffer &buffer) -> rg::ResourceId {
+        rg::ResourceId id{graph.resources.len().to_primitive() + 1, 1};
+        graph.resources.push({id, rg::GraphResourceKind::Buffer, buffer.capacity, 1, 1, 1, true});
+        bindings
+            .bind(id, rstd::sync::Arc<dyn<vk::GraphBinding>>::make(
+                          HostBufferBinding{*self.session, buffer.buffer.clone(), buffer.capacity}))
+            .unwrap();
+        return id;
+    };
+    auto buffer_read = [&](rg::ResourceId id, Serial bytes, rg::GraphUsage usage,
+                           rg::GraphStage stages) {
+        rg::ResourceUse use{id, 0, rg::GraphAccess::Read, usage, stages};
+        use.range.size = bytes;
+        return use;
+    };
+    for (usize i{}; i < frame.gpu->targets.len(); ++i)
+        frame.textures[i] =
+            texture(frame.gpu->targets[i].view,
+                    i == usize() && target_override && load == rg::AttachmentLoad::Load);
+    auto clips = host_buffer(frame.gpu->clips);
+    auto instances = host_buffer(frame.gpu->instances);
+    rg::PassDescription upload;
+    upload.id = {1};
+    upload.kind = upload_kind;
+    for (auto &page : frame.samples) {
+        page.texture = texture(page.gpu->view, page.upload.is_none());
+        if (page.upload.is_none())
+            continue;
+        upload.uses.push({page.texture, 1, rg::GraphAccess::Write, rg::GraphUsage::Transfer,
+                          rg::GraphStage::Transfer});
+        auto bytes = Serial(page.gpu->extent.width) * page.gpu->extent.height *
+                     (page.kind == DrawKind::Glyph ? 1 : 4);
+        auto id = host_buffer(FrameBuffer{page.upload->clone(), bytes, FrameBufferKind::Storage});
+        upload.uses.push(
+            buffer_read(id, bytes, rg::GraphUsage::Transfer, rg::GraphStage::Transfer));
     }
+    if (!upload.uses.is_empty())
+        graph.passes.push(rstd::move(upload));
     for (auto i = frame.plan.pass_count(); i > usize(); --i) {
         auto index = static_cast<Index>((i - usize(1)).to_primitive());
-        auto name = rstd::format("ui.{}", index);
-        auto node = frame.graph.addPass<UiPass>(
-            name.as_str(), rg::PassNode::Type::Extension,
-            [&](rg::RenderGraphBuilder &builder, UiPass::Desc &desc) {
-                desc.index = index;
-                desc.target = builder.createTexture(
-                    {name.clone(), name.clone(), rg::TextureKind::Temp}, true);
-                builder.write(desc.target);
-                frame.textures[usize(index)] = desc.target;
-                for (const auto &page : frame.samples) {
-                    bool used{};
-                    for (const auto &item : frame.items[usize(index)])
-                        used |= item.kind == page.kind && item.resource_index == page.cache_index;
-                    if (used) {
-                        builder.read(page.texture);
-                        desc.samples.push({page.cache_index, page.texture, page.kind});
-                    }
+        rg::PassDescription pass;
+        pass.id = {rg::GraphSerial(index) + 2};
+        pass.kind = ui_kind;
+        for (unsigned byte{}; byte < 4; ++byte)
+            pass.parameters.push(static_cast<rg::GraphIndex>(index >> (byte * 8)) & 255u);
+        if (!index && target_override && load == rg::AttachmentLoad::Load)
+            pass.uses.push({frame.textures[usize(index)], 0, rg::GraphAccess::Read,
+                            rg::GraphUsage::ColorAttachment, rg::GraphStage::Color});
+        pass.uses.push({frame.textures[usize(index)], 1, rg::GraphAccess::Write,
+                        rg::GraphUsage::ColorAttachment, rg::GraphStage::Color});
+        pass.uses.push(buffer_read(clips, frame.gpu->clips.capacity, rg::GraphUsage::Storage,
+                                   rg::GraphStage::Fragment));
+        pass.uses.push(buffer_read(instances, frame.gpu->instances.capacity,
+                                   rg::GraphUsage::Storage,
+                                   rg::GraphStage::Vertex | rg::GraphStage::Fragment));
+        auto sample = [&](rg::ResourceId id, rg::GraphIndex version) {
+            for (const auto &use : pass.uses)
+                if (use.resource == id)
+                    return;
+            pass.uses.push({id, version, rg::GraphAccess::Read, rg::GraphUsage::Sampled,
+                            rg::GraphStage::Fragment});
+        };
+        for (const auto &page : frame.samples)
+            for (const auto &item : frame.items[usize(index)])
+                if (item.kind == page.kind && item.resource_index == page.cache_index) {
+                    sample(page.texture, page.upload.is_some() ? 1 : 0);
+                    break;
                 }
-                for (usize i{}; i < frame.externals.len(); ++i) {
-                    bool used{};
-                    for (const auto &item : frame.items[usize(index)])
-                        used |= item.kind == DrawKind::External && usize(item.resource_index) == i;
-                    if (!used)
-                        continue;
-                    auto &external = frame.externals[i];
-                    if (!external.texture.valid()) {
-                        auto key = rstd::format("ui.external.{}", i.to_primitive());
-                        ++frame.stats.used_external_frames;
-                        external.texture = builder.createTexture(
-                            {key.clone(), key.clone(), rg::TextureKind::Imported}, false);
-                    }
-                    builder.read(external.texture);
-                    desc.samples.push({static_cast<Index>(i.to_primitive()), external.texture,
-                                       DrawKind::External});
+        for (usize external_index{}; external_index < frame.externals.len(); ++external_index)
+            for (const auto &item : frame.items[usize(index)]) {
+                if (item.kind != DrawKind::External || usize(item.resource_index) != external_index)
+                    continue;
+                auto &external = frame.externals[external_index];
+                if (!external.texture.valid()) {
+                    external.texture = texture(external.view, true);
+                    ++frame.stats.used_external_frames;
                 }
-                for (const auto &draw : frame.items[usize(index)]) {
-                    if (draw.kind != DrawKind::Composite)
-                        continue;
-                    auto source = draw.source_pass;
-                    auto texture = frame.textures[usize(source)];
-                    builder.read(texture);
-                    desc.sources.push({source, texture});
-                }
-            });
-        auto bound = frame.executor.bind<UiPass>(frame.graph, node, UiExecutor{});
-        if (bound.is_err())
-            return Err(Error{Stage::Graph});
+                sample(external.texture, 0);
+                break;
+            }
+        for (const auto &item : frame.items[usize(index)])
+            if (item.kind == DrawKind::Composite)
+                sample(frame.textures[usize(item.source_pass)], 1);
+        rg::GraphicsDescription graphics;
+        graphics.color =
+            Some(rg::GraphAttachment{frame.textures[usize(index)], 1,
+                                     !index && target_override ? load : rg::AttachmentLoad::Clear});
+        pass.graphics = Some(graphics);
+        graph.passes.push(rstd::move(pass));
     }
-    PrepareContext context{frame, self.device(), *self.descriptor_layout, *self.sampler,
-                           *self.glyph_sampler};
-    if (frame.executor.prepare(frame.graph, context).is_err())
-        return fail(Stage::Graph, frame.error);
+    auto description = rg::GraphDescription::create(rstd::move(graph));
+    if (description.is_err())
+        return Err(Error{Stage::Graph});
+    auto &assets = **self.assets;
+    PrepareContext context{frame, self.device(), assets.descriptor(), *assets.sampler,
+                           *assets.glyph_sampler};
+    vk::VulkanPassBackends backends;
+    backends.set_scopes(Box<dyn<vk::GraphicsScopeBackend>>::make(ScopeBackend{self.scopes}));
+    backends
+        .bind(ui_kind, 1,
+              Box<dyn<vk::VulkanPassBackend>>::make(UiBackend{context, self.assets->clone()}))
+        .unwrap();
+    backends.bind(upload_kind, 1, Box<dyn<vk::VulkanPassBackend>>::make(UploadBackend{frame}))
+        .unwrap();
+    auto program =
+        vk::PreparedGraphProgram::prepare(*self.session, description.unwrap(), bindings, backends);
+    if (program.is_err())
+        return fail(Stage::Graph, program.unwrap_err().native);
+    frame.program = Some(rstd::move(program).unwrap());
     if (options.timings) {
         const auto families = self.device().gpu().GetQueueFamilyProperties();
         frame.timings.timestamp_valid_bits =
@@ -1460,9 +1621,6 @@ auto Renderer::prepare_impl(FramePlan plan, DrawOptions options) -> Result<empty
                                            : GpuTimingStatus::Failed;
         }
     }
-    for (auto &external : frame.externals)
-        if (!external.texture.valid())
-            vk::cancel_texture_read(external.prepared);
     self.frame = Some(rstd::move(candidate));
     if (prepare_start.is_some())
         frame.timings.prepare = {1, elapsed_nanoseconds(*prepare_start)};
@@ -1485,50 +1643,47 @@ auto Renderer::submit_impl() -> Result<Serial, Error> {
         return Err(Error{Stage::Submit, frame.uncertain_submission});
     const auto &d = self.device().handle().Dispatch();
     CpuSample record(frame.metric(&FrameTimings::record));
-    VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-    begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    auto result = d.vkResetCommandBuffer(frame.command, 0);
-    if (result != VK_SUCCESS)
-        return Err(Error{Stage::Record, result});
-    result = d.vkBeginCommandBuffer(frame.command, &begin);
-    if (result != VK_SUCCESS)
-        return Err(Error{Stage::Record, result});
+    auto begun = self.textures->Begin();
+    if (begun.is_err())
+        return Err(Error{Stage::Record, VkResult(begun.unwrap_err().native)});
+    auto work = rstd::move(begun).unwrap();
+    work.retain(self.frame->clone());
+    auto native = vk::native_recording(work, *self.session);
+    if (native.is_err())
+        return Err(Error{Stage::Record, VkResult(native.unwrap_err().native)});
+    auto command = native.unwrap();
+    VkResult result = VK_SUCCESS;
     if (frame.queries) {
-        frame.reset_queries(frame.command, frame.queries, 0, 2);
-        frame.write_timestamp(frame.command, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, frame.queries, 0);
+        frame.reset_queries(command, frame.queries, 0, 2);
+        frame.write_timestamp(command, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, frame.queries, 0);
     }
-    RecordContext context{
-        frame.command,   d,           *self.render_pass, *self.layout, *self.rectangle,
-        *self.composite, *self.glyph, *self.image};
-    if (frame.executor.record(context).is_err())
-        return Err(Error{Stage::Graph});
-    VkImageMemoryBarrier image{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
-    image.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-    image.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-    image.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    image.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-    image.srcQueueFamilyIndex = image.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    image.image = frame.targets[usize()].image.handle();
-    image.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-    d.vkCmdPipelineBarrier(frame.command, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-                           VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &image);
+    auto recorded = frame.program->record(work);
+    if (recorded.is_err())
+        return Err(Error{Stage::Graph, recorded.unwrap_err().native});
+    auto source = vk::native_texture(frame.gpu->targets[usize()].image);
+    if (source.is_err())
+        return Err(Error{Stage::Record, VkResult(source.unwrap_err().native)});
+    auto transferred = work.commands()->UseTexture(
+        {frame.gpu->targets[usize()].view, tex::Access::TransferSource, tex::Stages::Transfer});
+    if (transferred.is_err())
+        return Err(Error{Stage::Record, VkResult(transferred.unwrap_err().native)});
     auto capture_image = [&](VkImage source) {
         VkBufferImageCopy copy{};
         copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
         copy.imageExtent = {frame.extent.width, frame.extent.height, 1};
-        d.vkCmdCopyImageToBuffer(frame.command, source, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                                 frame.readback.handle(), 1, &copy);
+        d.vkCmdCopyImageToBuffer(command, source, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                 frame.gpu->readback.handle(), 1, &copy);
         VkBufferMemoryBarrier memory{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
         memory.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
         memory.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
         memory.srcQueueFamilyIndex = memory.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        memory.buffer = frame.readback.handle();
+        memory.buffer = frame.gpu->readback.handle();
         memory.size = VK_WHOLE_SIZE;
-        d.vkCmdPipelineBarrier(frame.command, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                               VK_PIPELINE_STAGE_HOST_BIT, 0, 0, nullptr, 1, &memory, 0, nullptr);
+        d.vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT,
+                               0, 0, nullptr, 1, &memory, 0, nullptr);
     };
     if (self.readback_enabled && !self.windowed)
-        capture_image(image.image);
+        capture_image(source.unwrap());
     if (self.windowed) {
         record.pause();
         if (!frame.acquired) {
@@ -1553,137 +1708,89 @@ auto Renderer::submit_impl() -> Result<Serial, Error> {
             sync.pending = false;
         }
         record.resume();
-        VkImageMemoryBarrier destination{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
-        destination.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        destination.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        destination.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        destination.srcQueueFamilyIndex = destination.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        destination.image = self.device().swapchain().images()[usize(frame.image_index)].handle;
-        destination.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-        // Chain the layout transition after the acquire semaphore's transfer-stage wait.
-        d.vkCmdPipelineBarrier(frame.command, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                               VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1,
-                               &destination);
+        vrento::FrameSurfaceLease surface;
+        surface.identity = {u64(self.session->epoch()), u32(frame.image_index),
+                            u64(self.submission + 1)};
+        surface.reuse = {vrento::FrameSurfaceReuseKind::PresentationAcquired, u64(0)};
+        surface.image = self.device().swapchain().images()[usize(frame.image_index)];
+        surface.format = self.device().swapchain().format();
+        surface.acquire = {vrento::FrameSurfaceAcquireKind::BinarySemaphore,
+                           *frame.acquire_semaphore};
+        surface.initial_queue_family = surface.final_queue_family =
+            self.device().graphics_queue().family_index;
+        surface.final_layout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+        auto acquired = vk::recordAcquire(
+            work, *self.session, surface,
+            rstd::sync::Arc<dyn<rstd::any::Any>>::make(self.frame->clone()),
+            {VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT,
+             VK_PIPELINE_STAGE_TRANSFER_BIT, self.device().graphics_queue().family_index});
+        if (acquired.is_err())
+            return Err(Error{Stage::Record, VkResult(acquired.unwrap_err().native)});
         VkImageBlit blit{};
         blit.srcSubresource = blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
         blit.srcOffsets[1] = blit.dstOffsets[1] = {static_cast<int>(frame.extent.width),
                                                    static_cast<int>(frame.extent.height), 1};
-        d.vkCmdBlitImage(frame.command, image.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                         destination.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit,
+        d.vkCmdBlitImage(command, source.unwrap(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                         surface.image.handle, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit,
                          VK_FILTER_NEAREST);
         if (self.readback_enabled) {
+            VkImageMemoryBarrier destination{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
             destination.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
             destination.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
             destination.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
             destination.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-            d.vkCmdPipelineBarrier(frame.command, VK_PIPELINE_STAGE_TRANSFER_BIT,
+            destination.srcQueueFamilyIndex = destination.dstQueueFamilyIndex =
+                VK_QUEUE_FAMILY_IGNORED;
+            destination.image = surface.image.handle;
+            destination.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+            d.vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TRANSFER_BIT,
                                    VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1,
                                    &destination);
-            capture_image(destination.image);
+            capture_image(surface.image.handle);
+            auto final = vk::recordSurfaceFinalState(
+                work, *self.session, surface,
+                {VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_TRANSFER_READ_BIT,
+                 VK_PIPELINE_STAGE_TRANSFER_BIT, self.device().graphics_queue().family_index});
+            if (final.is_err())
+                return Err(Error{Stage::Record, VkResult(final.unwrap_err().native)});
         }
-        destination.srcAccessMask =
-            self.readback_enabled ? VK_ACCESS_TRANSFER_READ_BIT : VK_ACCESS_TRANSFER_WRITE_BIT;
-        destination.dstAccessMask = 0;
-        destination.oldLayout = self.readback_enabled ? VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL
-                                                      : VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        destination.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-        d.vkCmdPipelineBarrier(frame.command, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                               VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0, nullptr, 1,
-                               &destination);
+        auto released = vk::recordRelease(work, *self.session, surface);
+        if (released.is_err())
+            return Err(Error{Stage::Record, VkResult(released.unwrap_err().native)});
     }
     if (frame.queries)
-        frame.write_timestamp(frame.command, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, frame.queries,
-                              1);
-    result = d.vkEndCommandBuffer(frame.command);
+        frame.write_timestamp(command, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, frame.queries, 1);
     record.pause();
-    if (result != VK_SUCCESS)
-        return Err(Error{Stage::Record, result});
-    VkSubmitInfo info{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-    info.commandBufferCount = 1;
-    info.pCommandBuffers = &frame.command;
-    VkSemaphore acquire = *frame.acquire_semaphore;
-    VkSemaphore finished =
-        self.windowed ? *self.presents[usize(frame.image_index)].semaphore : VK_NULL_HANDLE;
-    Vec<VkSemaphore> waits;
-    Vec<rstd::uint64_t> values;
-    Vec<VkPipelineStageFlags> stages;
+    auto fence = self.textures->AttachFence(
+        work, {*self.device().handle(), *frame.fence->value,
+               rstd::sync::Arc<dyn<rstd::any::Any>>::make(frame.fence.clone())});
+    if (fence.is_err())
+        return Err(Error{Stage::Submit, VkResult(fence.unwrap_err().native)});
     if (self.windowed) {
-        waits.push(VkSemaphore(acquire));
-        values.push(rstd::uint64_t(0));
-        stages.push(VkPipelineStageFlags(VK_PIPELINE_STAGE_TRANSFER_BIT));
+        auto signal = self.textures->AttachSignal(
+            work, {*self.device().handle(), *self.presents[usize(frame.image_index)].semaphore,
+                   vk::NativeSemaphoreKind::Binary, 0,
+                   rstd::sync::Arc<dyn<rstd::any::Any>>::make(self.frame->clone())});
+        if (signal.is_err())
+            return Err(Error{Stage::Submit, VkResult(signal.unwrap_err().native)});
     }
-    // Preserve a GPU memory dependency when completed allocations are reused.
-    if (self.submission) {
-        waits.push(VkSemaphore(self.completion_semaphore()));
-        values.push(rstd::uint64_t(self.submission));
-        stages.push(VkPipelineStageFlags(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT));
-    }
-    VkSemaphore signals[]{self.completion_semaphore(), finished};
-    rstd::uint64_t signal_values[]{self.submission + 1, 0};
-    info.signalSemaphoreCount = self.windowed ? 2 : 1;
-    info.pSignalSemaphores = signals;
-    for (const auto &external : frame.externals) {
-        if (!external.texture.valid())
-            continue;
-        auto prepared_wait = vrento::vulkan::dependency_wait(
-            *self.session, external.prepared.dependency, external.prepared.stages);
-        if (prepared_wait.is_err()) {
-            Error error{Stage::ExternalContent};
-            error.content = Some(prepared_wait.unwrap_err());
-            return Err(error);
-        }
-        const auto native = prepared_wait.unwrap();
-        if (!native.semaphore)
-            continue;
-        usize index{};
-        while (index < waits.len() && waits[index] != native.semaphore)
-            ++index;
-        if (index == waits.len()) {
-            waits.push(VkSemaphore(native.semaphore));
-            values.push(rstd::uint64_t(native.value));
-            stages.push(VkPipelineStageFlags(native.stages));
-        } else {
-            if (values[index] < native.value)
-                values[index] = native.value;
-            stages[index] |= native.stages;
-        }
-    }
-    info.waitSemaphoreCount = static_cast<unsigned>(waits.len().to_primitive());
-    info.pWaitSemaphores = waits.data();
-    info.pWaitDstStageMask = stages.data();
-    VkTimelineSemaphoreSubmitInfo timeline{VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO};
-    timeline.waitSemaphoreValueCount = info.waitSemaphoreCount;
-    timeline.pWaitSemaphoreValues = values.data();
-    timeline.signalSemaphoreValueCount = info.signalSemaphoreCount;
-    timeline.pSignalSemaphoreValues = signal_values;
-    info.pNext = &timeline;
-    auto completion = vk::import_dependency(
-        *self.session, self.completion_semaphore(), self.submission + 1,
-        rstd::sync::Arc<dyn<rstd::any::Any>>::make(self.completion_timeline->clone()));
-    if (completion.is_err())
-        return Err(Error{Stage::Submit, VkResult(completion.unwrap_err().native)});
-    auto completion_token = completion.unwrap();
+    auto receipt = work.receipt();
     frame.recyclable = false;
     if (frame.queries)
         frame.submitted_at = Some(rstd::time::Instant::now());
-    {
+    auto submitted = [&] {
         CpuSample submit(frame.metric(&FrameTimings::queue_submit));
-        result = self.device().graphics_queue().handle.Submit(info, *frame.fence);
-    }
-    if (result != VK_SUCCESS) {
-        frame.uncertain_submission = result;
-        if (result == VK_ERROR_DEVICE_LOST)
-            self.state = Impl::State::Lost;
+        return self.textures->Submit(rstd::move(work));
+    }();
+    if (submitted.is_err()) {
+        result = VkResult(submitted.unwrap_err().native);
+        if (receipt.status() == tex::SubmissionStatus::Uncertain)
+            frame.uncertain_submission = result;
+        else
+            frame.recyclable = true;
         if (result == VK_ERROR_DEVICE_LOST)
             frame.fail_timestamps(result);
         return Err(Error{result == VK_ERROR_DEVICE_LOST ? Stage::Lost : Stage::Submit, result});
-    }
-    for (const auto &external : frame.externals) {
-        if (!external.texture.valid())
-            continue;
-        auto committed = vk::commit_texture_read(external.prepared, completion_token);
-        if (committed.is_err())
-            rstd::panic("cannot commit submitted texture read");
     }
     for (const auto &page : frame.samples) {
         if (page.upload.is_some() && page.kind == DrawKind::Glyph) {
@@ -1718,7 +1825,7 @@ auto Renderer::poll_impl() -> Result<Option<Completion>, Error> {
         VkResult result;
         {
             CpuSample poll(frame.metric(&FrameTimings::poll));
-            result = device.Dispatch().vkGetFenceStatus(*device, *frame.fence);
+            result = device.Dispatch().vkGetFenceStatus(*device, *frame.fence->value);
         }
         if (result == VK_NOT_READY) {
             if (frame.options.timings)
@@ -1731,6 +1838,9 @@ auto Renderer::poll_impl() -> Result<Option<Completion>, Error> {
             frame.fail_timestamps(result);
             return Err(Error{Stage::Lost, result});
         }
+        auto retired = self.textures->Poll();
+        if (retired.is_err())
+            return Err(Error{Stage::Submit, VkResult(retired.unwrap_err().native)});
         (**self.frame).collect_timestamps();
         if (self.session->observe_result((**self.frame).timings.query_result) ==
             VK_ERROR_DEVICE_LOST)
@@ -1760,7 +1870,7 @@ auto Renderer::wait_impl(Serial timeout_nanoseconds) -> Result<Completion, Error
         VkResult result;
         {
             CpuSample wait(frame.metric(&FrameTimings::wait));
-            result = frame.fence.Wait(timeout_nanoseconds);
+            result = frame.fence->value.Wait(timeout_nanoseconds);
         }
         if (result == VK_TIMEOUT) {
             if (frame.options.timings)
@@ -1773,6 +1883,9 @@ auto Renderer::wait_impl(Serial timeout_nanoseconds) -> Result<Completion, Error
             frame.fail_timestamps(result);
             return Err(Error{Stage::Lost, result});
         }
+        auto retired = self.textures->Poll();
+        if (retired.is_err())
+            return Err(Error{Stage::Submit, VkResult(retired.unwrap_err().native)});
         (**self.frame).collect_timestamps();
         if (self.session->observe_result((**self.frame).timings.query_result) ==
             VK_ERROR_DEVICE_LOST)
@@ -1796,7 +1909,7 @@ auto Renderer::readback_impl() -> Result<Pixels, Error> {
     if (self.state != Impl::State::Complete)
         return Err(Error{Stage::State});
     auto &frame = **self.frame;
-    auto memory = frame.readback.allocation();
+    auto memory = frame.gpu->readback.allocation();
     auto mapped = memory.map();
     if (mapped.is_err())
         return Err(Error{Stage::Readback, mapped.unwrap_err().api_result});
@@ -1938,7 +2051,7 @@ auto Renderer::pixel_extent() const -> VkExtent2D {
                : VkExtent2D{};
 }
 auto Renderer::frame_resource_stats() const -> FrameResourceStats {
-    return impl_->frame_resources.stats;
+    return impl_->frame_resources->stats;
 }
 auto Renderer::clear_frame_resource_cache() -> Result<empty, Error> {
     if (impl_->is_lost())
@@ -1949,7 +2062,7 @@ auto Renderer::clear_frame_resource_cache_impl() -> Result<empty, Error> {
     auto &self = *impl_;
     if (self.state != Impl::State::Ready && self.state != Impl::State::Complete)
         return Err(Error{Stage::State});
-    self.frame_resources.clear();
+    self.frame_resources->clear();
     return Ok(empty{});
 }
 auto Renderer::set_frame_resource_limits(FrameResourceLimits limits) -> Result<empty, Error> {
@@ -1966,7 +2079,7 @@ auto Renderer::set_frame_resource_limits_impl(FrameResourceLimits limits) -> Res
         limits.max_buffer_bytes > maximum || limits.max_cached_bytes > maximum ||
         limits.max_cached_entries > 65536)
         return Err(Error{Stage::Unsupported});
-    auto &pool = self.frame_resources;
+    auto &pool = *self.frame_resources;
     if (pool.stats.target_bytes - pool.stats.cached_target_bytes > limits.max_target_bytes ||
         pool.stats.buffer_bytes - pool.stats.cached_buffer_bytes > limits.max_buffer_bytes)
         return Err(pool.budget_failure());
@@ -2005,6 +2118,7 @@ auto Renderer::draw_stats() const -> Option<DrawStats> {
     return Some(DrawStats((**impl_->frame).stats));
 }
 auto Renderer::image_cache_stats() const -> ImageCacheStats {
+    impl_->acknowledge_uploads();
     auto stats = impl_->image_cache.stats;
     if (impl_->frame.is_some()) {
         for (const auto &binding : (**impl_->frame).samples) {
@@ -2052,6 +2166,7 @@ auto Renderer::set_image_cache_limits_impl(ImageCacheLimits limits) -> Result<em
     return Ok(empty{});
 }
 auto Renderer::text_cache_stats() const -> TextCacheStats {
+    impl_->acknowledge_uploads();
     auto stats = impl_->glyph_cache.stats;
     if (impl_->frame.is_some()) {
         for (const auto &binding : (**impl_->frame).samples) {

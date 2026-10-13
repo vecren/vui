@@ -5,10 +5,10 @@ using namespace rstd::prelude;
 namespace vui::gpu::detail {
 namespace vk = ::vrento::vulkan;
 struct Target {
-    vvk::AllocatedImage image;
-    vvk::ImageView view;
-    vvk::Framebuffer framebuffer;
+    vrento::texture::TextureRef image;
+    vrento::texture::TextureViewRef view;
     VkExtent2D extent{};
+    bool managed{true};
     auto bytes() const -> Serial { return Serial(extent.width) * extent.height * 4; }
 };
 enum class FrameBufferKind { Storage, Readback };
@@ -63,6 +63,9 @@ struct FrameResources {
         clear_buffers();
     }
     void release(Target target, bool reusable) {
+        if (!target.managed)
+            return;
+        reusable &= target.image.check().is_ok();
         if (reusable && can_cache(target.bytes())) {
             stats.cached_target_bytes += target.bytes();
             ++stats.cached_entries;
@@ -92,8 +95,7 @@ struct FrameResources {
         ++stats.allocation_failures;
         return Error{Stage::Allocation, result};
     }
-    auto target(const vk::Device &device, VkRenderPass pass, VkExtent2D extent)
-        -> Result<Target, Error> {
+    auto target(vk::TextureContext &textures, VkExtent2D extent) -> Result<Target, Error> {
         for (usize i{}; i < targets.len(); ++i) {
             if (targets[i].extent.width != extent.width ||
                 targets[i].extent.height != extent.height)
@@ -111,38 +113,19 @@ struct FrameResources {
             return Err(budget_failure());
         Target result;
         result.extent = extent;
-        VkImageCreateInfo image{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
-        image.imageType = VK_IMAGE_TYPE_2D;
-        image.format = format;
+        vrento::texture::TextureDesc image;
         image.extent = {extent.width, extent.height, 1};
-        image.mipLevels = image.arrayLayers = 1;
-        image.samples = VK_SAMPLE_COUNT_1_BIT;
-        image.tiling = VK_IMAGE_TILING_OPTIMAL;
-        image.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
-                      VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
-        auto allocated = device.memory_allocator().create_image(image);
+        image.format = vrento::TextureFormat::RGBA8_SRGB;
+        image.usage = vrento::texture::Usage::ColorAttachment | vrento::texture::Usage::Sampled |
+                      vrento::texture::Usage::TransferSource;
+        auto allocated = textures.CreateTexture(image);
         if (allocated.is_err())
-            return Err(allocation_failure(allocated.unwrap_err().api_result));
+            return Err(allocation_failure(VkResult(allocated.unwrap_err().native)));
         result.image = allocated.unwrap();
-        VkImageViewCreateInfo view{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
-        view.image = result.image.handle();
-        view.viewType = VK_IMAGE_VIEW_TYPE_2D;
-        view.format = format;
-        view.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-        auto status = device.handle().CreateImageView(view, result.view);
-        if (status != VK_SUCCESS)
-            return Err(allocation_failure(status));
-        auto attachment = *result.view;
-        VkFramebufferCreateInfo framebuffer{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
-        framebuffer.renderPass = pass;
-        framebuffer.attachmentCount = 1;
-        framebuffer.pAttachments = &attachment;
-        framebuffer.width = extent.width;
-        framebuffer.height = extent.height;
-        framebuffer.layers = 1;
-        status = device.handle().CreateFramebuffer(framebuffer, result.framebuffer);
-        if (status != VK_SUCCESS)
-            return Err(allocation_failure(status));
+        auto view = textures.CreateView(result.image, {});
+        if (view.is_err())
+            return Err(allocation_failure(VkResult(view.unwrap_err().native)));
+        result.view = view.unwrap();
         ++stats.target_allocations;
         stats.target_bytes += bytes;
         if (stats.target_bytes > stats.peak_target_bytes)

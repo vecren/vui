@@ -125,7 +125,10 @@ class Renderer {
     auto set_text_cache_limits_impl(TextCacheLimits limits) -> Result<empty, Error>;
     auto finish_initialize() -> Result<empty, Error>;
     auto initialize_session_impl(vrento::vulkan::DeviceSession, bool) -> Result<empty, Error>;
-    auto prepare_impl(FramePlan plan, DrawOptions options) -> Result<empty, Error>;
+    auto prepare_impl(FramePlan plan, DrawOptions options,
+                      Option<vrento::texture::TextureViewRef> target = None(),
+                      vrento::rg::AttachmentLoad load = vrento::rg::AttachmentLoad::Clear)
+        -> Result<empty, Error>;
     auto submit_impl() -> Result<Serial, Error>;
     auto poll_impl() -> Result<Option<Completion>, Error>;
     auto wait_impl(Serial timeout_nanoseconds) -> Result<Completion, Error>;
@@ -149,9 +152,13 @@ class Renderer {
     auto device_epoch() const -> Serial;
     auto device_session() const -> Result<vrento::vulkan::DeviceSession, Error>;
     auto prepare(FramePlan plan, DrawOptions options = {}) -> Result<empty, Error>;
+    auto record(vrento::texture::Submission &, FramePlan, vrento::texture::TextureViewRef,
+                vrento::rg::AttachmentLoad load = vrento::rg::AttachmentLoad::Load,
+                DrawOptions options = {}) -> Result<empty, Error>;
     auto draw_stats() const -> Option<DrawStats>;
     auto frame_timings() const -> Option<FrameTimings>;
     auto frame_resource_stats() const -> FrameResourceStats;
+    auto pipeline_cache_stats() const -> vrento::resource_registry::PipelineCacheStats;
     auto set_frame_resource_limits(FrameResourceLimits) -> Result<empty, Error>;
     auto clear_frame_resource_cache() -> Result<empty, Error>;
     auto release_completed_frame() -> Result<empty, Error>;

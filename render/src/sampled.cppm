@@ -6,12 +6,13 @@ using namespace rstd::prelude;
 namespace vui::gpu::detail {
 namespace vk = ::vrento::vulkan;
 struct SampledImage {
-    vvk::AllocatedImage image;
-    vvk::ImageView view;
+    vrento::texture::TextureRef image;
+    vrento::texture::TextureViewRef view;
     VkExtent2D extent;
 };
-auto make_sampled(const vk::Device &device, VkExtent2D extent, VkFormat format)
+auto make_sampled(vk::TextureContext &textures, VkExtent2D extent, VkFormat format)
     -> Result<rstd::sync::Arc<SampledImage>, Error> {
+    const auto &device = textures.session().device();
     auto features = device.gpu().GetFormatProperties(format).optimalTilingFeatures;
     constexpr auto required = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
                               VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT |
@@ -20,26 +21,18 @@ auto make_sampled(const vk::Device &device, VkExtent2D extent, VkFormat format)
         return Err(Error{Stage::Unsupported});
     SampledImage gpu;
     gpu.extent = extent;
-    VkImageCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
-    info.imageType = VK_IMAGE_TYPE_2D;
-    info.format = format;
+    vrento::texture::TextureDesc info;
     info.extent = {extent.width, extent.height, 1};
-    info.mipLevels = info.arrayLayers = 1;
-    info.samples = VK_SAMPLE_COUNT_1_BIT;
-    info.tiling = VK_IMAGE_TILING_OPTIMAL;
-    info.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-    auto image = device.memory_allocator().create_image(info);
+    info.format = format == VK_FORMAT_R8_UNORM ? vrento::TextureFormat::R8
+                                               : vrento::TextureFormat::RGBA8_SRGB;
+    auto image = textures.CreateTexture(info);
     if (image.is_err())
-        return Err(Error{Stage::Allocation, image.unwrap_err().api_result});
+        return Err(Error{Stage::Allocation, VkResult(image.unwrap_err().native)});
     gpu.image = image.unwrap();
-    VkImageViewCreateInfo view{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
-    view.image = gpu.image.handle();
-    view.viewType = VK_IMAGE_VIEW_TYPE_2D;
-    view.format = format;
-    view.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-    auto result = device.handle().CreateImageView(view, gpu.view);
-    if (result != VK_SUCCESS)
-        return Err(Error{Stage::Allocation, result});
+    auto view = textures.CreateView(gpu.image, {});
+    if (view.is_err())
+        return Err(Error{Stage::Allocation, VkResult(view.unwrap_err().native)});
+    gpu.view = view.unwrap();
     return Ok(rstd::sync::Arc<SampledImage>::make(rstd::move(gpu)));
 }
 auto make_upload(const vk::Device &device, slice<unsigned char> pixels)
