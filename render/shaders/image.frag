@@ -13,7 +13,7 @@ void main() {
         uv = clamp(uv, min(pc.uv.xy + half_texel, middle),
                    max(pc.uv.xy + pc.uv.zw - half_texel, middle));
     }
-    uint edges = uint(pc.params.z);
+    uint edges = uint(pc.image_edges);
     float distance = edges == 15u ? rounded_distance(local, pc.rect, 0) : -1e10;
     if (edges != 15u && (edges & 1u) != 0u) distance = max(distance, pc.rect.x - local.x);
     if (edges != 15u && (edges & 2u) != 0u) distance = max(distance, pc.rect.y - local.y);

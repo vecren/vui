@@ -426,8 +426,8 @@ auto resolve_items(OwnedFrame &frame, GlyphCache &cache, ImageCache &images, Ind
                 item.clip = value.clip;
             } else if (draw.is_Image()) {
                 const auto &value = draw.as_Image();
-                if (!value.destination.width || !value.destination.height || !value.source.width ||
-                    !value.source.height || value.transform.inverse().is_none())
+                if (!value.destination.width || !value.destination.height ||
+                    value.transform.inverse().is_none())
                     continue;
                 auto resolved = images.resolve(value.data, max_extent);
                 if (resolved.is_err())
@@ -435,7 +435,7 @@ auto resolve_items(OwnedFrame &frame, GlyphCache &cache, ImageCache &images, Ind
                 item.kind = DrawKind::Image;
                 item.resource_index = resolved.unwrap();
                 item.sampling = value.sampling;
-                item.data.params[2] = static_cast<unsigned>(value.edges);
+                item.data.image_edges = static_cast<unsigned>(value.edges);
                 item.data.params[3] = value.clamp_source ? 1 : 0;
                 item.data.color[0] = value.tint.r;
                 item.data.color[1] = value.tint.g;
@@ -480,7 +480,7 @@ auto resolve_items(OwnedFrame &frame, GlyphCache &cache, ImageCache &images, Ind
                 if (usize(index) == frame.externals.len())
                     frame.externals.push(ExternalBinding{value.frame, prepared.unwrap(), {}});
                 item.kind = DrawKind::External;
-                item.data.params[2] = 15;
+                item.data.image_edges = 15;
                 for (auto &component : item.data.color)
                     component = 1;
                 item.resource_index = index;

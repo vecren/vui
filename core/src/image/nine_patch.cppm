@@ -72,7 +72,8 @@ inline auto compute_nine_patch(const ImageRegion &region, const NinePatchSpec &s
             Rect target{dx[x], dy[y], dx[x + 1] - dx[x], dy[y + 1] - dy[y]};
             if (!source.valid() || !target.valid())
                 return Err(ImageError::InvalidValue);
-            if (source.width && source.height && target.width && target.height)
+            // Collapsed source intervals still sample a line or point across the destination.
+            if (target.width && target.height)
                 pieces.push(
                     {target, source,
                      static_cast<ImageEdges>(

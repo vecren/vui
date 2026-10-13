@@ -4,7 +4,8 @@ struct DrawData {
     vec4 row0;
     vec4 row1;
     vec4 params;
-    vec4 surface;
+    vec3 surface;
+    float image_edges;
     vec4 uv;
 };
 layout(std430,set=0,binding=2) readonly buffer Instances { DrawData instances[]; };
