@@ -14,12 +14,12 @@ void main() {
                    max(pc.uv.xy + pc.uv.zw - half_texel, middle));
     }
     uint edges = uint(pc.image_edges);
-    float distance = edges == 15u ? rounded_distance(local, pc.rect, 0) : -1e10;
-    if (edges != 15u && (edges & 1u) != 0u) distance = max(distance, pc.rect.x - local.x);
-    if (edges != 15u && (edges & 2u) != 0u) distance = max(distance, pc.rect.y - local.y);
-    if (edges != 15u && (edges & 4u) != 0u) distance = max(distance, local.x - pc.rect.x - pc.rect.z);
-    if (edges != 15u && (edges & 8u) != 0u) distance = max(distance, local.y - pc.rect.y - pc.rect.w);
-    float alpha = (edges == 0u ? 1 : coverage(distance)) * clip_coverage();
+    float alpha = clip_coverage();
+    // Evaluate each edge separately so corner derivatives do not widen both edges.
+    if ((edges & 1u) != 0u) alpha *= coverage(pc.rect.x - local.x);
+    if ((edges & 2u) != 0u) alpha *= coverage(pc.rect.y - local.y);
+    if ((edges & 4u) != 0u) alpha *= coverage(local.x - pc.rect.x - pc.rect.z);
+    if ((edges & 8u) != 0u) alpha *= coverage(local.y - pc.rect.y - pc.rect.w);
     vec4 value = texture(source, uv);
     if (pc.params.x > 0.5)
         value.rgb = mix(value.rgb / 12.92, pow(max((value.rgb + 0.055) / 1.055, 0), vec3(2.4)),

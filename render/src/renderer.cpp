@@ -307,6 +307,7 @@ struct UiAssets {
     vvk::Sampler sampler, glyph_sampler;
     Vec<vrento::resource::PipelineRecipeHandle> recipes;
     Vec<vrento::resource_registry::PipelineResourceResult> warmed;
+    Option<vk::PipelinePreparationQueue> preparation;
     explicit UiAssets(vk::DeviceSession owner)
         : session(rstd::move(owner)), descriptors(session.graphics_resources().descriptors),
           layouts(session.graphics_resources().layouts),
@@ -319,7 +320,7 @@ struct UiAssets {
     auto descriptor() const -> VkDescriptorSetLayout {
         return *(**descriptors.Resolve(layout->physical->descriptor_layouts[usize()])).layout;
     }
-    auto initialize() -> Result<empty, Error>;
+    auto initialize(vk::PipelinePreparationMode) -> Result<empty, Error>;
 };
 struct UiPrepared {
     rstd::sync::Arc<FrameGpu> gpu;
@@ -736,6 +737,15 @@ struct Impl<vrento::vulkan::GraphBinding, vui::gpu::HostBufferBinding>
                                                 vrento::vulkan::GraphExecutionError> {
         return self().Freeze(read_only);
     }
+    auto Release(vrento::texture::Submission &work, rstd::uint32_t family,
+                 const vrento::rg::ResourceUse &next) const
+        -> Result<empty, vrento::vulkan::GraphExecutionError> {
+        auto current = vrento::vulkan::native_queue(work, self().session);
+        if (current.is_err() || current.unwrap().family_index != family)
+            return Err(vrento::vulkan::GraphExecutionError{
+                vrento::vulkan::GraphExecutionStage::Unsupported, {}, next.resource});
+        return Ok(empty{});
+    }
 };
 template <>
 struct Impl<vrento::vulkan::VulkanPassBackend, vui::gpu::UiBackend>
@@ -780,12 +790,15 @@ auto UiBackend::Prepare(const rg::PassDescription &pass, const vk::GraphPrepareC
         return Err(prepared.unwrap_err());
     Vec<vrento::resource_registry::PipelineResourceResult> pipelines;
     for (const auto &recipe : assets->recipes) {
-        auto pipeline = assets->pipelines.EnsureRecipe(inputs.session.device(), recipe,
-                                                       (*inputs.scope)->Info().signature,
-                                                       assets->passes, assets->layouts);
-        if (pipeline.is_none())
+        auto pipeline = assets->preparation->prepare(recipe, (*inputs.scope)->Info().signature);
+        if (pipeline.is_err())
             return Err(vk::GraphExecutionError{vk::GraphExecutionStage::Prepare});
-        pipelines.push(rstd::move(pipeline).unwrap());
+        auto result = pipeline.unwrap();
+        if (result.status != vk::PipelineReadiness::Ready)
+            return Err(vk::GraphExecutionError{result.status == vk::PipelineReadiness::Pending
+                                                   ? vk::GraphExecutionStage::Pending
+                                                   : vk::GraphExecutionStage::Prepare});
+        pipelines.push(result.pipeline.take().unwrap());
     }
     RecordContext native{VK_NULL_HANDLE,
                          inputs.session.device().handle().Dispatch(),
@@ -826,7 +839,11 @@ auto ui_shader(const unsigned (&words)[N], vrento::ShaderType type) -> vk::Uni_S
         result->spirv.push(unsigned(word));
     return result;
 }
-auto UiAssets::initialize() -> Result<empty, Error> {
+auto UiAssets::initialize(vk::PipelinePreparationMode mode) -> Result<empty, Error> {
+    auto worker = vk::PipelinePreparationQueue::create(session, mode);
+    if (worker.is_err())
+        return Err(Error{Stage::Pipeline});
+    preparation = Some(worker.unwrap());
     vrento::resource_registry::PipelineLayoutRequest request;
     vk::DescriptorSetInfo set;
     set.bindings.push(
@@ -878,12 +895,16 @@ auto UiAssets::initialize() -> Result<empty, Error> {
         auto recipe = pipelines.RegisterRecipe(rstd::move(description), layouts);
         if (recipe.is_none())
             return false;
-        auto pipeline =
-            pipelines.EnsureRecipe(session.device(), *recipe, signature, passes, layouts);
-        if (pipeline.is_none())
+        auto handle = recipe.unwrap();
+        recipes.push(vrento::resource::PipelineRecipeHandle(handle));
+        auto pipeline = preparation->prepare(handle, signature);
+        if (pipeline.is_err())
             return false;
-        recipes.push(rstd::move(recipe).unwrap());
-        warmed.push(rstd::move(pipeline).unwrap());
+        auto value = pipeline.unwrap();
+        if (value.status == vk::PipelineReadiness::Failed)
+            return false;
+        if (value.pipeline)
+            warmed.push(value.pipeline.take().unwrap());
         return true;
     };
     if (!add(shaders::rectangle) || !add(shaders::composite) || !add(shaders::glyph) ||
@@ -894,6 +915,7 @@ auto UiAssets::initialize() -> Result<empty, Error> {
 } // namespace
 
 struct Renderer::Impl {
+    vk::PipelinePreparationMode pipeline_mode{vk::PipelinePreparationMode::Synchronous};
     Option<vk::DeviceSession> session;
     Option<vk::TextureContext> textures;
     vk::GraphicsScopeCache scopes;
@@ -1095,6 +1117,13 @@ struct Renderer::Impl {
 
 Renderer::Renderer() : impl_(Box<Impl>::make()) {}
 Renderer::~Renderer() = default;
+auto Renderer::set_pipeline_preparation_mode(vk::PipelinePreparationMode mode)
+    -> Result<empty, Error> {
+    if (impl_->initialized)
+        return Err(Error{Stage::State});
+    impl_->pipeline_mode = mode;
+    return Ok(empty{});
+}
 auto Renderer::pipeline_cache_stats() const -> vrento::resource_registry::PipelineCacheStats {
     return impl_->assets ? (*impl_->assets)->pipelines.stats()
                          : vrento::resource_registry::PipelineCacheStats{};
@@ -1239,7 +1268,7 @@ auto Renderer::finish_initialize() -> Result<empty, Error> {
             return sync;
     }
     auto assets = rstd::sync::Arc<UiAssets>::make(*self.session);
-    auto result = assets->initialize();
+    auto result = assets->initialize(self.pipeline_mode);
     if (result.is_err())
         return result;
     self.assets = Some(rstd::move(assets));
@@ -1284,6 +1313,25 @@ auto Renderer::prepare_impl(FramePlan plan, DrawOptions options,
     auto &self = *impl_;
     if (self.state != Impl::State::Ready && self.state != Impl::State::Complete)
         return Err(Error{Stage::State});
+    VkFormat formats[]{format, target_override
+                                   ? vk::ToVkType(target_override->texture().description().format)
+                                   : format};
+    bool pending{};
+    for (auto target_format : formats) {
+        vk::RenderPassResourceDesc signature;
+        signature.color_format = target_format;
+        for (const auto &recipe : (**self.assets).recipes) {
+            auto result = (**self.assets).preparation->prepare(recipe, signature);
+            if (result.is_err())
+                return Err(Error{Stage::Pipeline});
+            auto value = result.unwrap();
+            if (value.status == vk::PipelineReadiness::Failed)
+                return Err(Error{Stage::Pipeline});
+            pending |= value.status == vk::PipelineReadiness::Pending;
+        }
+    }
+    if (pending)
+        return Err(Error{Stage::Pending, VK_NOT_READY});
     self.acknowledge_uploads();
     self.scopes.collect();
     if (self.assets)
@@ -1596,8 +1644,11 @@ auto Renderer::prepare_impl(FramePlan plan, DrawOptions options,
         .unwrap();
     auto program =
         vk::PreparedGraphProgram::prepare(*self.session, description.unwrap(), bindings, backends);
-    if (program.is_err())
-        return fail(Stage::Graph, program.unwrap_err().native);
+    if (program.is_err()) {
+        auto error = program.unwrap_err();
+        return fail(error.stage == vk::GraphExecutionStage::Pending ? Stage::Pending : Stage::Graph,
+                    error.stage == vk::GraphExecutionStage::Pending ? VK_NOT_READY : error.native);
+    }
     frame.program = Some(rstd::move(program).unwrap());
     if (options.timings) {
         const auto families = self.device().gpu().GetQueueFamilyProperties();

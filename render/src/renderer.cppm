@@ -28,7 +28,8 @@ enum class Stage {
     DrawLimit,
     ImageCacheLimit,
     ExternalContent,
-    FrameResourceLimit
+    FrameResourceLimit,
+    Pending
 };
 struct Error {
     Stage stage;
@@ -148,6 +149,8 @@ class Renderer {
     auto initialize(SurfaceHost &, bool validation = false, bool readback = false)
         -> Result<empty, Error>;
     auto initialize(vrento::vulkan::DeviceSession, bool readback = true) -> Result<empty, Error>;
+    auto set_pipeline_preparation_mode(vrento::vulkan::PipelinePreparationMode)
+        -> Result<empty, Error>;
     auto device_lost() const -> bool;
     auto device_epoch() const -> Serial;
     auto device_session() const -> Result<vrento::vulkan::DeviceSession, Error>;

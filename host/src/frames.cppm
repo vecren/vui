@@ -54,7 +54,8 @@ class FrameLoop {
     Option<gpu::Error> fault_;
 
     static auto waiting(const gpu::Error &error) -> bool {
-        return (error.stage == gpu::Stage::Acquire || error.stage == gpu::Stage::Timeout) &&
+        return (error.stage == gpu::Stage::Acquire || error.stage == gpu::Stage::Timeout ||
+                error.stage == gpu::Stage::Pending) &&
                (error.result == VK_TIMEOUT || error.result == VK_NOT_READY);
     }
     auto backpressure() const -> bool { return events_.len() >= usize(56); }
