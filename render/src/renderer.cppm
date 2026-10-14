@@ -128,7 +128,7 @@ class Renderer {
     auto initialize_session_impl(vrento::vulkan::DeviceSession, bool) -> Result<empty, Error>;
     auto prepare_impl(FramePlan plan, DrawOptions options,
                       Option<vrento::texture::TextureViewRef> target = None(),
-                      vrento::rg::AttachmentLoad load = vrento::rg::AttachmentLoad::Clear)
+                      vrento::vulkan::AttachmentLoad load = vrento::vulkan::AttachmentLoad::Clear)
         -> Result<empty, Error>;
     auto submit_impl() -> Result<Serial, Error>;
     auto poll_impl() -> Result<Option<Completion>, Error>;
@@ -156,7 +156,7 @@ class Renderer {
     auto device_session() const -> Result<vrento::vulkan::DeviceSession, Error>;
     auto prepare(FramePlan plan, DrawOptions options = {}) -> Result<empty, Error>;
     auto record(vrento::texture::Submission &, FramePlan, vrento::texture::TextureViewRef,
-                vrento::rg::AttachmentLoad load = vrento::rg::AttachmentLoad::Load,
+                vrento::vulkan::AttachmentLoad load = vrento::vulkan::AttachmentLoad::Load,
                 DrawOptions options = {}) -> Result<empty, Error>;
     auto draw_stats() const -> Option<DrawStats>;
     auto frame_timings() const -> Option<FrameTimings>;

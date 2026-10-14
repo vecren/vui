@@ -15,7 +15,7 @@ using namespace rstd::prelude;
 using namespace rstd::literals;
 
 namespace vui::gpu {
-namespace rg = ::vrento::rg;
+namespace rg = ::vrento::vulkan;
 namespace vk = ::vrento::vulkan;
 namespace tex = ::vrento::texture;
 namespace {
@@ -378,10 +378,10 @@ struct HostBufferBinding {
     auto Texture() const -> Option<tex::TextureViewRef> { return None(); }
     auto Freeze(bool) const
         -> Result<rstd::sync::Arc<dyn<vk::GraphBinding>>, vk::GraphExecutionError>;
-    auto Use(tex::Submission &work, const rg::ResourceUse &use) const
+    auto Use(tex::Submission &work, const rg::PassResourceUse &use) const
         -> Result<empty, vk::GraphExecutionError> {
         if (use.access != rg::GraphAccess::Read || use.version ||
-            (use.usage != rg::GraphUsage::Storage && use.usage != rg::GraphUsage::Transfer))
+            (use.usage != rg::PassUsage::Storage && use.usage != rg::PassUsage::Transfer))
             return Err(vk::GraphExecutionError{vk::GraphExecutionStage::Access});
         auto command = vk::native_recording(work, session);
         if (command.is_err())
@@ -389,7 +389,7 @@ struct HostBufferBinding {
                 vk::GraphExecutionStage::Access, {}, {}, VK_SUCCESS, Some(command.unwrap_err())});
         VkBufferMemoryBarrier barrier{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
         barrier.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
-        barrier.dstAccessMask = use.usage == rg::GraphUsage::Storage ? VK_ACCESS_SHADER_READ_BIT
+        barrier.dstAccessMask = use.usage == rg::PassUsage::Storage ? VK_ACCESS_SHADER_READ_BIT
                                                                      : VK_ACCESS_TRANSFER_READ_BIT;
         barrier.srcQueueFamilyIndex = barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         barrier.buffer = buffer.handle();
@@ -701,7 +701,7 @@ namespace rstd {
 template <>
 struct Impl<vrento::vulkan::GraphicsScopeBackend, vui::gpu::ScopeBackend>
     : ImplBase<vui::gpu::ScopeBackend> {
-    auto Prepare(const vrento::rg::GraphicsDescription &description,
+    auto Prepare(const vrento::vulkan::GraphicsDescription &description,
                  const vrento::vulkan::GraphPrepareContext &context)
         -> Result<sync::Arc<dyn<vrento::vulkan::PreparedGraphicsScope>>,
                   vrento::vulkan::GraphExecutionError> {
@@ -729,7 +729,7 @@ struct Impl<vrento::vulkan::GraphBinding, vui::gpu::HostBufferBinding>
     : ImplBase<vui::gpu::HostBufferBinding> {
     auto Info() const -> vrento::vulkan::GraphBindingInfo { return self().Info(); }
     auto Texture() const -> Option<vrento::texture::TextureViewRef> { return self().Texture(); }
-    auto Use(vrento::texture::Submission &work, const vrento::rg::ResourceUse &use) const
+    auto Use(vrento::texture::Submission &work, const vrento::vulkan::PassResourceUse &use) const
         -> Result<empty, vrento::vulkan::GraphExecutionError> {
         return self().Use(work, use);
     }
@@ -738,7 +738,7 @@ struct Impl<vrento::vulkan::GraphBinding, vui::gpu::HostBufferBinding>
         return self().Freeze(read_only);
     }
     auto Release(vrento::texture::Submission &work, rstd::uint32_t family,
-                 const vrento::rg::ResourceUse &next) const
+                 const vrento::vulkan::PassResourceUse &next) const
         -> Result<empty, vrento::vulkan::GraphExecutionError> {
         auto current = vrento::vulkan::native_queue(work, self().session);
         if (current.is_err() || current.unwrap().family_index != family)
@@ -750,7 +750,7 @@ struct Impl<vrento::vulkan::GraphBinding, vui::gpu::HostBufferBinding>
 template <>
 struct Impl<vrento::vulkan::VulkanPassBackend, vui::gpu::UiBackend>
     : ImplBase<vui::gpu::UiBackend> {
-    auto Prepare(const vrento::rg::PassDescription &pass,
+    auto Prepare(const vrento::vulkan::PassDescription &pass,
                  const vrento::vulkan::GraphPrepareContext &context)
         -> Result<sync::Arc<dyn<vrento::vulkan::PreparedVulkanPass>>,
                   vrento::vulkan::GraphExecutionError> {
@@ -760,7 +760,7 @@ struct Impl<vrento::vulkan::VulkanPassBackend, vui::gpu::UiBackend>
 template <>
 struct Impl<vrento::vulkan::VulkanPassBackend, vui::gpu::UploadBackend>
     : ImplBase<vui::gpu::UploadBackend> {
-    auto Prepare(const vrento::rg::PassDescription &pass,
+    auto Prepare(const vrento::vulkan::PassDescription &pass,
                  const vrento::vulkan::GraphPrepareContext &context)
         -> Result<sync::Arc<dyn<vrento::vulkan::PreparedVulkanPass>>,
                   vrento::vulkan::GraphExecutionError> {
@@ -1523,7 +1523,7 @@ auto Renderer::prepare_impl(FramePlan plan, DrawOptions options,
         if (result != VK_SUCCESS)
             return fail(Stage::Allocation, result);
     }
-    rg::GraphData graph;
+    rg::VulkanPassData graph;
     graph.scope = 1;
     vk::GraphBindings bindings(graph.scope);
     auto texture = [&](tex::TextureViewRef view, bool imported) -> rg::ResourceId {
@@ -1547,9 +1547,9 @@ auto Renderer::prepare_impl(FramePlan plan, DrawOptions options,
             .unwrap();
         return id;
     };
-    auto buffer_read = [&](rg::ResourceId id, Serial bytes, rg::GraphUsage usage,
-                           rg::GraphStage stages) {
-        rg::ResourceUse use{id, 0, rg::GraphAccess::Read, usage, stages};
+    auto buffer_read = [&](rg::ResourceId id, Serial bytes, rg::PassUsage usage,
+                           rg::PassStages stages) {
+        rg::PassResourceUse use{id, 0, rg::GraphAccess::Read, usage, stages};
         use.range.size = bytes;
         return use;
     };
@@ -1566,13 +1566,13 @@ auto Renderer::prepare_impl(FramePlan plan, DrawOptions options,
         page.texture = texture(page.gpu->view, page.upload.is_none());
         if (page.upload.is_none())
             continue;
-        upload.uses.push({page.texture, 1, rg::GraphAccess::Write, rg::GraphUsage::Transfer,
-                          rg::GraphStage::Transfer});
+        upload.uses.push({page.texture, 1, rg::GraphAccess::Write, rg::PassUsage::Transfer,
+                          rg::PassStages::Transfer});
         auto bytes = Serial(page.gpu->extent.width) * page.gpu->extent.height *
                      (page.kind == DrawKind::Glyph ? 1 : 4);
         auto id = host_buffer(FrameBuffer{page.upload->clone(), bytes, FrameBufferKind::Storage});
         upload.uses.push(
-            buffer_read(id, bytes, rg::GraphUsage::Transfer, rg::GraphStage::Transfer));
+            buffer_read(id, bytes, rg::PassUsage::Transfer, rg::PassStages::Transfer));
     }
     if (!upload.uses.is_empty())
         graph.passes.push(rstd::move(upload));
@@ -1585,20 +1585,20 @@ auto Renderer::prepare_impl(FramePlan plan, DrawOptions options,
             pass.parameters.push(static_cast<rg::GraphIndex>(index >> (byte * 8)) & 255u);
         if (!index && target_override && load == rg::AttachmentLoad::Load)
             pass.uses.push({frame.textures[usize(index)], 0, rg::GraphAccess::Read,
-                            rg::GraphUsage::ColorAttachment, rg::GraphStage::Color});
+                            rg::PassUsage::ColorAttachment, rg::PassStages::Color});
         pass.uses.push({frame.textures[usize(index)], 1, rg::GraphAccess::Write,
-                        rg::GraphUsage::ColorAttachment, rg::GraphStage::Color});
-        pass.uses.push(buffer_read(clips, frame.gpu->clips.capacity, rg::GraphUsage::Storage,
-                                   rg::GraphStage::Fragment));
+                        rg::PassUsage::ColorAttachment, rg::PassStages::Color});
+        pass.uses.push(buffer_read(clips, frame.gpu->clips.capacity, rg::PassUsage::Storage,
+                                   rg::PassStages::Fragment));
         pass.uses.push(buffer_read(instances, frame.gpu->instances.capacity,
-                                   rg::GraphUsage::Storage,
-                                   rg::GraphStage::Vertex | rg::GraphStage::Fragment));
+                                   rg::PassUsage::Storage,
+                                   rg::PassStages::Vertex | rg::PassStages::Fragment));
         auto sample = [&](rg::ResourceId id, rg::GraphIndex version) {
             for (const auto &use : pass.uses)
                 if (use.resource == id)
                     return;
-            pass.uses.push({id, version, rg::GraphAccess::Read, rg::GraphUsage::Sampled,
-                            rg::GraphStage::Fragment});
+            pass.uses.push({id, version, rg::GraphAccess::Read, rg::PassUsage::Sampled,
+                            rg::PassStages::Fragment});
         };
         for (const auto &page : frame.samples)
             for (const auto &item : frame.items[usize(index)])
@@ -1628,7 +1628,7 @@ auto Renderer::prepare_impl(FramePlan plan, DrawOptions options,
         pass.graphics = Some(graphics);
         graph.passes.push(rstd::move(pass));
     }
-    auto description = rg::GraphDescription::create(rstd::move(graph));
+    auto description = rg::VulkanPassSet::create(rstd::move(graph));
     if (description.is_err())
         return Err(Error{Stage::Graph});
     auto &assets = **self.assets;
