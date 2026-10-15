@@ -21,8 +21,7 @@ auto ImageReader::read(ref<rstd::path::Path> path) const -> Result<ImageData, Im
         if (bytes.len().to_primitive() > options_.max_encoded_bytes ||
             count.to_primitive() > options_.max_encoded_bytes - bytes.len().to_primitive())
             return Err(ImageReadError{ImageReadStage::Limit});
-        for (usize i{}; i < count; ++i)
-            bytes.push(static_cast<unsigned char>(chunk[i.to_primitive()]));
+        bytes.extend_from_slice(reinterpret_cast<const unsigned char *>(chunk), count);
     }
     return this->read(bytes.as_slice());
 }

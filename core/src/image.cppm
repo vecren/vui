@@ -47,10 +47,7 @@ class ImageData {
             return Err(valid.unwrap_err());
         if (pixels.len().to_primitive() != Serial(width) * height * 4)
             return Err(ImageError::InvalidValue);
-        Vec<unsigned char> owned;
-        owned.reserve(pixels.len());
-        for (auto byte : pixels)
-            owned.push(static_cast<unsigned char>(byte));
+        auto owned = Vec<unsigned char>::from(pixels);
         return Ok(ImageData(width, height, density, rstd::move(owned)));
     }
     auto id() const -> Serial { return data_->id; }

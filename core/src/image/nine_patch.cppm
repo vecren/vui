@@ -62,6 +62,9 @@ inline auto compute_nine_patch(const ImageRegion &region, const NinePatchSpec &s
     Scalar dy[]{destination.y, destination.y + target.top,
                 destination.y + destination.height - target.bottom,
                 destination.y + destination.height};
+    // Shrunk borders can cross by a few ulps after translation.
+    dx[2] = (dx[1] > dx[2] ? dx[1] : dx[2]);
+    dy[2] = (dy[1] > dy[2] ? dy[1] : dy[2]);
     Vec<ImagePlacement> pieces;
     pieces.reserve(usize(9));
     for (unsigned y = 0; y < 3; ++y)
