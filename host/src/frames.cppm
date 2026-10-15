@@ -63,7 +63,7 @@ class FrameLoop {
     void notify(FrameEventType type, Option<gpu::Error> error = None(),
                 Option<gpu::PresentStatus> present = None()) {
         FrameEvent event{active_->request,    type,    Some(active_->frame),
-                         active_->submission, present, error};
+                         active_->submission, present, rstd::move(error)};
         if (active_->inputs.is_some()) {
             event.inputs = Some(InputTimings(*active_->inputs));
             event.observed = Some(rstd::time::Instant::now());
@@ -73,10 +73,10 @@ class FrameLoop {
     }
     auto fail(gpu::Error error) -> Result<empty, gpu::Error> {
         bool first = fault_.is_none();
-        fault_ = Some(error);
+        fault_ = Some(gpu::Error(error));
         if (active_.is_some()) {
             if (first)
-                notify(FrameEventType::Failed, Some(error));
+                notify(FrameEventType::Failed, Some(gpu::Error(error)));
             if (!active_->submission || error.result == VK_ERROR_DEVICE_LOST)
                 active_ = None();
         }
@@ -180,7 +180,7 @@ class FrameLoop {
                 closing_,
                 closed_,
                 backpressure(),
-                fault_};
+                fault_.clone()};
     }
     void set_frame_period(Serial nanoseconds) {
         if (nanoseconds)
@@ -300,7 +300,8 @@ class FrameLoop {
             }
             if (waiting(error))
                 return retry_or_fail(error);
-            events_.push({id, FrameEventType::Failed, Some(identity), 0, {}, Some(error)});
+            events_.push(
+                {id, FrameEventType::Failed, Some(identity), 0, {}, Some(gpu::Error(error))});
             pending_ = None();
             if (error.result == VK_ERROR_DEVICE_LOST)
                 return fail(error);

@@ -35,25 +35,16 @@ auto make_sampled(vk::TextureContext &textures, VkExtent2D extent, VkFormat form
     gpu.view = view.unwrap();
     return Ok(rstd::sync::Arc<SampledImage>::make(rstd::move(gpu)));
 }
-auto make_upload(const vk::Device &device, slice<unsigned char> pixels)
-    -> Result<vvk::AllocatedBuffer, Error> {
-    VkBufferCreateInfo info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-    info.size = pixels.len().to_primitive();
-    info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-    auto allocation = device.memory_allocator().create_buffer(info, vvk::MemoryRequest::Upload());
-    if (allocation.is_err())
-        return Err(Error{Stage::Allocation, allocation.unwrap_err().api_result});
-    auto buffer = allocation.unwrap();
-    auto memory = buffer.allocation();
-    auto mapped = memory.map();
-    if (mapped.is_err())
-        return Err(Error{Stage::Allocation, mapped.unwrap_err().api_result});
-    auto mapping = mapped.unwrap();
-    std::memcpy(mapping.data(), pixels.as_raw_ptr(), info.size);
-    auto flushed = memory.flush();
-    if (flushed.is_err())
-        return Err(Error{Stage::Allocation, flushed.unwrap_err().api_result});
-    return Ok(rstd::move(buffer));
+auto make_upload(rstd::sync::Arc<SampledImage> image, slice<unsigned char> pixels)
+    -> Result<vrento::texture::TextureUpload, Error> {
+    vrento::texture::TextureUpload upload;
+    upload.target = image->view;
+    upload.width = image->extent.width;
+    upload.height = image->extent.height;
+    upload.bytes.reserve(pixels.len());
+    for (auto byte : pixels)
+        upload.bytes.push(u8(byte));
+    return Ok(rstd::move(upload));
 }
 
 } // namespace vui::gpu::detail

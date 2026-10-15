@@ -36,6 +36,45 @@ struct Error {
     VkResult result{VK_SUCCESS};
     Option<TextError> text{};
     Option<vrento::texture::Error> content{};
+    Option<vrento::vulkan::GraphExecutionError> graph_error{};
+    Error(Stage value, VkResult native = VK_SUCCESS, Option<TextError> text_error = {},
+          Option<vrento::texture::Error> texture_error = {})
+        : stage(value), result(native), text(rstd::move(text_error)),
+          content(rstd::move(texture_error)) {}
+    Error(const Error &other)
+        : stage(other.stage), result(other.result), text(other.text.clone()),
+          content(other.content.clone()), graph_error(other.graph_error.clone()) {}
+    Error(Error &&) = default;
+    auto operator=(Error &&) -> Error & = default;
+    auto operator=(const Error &other) -> Error & {
+        if (this != &other)
+            *this = Error(other);
+        return *this;
+    }
+    static auto graph(vrento::vulkan::GraphExecutionError cause) -> Error {
+        Error result{Stage::Graph, cause.native_result()};
+        result.content = cause.texture_error();
+        result.graph_error = Some(rstd::move(cause));
+        return result;
+    }
+    static auto graph(vrento::fg::Error cause) -> Error {
+        return graph(vrento::vulkan::GraphExecutionError{
+            vrento::vulkan::GraphExecutionStage::Graph, cause.pass, cause.resource,
+            vrento::vulkan::GraphExecutionCause::Graph(cause)});
+    }
+    static auto resource(Stage stage, vrento::resource::ResourceError cause) -> Error {
+        auto result = graph(vrento::vulkan::GraphExecutionError{
+            vrento::vulkan::GraphExecutionStage::Prepare,
+            {},
+            {},
+            vrento::vulkan::GraphExecutionCause::Resource(
+                vrento::resource::ResourceErrorSnapshot(rstd::move(cause)))});
+        result.stage = stage;
+        return result;
+    }
+    static auto texture(Stage stage, vrento::texture::Error cause) -> Error {
+        return {stage, VkResult(cause.native), {}, Some(rstd::move(cause))};
+    }
 };
 struct Completion {
     Serial submission;
@@ -128,8 +167,8 @@ class Renderer {
     auto initialize_session_impl(vrento::vulkan::DeviceSession, bool) -> Result<empty, Error>;
     auto prepare_impl(FramePlan plan, DrawOptions options,
                       Option<vrento::texture::TextureViewRef> target = None(),
-                      vrento::vulkan::AttachmentLoad load = vrento::vulkan::AttachmentLoad::Clear)
-        -> Result<empty, Error>;
+                      vrento::vulkan::AttachmentLoad load = vrento::vulkan::AttachmentLoad::Clear,
+                      vrento::texture::Submission *external_work = nullptr) -> Result<empty, Error>;
     auto submit_impl() -> Result<Serial, Error>;
     auto poll_impl() -> Result<Option<Completion>, Error>;
     auto wait_impl(Serial timeout_nanoseconds) -> Result<Completion, Error>;
@@ -158,6 +197,7 @@ class Renderer {
     auto record(vrento::texture::Submission &, FramePlan, vrento::texture::TextureViewRef,
                 vrento::vulkan::AttachmentLoad load = vrento::vulkan::AttachmentLoad::Load,
                 DrawOptions options = {}) -> Result<empty, Error>;
+    auto renderer_statistics() const -> vrento::vulkan::RendererStatistics;
     auto draw_stats() const -> Option<DrawStats>;
     auto frame_timings() const -> Option<FrameTimings>;
     auto frame_resource_stats() const -> FrameResourceStats;

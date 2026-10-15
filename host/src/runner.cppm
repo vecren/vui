@@ -154,7 +154,7 @@ class Runner {
                 return fail({RunStage::Frame, {}, Some(pumped.unwrap_err())});
             for (const auto &event : frames_.poll_events()) {
                 if (event.type == FrameEventType::Failed)
-                    return fail({RunStage::Frame, {}, event.error, {}, event.plan_error});
+                    return fail({RunStage::Frame, {}, event.error.clone(), {}, event.plan_error});
                 if (event.present.is_some() && *event.present != gpu::PresentStatus::Queued)
                     dirty = true;
                 if (event.type == FrameEventType::GpuComplete)
