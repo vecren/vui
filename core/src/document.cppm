@@ -290,6 +290,7 @@ class UiDocument {
         Option<Scalar> width;
         Option<TextLayout> layout;
         Option<TextError> error;
+        TextBoundaries boundaries;
     };
     struct ImageContent {
         Option<ImageData> data;
@@ -432,11 +433,12 @@ class UiDocument {
         auto writer = node.value_writer[unsigned(property)].upgrade();
         return writer.is_some() && (*writer)->active;
     }
-    auto write_text(UiId id, Node &node, String value) -> bool {
+    auto write_text(UiId id, Node &node, String value, TextBoundaries boundaries = {}) -> bool {
         auto &text = **node.text;
-        if (text.value.as_str() == value.as_str())
+        if (text.value.as_str() == value.as_str() && (!boundaries.present() || boundaries == text.boundaries))
             return false;
         text.value = rstd::move(value);
+        text.boundaries = rstd::move(boundaries);
         text.dirty = true;
         changed(true, Some(id));
         return true;
@@ -1090,11 +1092,12 @@ class UiDocument {
                     : inner.max_width;
             if (text.dirty || text.layout.is_none() || text.width != wrap_width) {
                 ++stats_.text_layouts;
-                auto result =
-                    (*text_service_)
-                        ->layout({text.value.as_str(), text.family.as_str(), text.language.as_str(),
-                                  text.size, wrap_width, text.direction, text.wrap, text.bold,
-                                  text.italic, text.alignment, text.line_spacing});
+                TextRequest request{text.value.as_str(), text.family.as_str(), text.language.as_str(),
+                    text.size, wrap_width, text.direction, text.wrap, text.bold, text.italic, text.alignment, text.line_spacing};
+                if (text.boundaries.present()) request.boundaries = &text.boundaries;
+                else if (text.layout.is_some() && text.layout->text() == text.value.as_str())
+                    request.boundaries = &text.layout->boundaries();
+                auto result = (*text_service_)->layout(request);
                 if (result.is_err()) {
                     text.error = Some(result.unwrap_err());
                     return Some(UiError::TextLayoutFailed);
@@ -2345,6 +2348,16 @@ class UiDocument {
             return Err(UiError::PropertyOwned);
         if ((**node->text).value.as_str() != value)
             write_text(id, *node, String::make(value));
+        return Ok(empty{});
+    }
+    auto set_text(UiId id, const TextBoundaries &value) -> Result<empty, UiError> {
+        if (layout_active_ || painting_) return Err(UiError::Routing);
+        auto node = resolve(id);
+        if (!node) return Err(UiError::InvalidId);
+        if (node->text.is_none() || !value.present()) return Err(UiError::InvalidValue);
+        if (value_occupied(*node, UiValueProperty::Text)) return Err(UiError::PropertyOwned);
+        if ((**node->text).boundaries != value)
+            write_text(id, *node, String::make(value.text()), TextBoundaries(value));
         return Ok(empty{});
     }
     auto set_text_format(UiId id, TextFormat format) -> Result<empty, UiError> {

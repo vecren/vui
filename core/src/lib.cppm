@@ -28,6 +28,7 @@ export import :interaction.navigation;
 export import :events;
 export import :session;
 export import :text;
+export import :text_edit;
 export import :image;
 export import :image.nine_patch;
 export import :content;

@@ -16,6 +16,10 @@ struct TextEffects {
     auto operator==(const TextEffects &) const -> bool = default;
 };
 using vectext::TextError;
+using vectext::TextRange;
+using vectext::TextWord;
+using vectext::TextBoundaries;
+using vectext::TextBoundaryBias;
 using vectext::TextDirection;
 using vectext::TextWrap;
 using vectext::TextAlignment;
