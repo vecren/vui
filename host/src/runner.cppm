@@ -85,6 +85,13 @@ class Runner {
     Runner(const Runner &) = delete;
     void request_close() { request_close_ = true; }
     void request_redraw() { request_redraw_ = true; }
+    void set_frame_interval(Serial nanoseconds) { frames_.set_frame_interval(nanoseconds); }
+    auto set_present_mode(gpu::PresentMode mode) -> Result<empty, gpu::Error> {
+        auto previous = frames_.requested_present_mode();
+        auto configured = frames_.set_present_mode(mode);
+        if (configured.is_ok() && previous != mode) request_redraw();
+        return configured;
+    }
     auto stats() const -> RunStats { return stats_; }
     template <class Driver, class Hooks>
         requires rstd::Impled<Driver, HostDriver> && rstd::Impled<Hooks, RunHooks>
@@ -100,8 +107,8 @@ class Runner {
             }
         } guard{running_, finished_};
         bool dirty{true}, closing{}, animating{};
-        auto platform = rstd::as<HostDriver>(driver);
-        auto callbacks = rstd::as<RunHooks>(hooks);
+        decltype(auto) platform = rstd::as<HostDriver>(driver);
+        decltype(auto) callbacks = rstd::as<RunHooks>(hooks);
         while (!frames_.status().closed) {
             auto timing = platform.timing();
             auto timeout = dirty && !closing
@@ -149,7 +156,7 @@ class Runner {
                         return fail({RunStage::Frame});
                 }
             }
-            auto pumped = frames_.pump();
+            auto pumped = frames_.pump_with_clock([&] { return platform.timing(); });
             if (pumped.is_err())
                 return fail({RunStage::Frame, {}, Some(pumped.unwrap_err())});
             for (const auto &event : frames_.poll_events()) {

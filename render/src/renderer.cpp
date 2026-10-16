@@ -876,9 +876,10 @@ struct Renderer::Impl {
     Vec<PresentSync> presents;
     PFN_vkReleaseSwapchainImagesEXT release_images{};
     bool windowed{}, initialized{}, readback_enabled{true};
+    PresentMode presentation{PresentMode::Fifo};
     auto swapchain_options() const -> vk::SwapchainOptions {
         return {true, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
-                          (readback_enabled ? VK_IMAGE_USAGE_TRANSFER_SRC_BIT : 0u)};
+                          (readback_enabled ? VK_IMAGE_USAGE_TRANSFER_SRC_BIT : 0u), presentation};
     }
     auto presentation_sync() -> Result<empty, Error> {
         Vec<PresentSync> next;
@@ -2082,7 +2083,16 @@ auto Renderer::resize(VkExtent2D extent, Serial timeout_nanoseconds) -> Result<e
         return Err(Error{Stage::Lost, VK_ERROR_DEVICE_LOST});
     return impl_->observe_result(resize_impl(extent, timeout_nanoseconds));
 }
-auto Renderer::resize_impl(VkExtent2D extent, Serial timeout_nanoseconds) -> Result<empty, Error> {
+auto Renderer::resize(VkExtent2D extent, PresentMode mode, Serial timeout_nanoseconds)
+    -> Result<empty, Error> {
+    if (impl_->is_lost())
+        return Err(Error{Stage::Lost, VK_ERROR_DEVICE_LOST});
+    if (unsigned(mode) > unsigned(PresentMode::FifoRelaxed))
+        return Err(Error{Stage::State});
+    return impl_->observe_result(resize_impl(extent, timeout_nanoseconds, Some(mode)));
+}
+auto Renderer::resize_impl(VkExtent2D extent, Serial timeout_nanoseconds, Option<PresentMode> mode)
+    -> Result<empty, Error> {
     auto &self = *impl_;
     if (!self.windowed || !self.initialized || self.state == Impl::State::Lost ||
         self.state == Impl::State::Closed)
@@ -2090,6 +2100,7 @@ auto Renderer::resize_impl(VkExtent2D extent, Serial timeout_nanoseconds) -> Res
     auto retired = self.retire(timeout_nanoseconds);
     if (retired.is_err())
         return retired;
+    if (mode.is_some()) self.presentation = *mode;
     self.frame = None();
     self.presents.clear();
     self.state = Impl::State::Unavailable;
@@ -2131,6 +2142,17 @@ auto Renderer::pixel_extent() const -> VkExtent2D {
                    impl_->state != Impl::State::Closed
                ? impl_->device().swapchain().extent()
                : VkExtent2D{};
+}
+auto Renderer::present_mode() const -> Option<PresentMode> {
+    if (!impl_->windowed || !impl_->initialized || impl_->state == Impl::State::Unavailable ||
+        impl_->state == Impl::State::Closed || device_lost()) return None();
+    switch (impl_->device().swapchain().presentMode()) {
+    case VK_PRESENT_MODE_FIFO_KHR: return Some(PresentMode::Fifo);
+    case VK_PRESENT_MODE_IMMEDIATE_KHR: return Some(PresentMode::Immediate);
+    case VK_PRESENT_MODE_MAILBOX_KHR: return Some(PresentMode::Mailbox);
+    case VK_PRESENT_MODE_FIFO_RELAXED_KHR: return Some(PresentMode::FifoRelaxed);
+    default: return None();
+    }
 }
 auto Renderer::frame_resource_stats() const -> FrameResourceStats {
     return impl_->frame_resources->stats;

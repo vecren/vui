@@ -15,6 +15,7 @@ struct WakeStats {
     Serial queued{}, coalesced{}, failed{};
     bool pending{}, closed{};
 };
+enum class WindowMode { Windowed, Fullscreen };
 class Window final : public gpu::SurfaceHost {
     struct Impl;
     Box<Impl> impl_;
@@ -34,6 +35,9 @@ class Window final : public gpu::SurfaceHost {
     void set_input_tracing(bool enabled);
     auto capture(PointerKind kind, bool enabled) -> NativeCaptureResult;
     auto resize(Index width, Index height) -> Result<empty, gpu::Error>;
+    auto set_mode(WindowMode) -> Result<empty, gpu::Error>;
+    auto mode() const -> Option<WindowMode>;
+    auto refresh_rate() const -> Option<Index>;
     void minimize();
     void restore();
     auto id() const -> Index;

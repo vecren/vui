@@ -94,6 +94,7 @@ class SurfaceHost {
     virtual auto pixel_extent() const -> VkExtent2D = 0;
 };
 enum class PresentStatus { Queued, Suboptimal, OutOfDate };
+using PresentMode = vrento::vulkan::PresentationMode;
 struct PresentResult {
     FrameIdentity frame;
     PresentStatus status{};
@@ -175,7 +176,8 @@ class Renderer {
     auto readback_impl() -> Result<Pixels, Error>;
     auto present_impl() -> Result<PresentResult, Error>;
     auto discard_prepared_impl(Serial timeout_nanoseconds) -> Result<empty, Error>;
-    auto resize_impl(VkExtent2D extent, Serial timeout_nanoseconds) -> Result<empty, Error>;
+    auto resize_impl(VkExtent2D extent, Serial timeout_nanoseconds, Option<PresentMode> mode = {})
+        -> Result<empty, Error>;
     auto shutdown_impl(Serial timeout_nanoseconds) -> Result<empty, Error>;
     auto release_completed_frame_impl() -> Result<empty, Error>;
 
@@ -212,6 +214,9 @@ class Renderer {
     auto present() -> Result<PresentResult, Error>;
     auto discard_prepared(Serial timeout_nanoseconds = 0) -> Result<empty, Error>;
     auto resize(VkExtent2D, Serial timeout_nanoseconds = 1'000'000'000) -> Result<empty, Error>;
+    auto resize(VkExtent2D, PresentMode, Serial timeout_nanoseconds = 1'000'000'000)
+        -> Result<empty, Error>;
+    auto present_mode() const -> Option<PresentMode>;
     auto shutdown(Serial timeout_nanoseconds = 1'000'000'000) -> Result<empty, Error>;
     auto pixel_extent() const -> VkExtent2D;
     auto validation_errors() const -> unsigned;

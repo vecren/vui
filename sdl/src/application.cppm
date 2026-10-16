@@ -28,6 +28,8 @@ class Application {
     UiSession session_;
     host::Runner *active_{};
     bool opened_{};
+    Serial frame_interval_ns_{};
+    gpu::PresentMode presentation_{gpu::PresentMode::Fifo};
 
   public:
     ~Application() {
@@ -63,12 +65,29 @@ class Application {
             active_->request_redraw();
         session_.document().bindings().wake();
     }
+    void set_frame_interval(Serial nanoseconds) {
+        if (frame_interval_ns_ == nanoseconds) return;
+        frame_interval_ns_ = nanoseconds;
+        if (active_) active_->set_frame_interval(nanoseconds);
+        session_.document().bindings().wake();
+    }
+    auto set_present_mode(gpu::PresentMode mode) -> Result<empty, gpu::Error> {
+        if (unsigned(mode) > unsigned(gpu::PresentMode::FifoRelaxed))
+            return Err(gpu::Error{gpu::Stage::State});
+        if (presentation_ == mode) return Ok(empty{});
+        auto result = active_ ? active_->set_present_mode(mode) : Result<empty, gpu::Error>(Ok(empty{}));
+        if (result.is_ok()) { presentation_ = mode; session_.document().bindings().wake(); }
+        return result;
+    }
     template <class Hooks>
         requires rstd::Impled<Hooks, host::RunHooks>
     auto run(Hooks &hooks) -> Result<host::RunStats, host::RunError> {
         if (!opened_ || active_)
             return Err(host::RunError{host::RunStage::State});
         host::Runner runner(session_, renderer_);
+        runner.set_frame_interval(frame_interval_ns_);
+        auto configured = runner.set_present_mode(presentation_);
+        if (configured.is_err()) return Err(host::RunError{host::RunStage::Frame, {}, Some(configured.unwrap_err())});
         WindowDriver driver{window_};
         active_ = &runner;
         auto result = runner.run(driver, hooks);

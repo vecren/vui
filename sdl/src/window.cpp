@@ -445,6 +445,29 @@ auto Window::resize(Index width, Index height) -> Result<empty, gpu::Error> {
     SDL_SetWindowSize(impl_->window, static_cast<int>(width), static_cast<int>(height));
     return Ok(empty{});
 }
+auto Window::set_mode(WindowMode mode) -> Result<empty, gpu::Error> {
+    if (!impl_->window || unsigned(mode) > unsigned(WindowMode::Fullscreen))
+        return Err(gpu::Error{gpu::Stage::State});
+    if (this->mode() == Some(mode)) return Ok(empty{});
+    auto flags = mode == WindowMode::Fullscreen ? Uint32(SDL_WINDOW_FULLSCREEN_DESKTOP) : 0u;
+    if (SDL_SetWindowFullscreen(impl_->window, flags) != 0)
+        return Err(gpu::Error{gpu::Stage::Surface});
+    (*impl_->wake)->request();
+    return Ok(empty{});
+}
+auto Window::mode() const -> Option<WindowMode> {
+    if (!impl_->window) return None();
+    return Some((SDL_GetWindowFlags(impl_->window) & SDL_WINDOW_FULLSCREEN)
+                    ? WindowMode::Fullscreen : WindowMode::Windowed);
+}
+auto Window::refresh_rate() const -> Option<Index> {
+    if (!impl_->window) return None();
+    auto display = SDL_GetWindowDisplayIndex(impl_->window);
+    SDL_DisplayMode mode;
+    if (display < 0 || SDL_GetCurrentDisplayMode(display, &mode) != 0 || mode.refresh_rate <= 0)
+        return None();
+    return Some(Index(mode.refresh_rate));
+}
 void Window::minimize() {
     if (impl_->window)
         SDL_MinimizeWindow(impl_->window);

@@ -48,6 +48,9 @@ class FrameLoop {
     Option<Serial> pending_;
     Vec<FrameEvent> events_;
     Serial frame_period_ns_{16'666'667};
+    Serial frame_interval_ns_{};
+    Option<Serial> last_submission_ns_;
+    gpu::PresentMode presentation_{gpu::PresentMode::Fifo};
     Serial next_request_{}, generation_{}, submitted_input_sequence_{};
     VkExtent2D extent_{};
     bool rebuild_{}, closing_{}, closed_{}, waiting_{};
@@ -60,6 +63,11 @@ class FrameLoop {
     }
     auto backpressure() const -> bool { return events_.len() >= usize(56); }
     auto suspended() const -> bool { return windowed_ && (!extent_.width || !extent_.height); }
+    auto interval_remaining(Serial now) const -> Serial {
+        if (!frame_interval_ns_ || last_submission_ns_.is_none()) return 0;
+        auto elapsed = now >= *last_submission_ns_ ? now - *last_submission_ns_ : 0;
+        return elapsed < frame_interval_ns_ ? frame_interval_ns_ - elapsed : 0;
+    }
     void notify(FrameEventType type, Option<gpu::Error> error = None(),
                 Option<gpu::PresentStatus> present = None()) {
         FrameEvent event{active_->request,    type,    Some(active_->frame),
@@ -93,7 +101,7 @@ class FrameLoop {
         waiting_ = true;
         return Ok(empty{});
     }
-    auto submit_active() -> Result<empty, gpu::Error> {
+    auto submit_active(auto &clock) -> Result<empty, gpu::Error> {
         auto submitted = renderer_.submit();
         if (submitted.is_err()) {
             auto error = submitted.unwrap_err();
@@ -105,6 +113,7 @@ class FrameLoop {
             return retry_or_fail(error);
         }
         active_->submission = submitted.unwrap();
+        last_submission_ns_ = Some(clock().now_ns);
         if (active_->inputs.is_some()) {
             auto sequence = active_->inputs->batch().successful_sequence;
             active_->earlier_unselected_input_batches = sequence - submitted_input_sequence_ - 1;
@@ -186,6 +195,15 @@ class FrameLoop {
         if (nanoseconds)
             frame_period_ns_ = nanoseconds;
     }
+    // Uses the same monotonic clock as pump and wait_milliseconds; zero removes the limit.
+    void set_frame_interval(Serial nanoseconds) { frame_interval_ns_ = nanoseconds; }
+    auto requested_present_mode() const -> gpu::PresentMode { return presentation_; }
+    auto set_present_mode(gpu::PresentMode mode) -> Result<empty, gpu::Error> {
+        if (!windowed_ || closing_ || closed_ || unsigned(mode) > unsigned(gpu::PresentMode::FifoRelaxed))
+            return Err(gpu::Error{gpu::Stage::State});
+        if (presentation_ != mode) { presentation_ = mode; rebuild_ = true; }
+        return Ok(empty{});
+    }
     auto wait_milliseconds(bool animating = false, FrameTiming timing = {},
                            Option<Serial> deadline = {}) const -> Index {
         auto animation_wait = [&]() -> Index {
@@ -195,18 +213,29 @@ class FrameLoop {
             auto duration = target.is_some()
                                 ? (*target > timing.now_ns ? *target - timing.now_ns : 0)
                                 : frame_period_ns_;
+            duration = rstd::cmp::max(duration, interval_remaining(timing.now_ns));
             duration = rstd::min(Serial(1'000'000'000), duration);
             return static_cast<Index>(rstd::min(Serial(1000), (duration + 999'999) / 1'000'000));
         };
         if (closed_ || (fault_.is_some() && !closing_) || backpressure())
             return animation_wait();
+        auto interval_wait = [&] {
+            auto left = rstd::min(Serial(1'000'000'000), interval_remaining(timing.now_ns));
+            return static_cast<Index>((left + 999'999) / 1'000'000);
+        };
         if (active_.is_some() || closing_ || (rebuild_ && !suspended()))
-            return active_.is_some() && !active_->submission && !waiting_ ? 0 : 1;
+            return active_.is_some() && !active_->submission && !waiting_ && !closing_ && !rebuild_
+                ? interval_wait() : 1;
         if (pending_.is_some() && !suspended())
-            return waiting_ ? 1 : 0;
+            return waiting_ ? 1 : interval_wait();
         return animation_wait();
     }
-    auto pump() -> Result<empty, gpu::Error> {
+    auto pump(FrameTiming timing = {}) -> Result<empty, gpu::Error> {
+        return pump_with_clock([timing] { return timing; });
+    }
+    // Live clocks are sampled again after submission so preparation time cannot shorten the limit.
+    auto pump_with_clock(auto clock) -> Result<empty, gpu::Error> {
+        auto timing = clock();
         if (closed_)
             return Ok(empty{});
         if (fault_.is_some() && !closing_)
@@ -250,15 +279,16 @@ class FrameLoop {
         if (suspended())
             return Ok(empty{});
         if (rebuild_) {
-            auto resized = renderer_.resize(extent_, 0);
+            auto resized = renderer_.resize(extent_, presentation_, 0);
             if (resized.is_err()) {
                 auto error = resized.unwrap_err();
                 return retry_or_fail(error);
             }
             rebuild_ = false;
         }
+        if (interval_remaining(timing.now_ns)) return Ok(empty{});
         if (active_.is_some())
-            return submit_active();
+            return submit_active(clock);
         if (pending_.is_none())
             return Ok(empty{});
         auto id = *pending_;
@@ -309,7 +339,7 @@ class FrameLoop {
         }
         active_ = Some(Active{id, identity, 0, rstd::move(inputs)});
         pending_ = None();
-        return submit_active();
+        return submit_active(clock);
     }
 };
 } // namespace vui::host
