@@ -23,7 +23,7 @@ class Popup {
         UiId root, content;
         PopupOptions options;
         Binding lifetime;
-        Binding key_capture, key_target, outside, global_outside_capture, global_outside_target;
+        Binding key_bubble, key_target, outside, global_outside_capture, global_outside_target;
         InputScopeRegistration scope;
         FocusBookmark bookmark;
         Signal<void(PopupCloseReason)> requested;
@@ -96,7 +96,7 @@ class Popup {
             return Ok(empty{});
         }
         void key(EventContext &context, const RoutedEvent &event) {
-            if (!opened || options.escape != EscapePolicy::RequestClose ||
+            if (!opened || context.default_prevented() || options.escape != EscapePolicy::RequestClose ||
                 event.input.key != Key::Escape || event.input.repeat)
                 return;
             context.prevent_default();
@@ -200,17 +200,17 @@ class Popup {
         ui.set_visible(root, false).unwrap();
         auto state = rstd::rc::make_rc<State>(session, root, content, options);
         auto weak = state.downgrade();
-        auto capture = session.input().bind_on(
+        auto bubble = session.input().bind_on(
             root, EventType::KeyDown, weak,
             [](State &s, auto &context, const auto &event) { s.key(context, event); },
-            RoutePhase::Capture);
+            RoutePhase::Bubble);
         auto target = session.input().bind_on(
             root, EventType::KeyDown, weak,
             [](State &s, auto &context, const auto &event) { s.key(context, event); });
         auto outside = session.input().bind_on(
             root, EventType::PointerDown, weak,
             [](State &s, auto &context, const auto &event) { s.press(context, event); });
-        if (capture.is_err() || target.is_err() || outside.is_err()) {
+        if (bubble.is_err() || target.is_err() || outside.is_err()) {
             ui.detach(content);
             if (previous.is_some())
                 ui.attach(previous->parent, content);
@@ -236,7 +236,7 @@ class Popup {
             state.get()->global_outside_capture = rstd::move(capture).unwrap();
             state.get()->global_outside_target = rstd::move(target).unwrap();
         }
-        state.get()->key_capture = rstd::move(capture).unwrap();
+        state.get()->key_bubble = rstd::move(bubble).unwrap();
         state.get()->key_target = rstd::move(target).unwrap();
         state.get()->outside = rstd::move(outside).unwrap();
         return Ok(Popup(rstd::move(state)));
