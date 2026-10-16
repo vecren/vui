@@ -30,6 +30,7 @@ struct PaintItem {
     DrawKind kind{DrawKind::Rectangle};
     Index clip{no_clip}, source_pass{}, resource_index{};
     ImageSampling sampling{ImageSampling::Linear};
+    ImageBlend blend{ImageBlend::SourceOver};
 };
 struct SampleBinding {
     DrawKind kind;
@@ -55,12 +56,13 @@ struct RecordContext {
     VkCommandBuffer command;
     const vvk::DeviceDispatch &dispatch;
     VkPipelineLayout layout;
-    VkPipeline rectangle, composite, glyph, image;
+    VkPipeline rectangle, composite, glyph, image, additive;
 };
 struct PreparedDraw {
     VkDescriptorSet descriptor{};
     DrawKind kind;
     Index first{}, count{1};
+    ImageBlend blend{ImageBlend::SourceOver};
 };
 struct FrameGpu {
     vk::DeviceSession session;
@@ -206,7 +208,7 @@ auto UiExecutor::prepare(const rg::PassExecutionInfo &pass, const vk::GraphBindi
     Index instance = frame.first;
     usize paint_index{};
     for (const auto &paint : frame.items) {
-        PreparedDraw item{{}, paint.kind, instance++, 1};
+        PreparedDraw item{{}, paint.kind, instance++, 1, paint.blend};
         VkImageView source_view{};
         auto source = frame.sources[paint_index++];
         if (item.kind != DrawKind::Rectangle) {
@@ -237,7 +239,8 @@ auto UiExecutor::prepare(const rg::PassExecutionInfo &pass, const vk::GraphBindi
             auto &previous = draws[draws.len() - usize(1)];
             if (!frame.options.batching)
                 ++frame.stats->disabled_breaks;
-            else if (pipeline_kind(previous.kind) != pipeline_kind(item.kind))
+            else if (pipeline_kind(previous.kind) != pipeline_kind(item.kind) ||
+                     previous.blend != item.blend)
                 ++frame.stats->pipeline_breaks;
             else if (previous_view != source_view)
                 ++frame.stats->texture_breaks;
@@ -296,7 +299,7 @@ auto UiExecutor::record(RecordContext &context) const -> Result<empty, vk::Graph
     for (const auto &draw : draws) {
         d.vkCmdBindPipeline(context.command, VK_PIPELINE_BIND_POINT_GRAPHICS,
                             draw.kind == DrawKind::Image || draw.kind == DrawKind::External
-                                ? context.image
+                                ? (draw.blend == ImageBlend::Additive ? context.additive : context.image)
                             : draw.kind == DrawKind::Glyph     ? context.glyph
                             : draw.kind == DrawKind::Composite ? context.composite
                                                                : context.rectangle);
@@ -461,6 +464,7 @@ auto resolve_items(OwnedFrame &frame, GlyphCache &cache, ImageCache &images, Ind
                 if (resolved.is_err())
                     return Err(resolved.unwrap_err());
                 item.kind = DrawKind::Image;
+                item.blend = value.blend;
                 item.resource_index = resolved.unwrap();
                 item.sampling = value.sampling;
                 item.data.image_edges = static_cast<unsigned>(value.edges);
@@ -724,7 +728,8 @@ auto UiDrawPass::Instantiate(const vk::GraphPrepareContext &inputs,
                          *(*pipelines)[usize()].pipeline->pipeline.handle,
                          *(*pipelines)[usize(1)].pipeline->pipeline.handle,
                          *(*pipelines)[usize(2)].pipeline->pipeline.handle,
-                         *(*pipelines)[usize(3)].pipeline->pipeline.handle};
+                         *(*pipelines)[usize(3)].pipeline->pipeline.handle,
+                         *(*pipelines)[usize(4)].pipeline->pipeline.handle};
     return Ok(rstd::sync::Arc<dyn<vk::VulkanPass>>::make(
         UiPrepared{context.frame.gpu.clone(), assets.clone(), pipelines.clone(),
                    rstd::move(executor), native}));
@@ -770,7 +775,7 @@ auto UiAssets::initialize(vk::PipelinePreparationMode mode) -> Result<empty, Err
     result = session.device().handle().CreateSampler(sample, glyph_sampler);
     if (result != VK_SUCCESS)
         return Err(Error{Stage::Pipeline, result});
-    auto add = [&](const auto &fragment) -> Result<empty, Error> {
+    auto add = [&](const auto &fragment, ImageBlend blend = ImageBlend::SourceOver) -> Result<empty, Error> {
         vk::GraphicsPipeline defaults;
         vk::PipelineResourceRequest description;
         description.pipeline_layout = layout->handle;
@@ -787,6 +792,11 @@ auto UiAssets::initialize(vk::PipelinePreparationMode mode) -> Result<empty, Err
             VK_BLEND_FACTOR_ONE;
         description.color_blend.dstColorBlendFactor = description.color_blend.dstAlphaBlendFactor =
             VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        if (blend == ImageBlend::Additive) {
+            description.color_blend.dstColorBlendFactor = description.color_blend.dstAlphaBlendFactor =
+                VK_BLEND_FACTOR_ONE;
+            description.color_blend.srcAlphaBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+        }
         description.color_blend.colorBlendOp = description.color_blend.alphaBlendOp =
             VK_BLEND_OP_ADD;
         description.color_blend.colorWriteMask = 15;
@@ -822,7 +832,7 @@ auto UiAssets::initialize(vk::PipelinePreparationMode mode) -> Result<empty, Err
     auto image = add(shaders::image);
     if (image.is_err())
         return image;
-    return Ok(empty{});
+    return add(shaders::image, ImageBlend::Additive);
 }
 } // namespace
 

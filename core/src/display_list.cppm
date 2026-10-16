@@ -14,7 +14,8 @@ class DrawOp {
               (Clip, (vui::Clip value;)), (Rect, (vui::Rect rect; Color color; Scalar radius;)),
               (Text, (TextLayout layout; Point origin; Color color; TextEffects effects{};)),
               (Image, (ImageData data; Rect destination; Rect source; ImageSampling sampling;
-                       Color tint; ImageEdges edges; bool clamp_source;)),
+                       Color tint; ImageEdges edges; bool clamp_source;
+                       ImageBlend blend{ImageBlend::SourceOver};)),
               (External, (ContentSource source; Rect destination; ImageFit fit;
                           ImageSampling sampling; Color placeholder;)),
               (Children))
@@ -184,10 +185,12 @@ class DisplayListRecorder {
     }
     void image(ImageData data, Rect destination, Rect source,
                ImageSampling sampling = ImageSampling::Linear, Color tint = {1, 1, 1, 1},
-               ImageEdges edges = ImageEdges::All, bool clamp_source = false) {
+               ImageEdges edges = ImageEdges::All, bool clamp_source = false,
+               ImageBlend blend = ImageBlend::SourceOver) {
         if (!active())
             return;
-        if (static_cast<unsigned>(edges) > 15 || !tint.valid() || !destination.valid() ||
+        if ((blend != ImageBlend::SourceOver && blend != ImageBlend::Additive) ||
+            static_cast<unsigned>(edges) > 15 || !tint.valid() || !destination.valid() ||
             !source.valid() || source.x < 0 || source.y < 0 ||
             source.x + source.width > data.width() || source.y + source.height > data.height() ||
             (sampling != ImageSampling::Nearest && sampling != ImageSampling::Linear)) {
@@ -196,12 +199,17 @@ class DisplayListRecorder {
         }
         include(destination);
         operations_.push(DrawOp::Image(rstd::move(data), destination, source, sampling, tint, edges,
-                                       clamp_source));
+                                       clamp_source, blend));
     }
     void nine_patch(const ImageRegion &region, const NinePatchSpec &spec, Rect destination,
-                    Color tint = {1, 1, 1, 1}, ImageSampling sampling = ImageSampling::Linear) {
+                    Color tint = {1, 1, 1, 1}, ImageSampling sampling = ImageSampling::Linear,
+                    ImageBlend blend = ImageBlend::SourceOver) {
         if (!active())
             return;
+        if (blend != ImageBlend::SourceOver && blend != ImageBlend::Additive) {
+            reject(RecordingError::InvalidValue);
+            return;
+        }
         auto pieces = compute_nine_patch(region, spec, destination);
         if (pieces.is_err()) {
             reject(RecordingError::InvalidValue);
@@ -209,7 +217,7 @@ class DisplayListRecorder {
         }
         for (const auto &piece : pieces.unwrap())
             image(ImageData(region.image), piece.destination, piece.source, sampling, tint,
-                  piece.edges, true);
+                  piece.edges, true, blend);
     }
     void external(ContentSource source, Rect destination, ImageFit fit = ImageFit::Contain,
                   ImageSampling sampling = ImageSampling::Linear,

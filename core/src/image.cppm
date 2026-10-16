@@ -8,6 +8,8 @@ inline constexpr Serial image_max_pixels = 16 * 1024 * 1024;
 enum class ImageError { InvalidValue, Limit };
 enum class ImageFit { Fill, Contain, Cover };
 enum class ImageSampling { Nearest, Linear };
+// Additive matches straight-alpha SrcAlpha/One for both color and alpha.
+enum class ImageBlend { SourceOver, Additive };
 class ImageData {
     struct Data {
         Serial id{new_session()};

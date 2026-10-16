@@ -31,7 +31,7 @@ class FrameDraw {
                       RenderId node; TextEffects effects{};)),
               (Image, (ImageData data; Rect destination; Rect source; ImageSampling sampling;
                        Color tint; ImageEdges edges; bool clamp_source; Transform transform;
-                       Index clip; RenderId node;)),
+                       Index clip; RenderId node; ImageBlend blend{ImageBlend::SourceOver};)),
               (External, (TextureFrame frame; Serial source_id; Rect destination; Rect source;
                           ImageSampling sampling; Transform transform; Index clip; RenderId node;)),
               (Composite, (Index source_pass; Scalar opacity; Index clip; RenderId node;)))
@@ -151,7 +151,8 @@ class FramePlanner {
                 const auto &value = op.as_Image();
                 output_.passes[usize(target)].draws.push(FrameDraw::Image(
                     ImageData(value.data), value.destination, value.source, value.sampling,
-                    value.tint, value.edges, value.clamp_source, state.transform, state.clip, id));
+                    value.tint, value.edges, value.clamp_source, state.transform, state.clip, id,
+                    value.blend));
             } else if (op.is_External()) {
                 const auto &value = op.as_External();
                 const auto &selected = select(value.source);
