@@ -1,5 +1,6 @@
 export module vui:layout.protocol;
 import :layout;
+import :text;
 using namespace rstd::prelude;
 
 export namespace vui {
@@ -31,6 +32,9 @@ class LayoutArrangeContext {
     virtual auto child_id(usize) const -> Result<UiId, UiError> = 0;
     virtual auto child_relation(usize) const -> Result<UiRelation, UiError> = 0;
     virtual auto desired_child(usize) -> Result<Size, UiError> = 0;
+    virtual auto child_text(usize) -> Result<TextPlacement, UiError> { return Err(UiError::InvalidValue); }
+    virtual auto set_text_input_area(Option<Rect>) -> Result<empty, UiError> { return Err(UiError::InvalidValue); }
+    virtual void request_paint() {}
     virtual auto arrange_child(usize, Rect) -> Result<empty, UiError> = 0;
     virtual auto place_child(usize, LayoutPlacement) -> Result<empty, UiError> {
         return Err(UiError::InvalidValue);

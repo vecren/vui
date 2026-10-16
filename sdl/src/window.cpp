@@ -98,10 +98,24 @@ struct Window::Impl {
         if (!valid(x) || !valid(y) || !valid(right) || !valid(bottom) ||
             right - x > 2147483647.0 || bottom - y > 2147483647.0) return NativeTextInputResult::Failed;
         SDL_Rect area{int(x), int(y), int(rstd::cmp::max(Scalar(1), right - x)), int(rstd::cmp::max(Scalar(1), bottom - y))};
-        bool continuing = text_owner == this && text_request.is_some() && text_request->session == request->session && SDL_IsTextInputActive();
-        if (!continuing && text_owner) text_owner->stop_text_input();
+        bool active = text_owner == this && SDL_IsTextInputActive();
+        bool continuing = active && text_request.is_some() && text_request->session == request->session;
+        if (!active && text_owner) text_owner->stop_text_input();
+        if (active && !continuing) SDL_ClearComposition();
+        if (!continuing) {
+            auto window_id = SDL_GetWindowID(window);
+            SDL_FilterEvents([](void *context, SDL_Event *event) -> int {
+                auto id = *static_cast<Uint32 *>(context);
+                if ((event->type == SDL_TEXTINPUT && event->text.windowID == id) ||
+                    (event->type == SDL_TEXTEDITING && event->edit.windowID == id)) return 0;
+                if (event->type == SDL_TEXTEDITING_EXT && event->editExt.windowID == id) {
+                    SDL_free(event->editExt.text); event->editExt.text = nullptr; return 0;
+                }
+                return 1;
+            }, &window_id);
+        }
         SDL_SetTextInputRect(&area);
-        if (!continuing) SDL_StartTextInput();
+        if (!active) SDL_StartTextInput();
         if (!SDL_IsTextInputActive()) return NativeTextInputResult::Failed;
         text_owner = this; text_request = request;
         return NativeTextInputResult::Succeeded;
@@ -527,6 +541,27 @@ auto Window::capture(PointerKind kind, bool enabled) -> NativeCaptureResult {
 }
 auto Window::set_text_input(Option<TextInputRequest> request) -> NativeTextInputResult { return impl_->set_text_input(request); }
 auto Window::text_input_request() const -> Option<TextInputRequest> { return impl_->text_request; }
+auto Window::read_clipboard() -> Result<String, ClipboardError> {
+    if (!impl_->window) return Err(ClipboardError::Unavailable);
+    struct Owner { char *value; ~Owner() { SDL_free(value); } } text{SDL_GetClipboardText()};
+    if (!text.value) return Err(ClipboardError::Failed);
+    auto length = SDL_strlen(text.value);
+    if (length > 1048576) return Err(ClipboardError::Limit);
+    auto decoded = rstd::str_::from_utf8(slice<u8>::from_raw_parts(reinterpret_cast<const rstd::byte *>(text.value), usize(length)));
+    if (decoded.is_err()) return Err(ClipboardError::InvalidText);
+    return Ok(String::make(decoded.unwrap()));
+}
+auto Window::write_clipboard(ref<str> text) -> Result<empty, ClipboardError> {
+    if (!impl_->window) return Err(ClipboardError::Unavailable);
+    if (text->len() > usize(1048576)) return Err(ClipboardError::Limit);
+    if (rstd::str_::from_utf8(text->as_bytes()).is_err()) return Err(ClipboardError::InvalidText);
+    auto chars = text->chars();
+    for (auto cp = chars.next(); cp.is_some(); cp = chars.next()) if (cp->to_primitive() == 0) return Err(ClipboardError::InvalidText);
+    auto terminated = String::make(text); terminated.push(U'\0');
+    if (SDL_SetClipboardText(reinterpret_cast<const char *>(terminated.as_str()->as_bytes().as_ptr().as_raw_ptr())) != 0)
+        return Err(ClipboardError::Failed);
+    return Ok(empty{});
+}
 void Window::set_input_tracing(bool enabled) { impl_->trace_input = enabled; }
 auto Window::timing() const -> FrameTiming {
     auto frequency = SDL_GetPerformanceFrequency();

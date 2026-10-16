@@ -72,6 +72,7 @@ enum class CancelReason {
 };
 enum class NativeCaptureResult { Succeeded, Failed, Unsupported };
 enum class NativeTextInputResult { Succeeded, Failed, Unsupported };
+enum class ClipboardError { Unavailable, Failed, Unsupported, InvalidText, Limit };
 enum class InputError { InvalidId, InvalidEvent, InvalidSequence, Unavailable, Reentrant, Limit };
 struct TextInputSelection {
     Index start{};

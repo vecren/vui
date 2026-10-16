@@ -43,6 +43,8 @@ class Window final : public gpu::SurfaceHost {
     auto capture(PointerKind kind, bool enabled) -> NativeCaptureResult;
     auto set_text_input(Option<TextInputRequest>) -> NativeTextInputResult;
     auto text_input_request() const -> Option<TextInputRequest>;
+    auto read_clipboard() -> Result<String, ClipboardError>;
+    auto write_clipboard(ref<str>) -> Result<empty, ClipboardError>;
     auto resize(Index width, Index height) -> Result<empty, gpu::Error>;
     auto set_mode(WindowMode) -> Result<empty, gpu::Error>;
     auto mode() const -> Option<WindowMode>;

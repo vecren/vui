@@ -41,10 +41,6 @@ struct UiMountState {
     bool mounted{};
     Serial generation{};
 };
-struct TextPlacement {
-    TextLayout layout;
-    Point origin;
-};
 struct UpdateStats {
     Serial measurements{}, recordings{}, text_layouts{}, arrangements{}, layout_passes{};
     Serial measure_cache_hits{}, arrange_cache_hits{};
@@ -347,6 +343,8 @@ class UiDocument {
         Transform layout_mapping;
         Option<Size> layout_local_size;
         Clip layout_clip;
+        bool layout_has_text_input_area{};
+        Option<Rect> layout_text_input_area;
         bool paint_dirty{true};
         DisplayList content;
         Serial mount_generation{1}, relation_generation{1};
@@ -982,6 +980,21 @@ class UiDocument {
             }
             return Ok(Size(document.resolve(node.children[index])->desired));
         }
+        auto child_text(usize index) -> Result<TextPlacement, UiError> override {
+            if (index >= child_count()) return Err(UiError::MissingChild);
+            const auto &child = *document.resolve(node.children[index]);
+            if (child.text.is_none()) return Err(UiError::InvalidValue);
+            const auto &text = **child.text;
+            if (text.dirty || text.layout.is_none()) return Err(UiError::LayoutPending);
+            return Ok(TextPlacement{*text.layout, text_origin(child)});
+        }
+        auto set_text_input_area(Option<Rect> area) -> Result<empty, UiError> override {
+            if (area.is_some() && !area->valid()) return Err(UiError::InvalidValue);
+            if (area.is_some()) { area->x += padding; area->y += padding; }
+            node.layout_has_text_input_area = true; node.layout_text_input_area = area;
+            return Ok(empty{});
+        }
+        void request_paint() override { node.paint_dirty = true; }
         auto arrange_child(usize index, Rect slot) -> Result<empty, UiError> override {
             if (error.is_some())
                 return Err(*error);
@@ -1240,8 +1253,11 @@ class UiDocument {
                          slot.y + aligned_offset(slot.height - height, style.vertical)};
         Size inner{limit(width - 2 * style.padding, width),
                    limit(height - 2 * style.padding, height)};
-        if (visit_children)
+        if (visit_children) {
             node.layout_clip = {};
+            node.layout_has_text_input_area = false;
+            node.layout_text_input_area = None();
+        }
         if (visit_children && node.layout_strategy.is_some()) {
             ArrangeContext context(*this, node, id, depth, style.padding);
             auto result = (*node.layout_strategy)->arrange(context, inner);
@@ -1423,7 +1439,7 @@ class UiDocument {
             {node.position.x, node.position.y, node.measured.width, node.measured.height},
             node.arranged_slot,
             node.style.hit_self,
-            node.style.text_input_area};
+            node.layout_has_text_input_area ? node.layout_text_input_area : node.style.text_input_area};
         for (auto child : node.children)
             visual.children.push(UiId(child));
         return Ok(rstd::move(visual));

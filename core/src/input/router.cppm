@@ -56,6 +56,9 @@ class EventContext {
     auto capture_pointer() -> Result<empty, InputError>;
     auto release_pointer() -> Result<empty, InputError>;
     auto focus() -> Result<empty, InputError>;
+    auto restart_text_input() -> Result<empty, InputError>;
+    auto read_clipboard() -> Result<String, ClipboardError>;
+    auto write_clipboard(ref<str>) -> Result<empty, ClipboardError>;
     template <class F> auto defer(F callback) -> Result<Serial, UiError> {
         return document().defer(rstd::move(callback));
     }
@@ -111,7 +114,7 @@ class EventRouter {
         SampleTime sample_time;
         NativeCaptureResult native_capture{NativeCaptureResult::Unsupported};
     };
-    enum class CommandType { Capture, Release, Focus };
+    enum class CommandType { Capture, Release, Focus, RestartText };
     struct Command {
         CommandType type;
         Index pointer{};
@@ -192,6 +195,8 @@ class EventRouter {
     Option<TextInputRequest> text_request_;
     Option<UiId> text_client_;
     NativeTextInputResult text_result_{NativeTextInputResult::Unsupported};
+    Option<Box<rstd::dyn<rstd::FnMut<Result<String, ClipboardError>()>>>> clipboard_read_;
+    Option<Box<rstd::dyn<rstd::FnMut<Result<empty, ClipboardError>(ref<str>)>>>> clipboard_write_;
     static void path(const InputSnapshot &update, UiId id, Vec<UiId> &result) {
         result.clear();
         auto cursor = Some(id);
@@ -548,6 +553,16 @@ class EventRouter {
             auto command = commands_[i];
             if (command.type == CommandType::Focus) {
                 change_focus(command.target);
+            } else if (command.type == CommandType::RestartText) {
+                if (command.target == text_client_) {
+                    text_request_->session = new_session();
+                    text_result_ = native_text_input_.is_some() ? (*native_text_input_)->operator()(text_request_)
+                                                              : NativeTextInputResult::Unsupported;
+                    auto controls = rstd::exchange(controls_, false);
+                    InputEvent event; event.type = EventType::TextInputCancelled; event.cancel_reason = CancelReason::Explicit;
+                    route(*update_, *text_client_, event, true);
+                    controls_ = controls;
+                }
             } else if (auto *state = pointer(command.pointer, command.device)) {
                 if (command.type == CommandType::Release) {
                     if (state->capture == command.target)
@@ -815,6 +830,32 @@ class EventRouter {
     auto text_input_request() const -> Option<TextInputRequest> { return text_request_; }
     auto text_input_client() const -> Option<UiId> { return text_client_; }
     auto text_input_result() const -> NativeTextInputResult { return text_result_; }
+    auto restart_text_input(UiId client) -> Result<empty, InputError> {
+        if (text_client_ != Some(client)) return Err(InputError::Unavailable);
+        return command({CommandType::RestartText, 0, Some(client)});
+    }
+    template <class Read, class Write>
+    auto set_clipboard(Read read, Write write) -> Result<empty, InputError> {
+        if (closed_) return Err(InputError::Unavailable);
+        if (busy_ || !document_.can_route()) return Err(InputError::Reentrant);
+        clipboard_read_ = Some(Box<rstd::dyn<rstd::FnMut<Result<String, ClipboardError>()>>>::make(rstd::move(read)));
+        clipboard_write_ = Some(Box<rstd::dyn<rstd::FnMut<Result<empty, ClipboardError>(ref<str>)>>>::make(rstd::move(write)));
+        return Ok(empty{});
+    }
+    auto clear_clipboard() -> Result<empty, InputError> {
+        if (busy_ || !document_.can_route()) return Err(InputError::Reentrant);
+        clipboard_read_ = None(); clipboard_write_ = None(); return Ok(empty{});
+    }
+    auto read_clipboard() -> Result<String, ClipboardError> {
+        if (closed_) return Err(ClipboardError::Unavailable);
+        if (clipboard_read_.is_none()) return Err(ClipboardError::Unsupported);
+        return (*clipboard_read_)->operator()();
+    }
+    auto write_clipboard(ref<str> text) -> Result<empty, ClipboardError> {
+        if (closed_) return Err(ClipboardError::Unavailable);
+        if (clipboard_write_.is_none()) return Err(ClipboardError::Unsupported);
+        return (*clipboard_write_)->operator()(text);
+    }
     auto native_capture(Index id, DeviceId device = 0) const -> NativeCaptureResult {
         for (const auto &pointer : pointers_)
             if (pointer.id == id && pointer.device == device)
@@ -1273,6 +1314,9 @@ class EventRouter {
     }
 };
 inline auto EventContext::document() -> UiDocument & { return router_.document_; }
+inline auto EventContext::restart_text_input() -> Result<empty, InputError> { return router_.restart_text_input(event_.current); }
+inline auto EventContext::read_clipboard() -> Result<String, ClipboardError> { return router_.read_clipboard(); }
+inline auto EventContext::write_clipboard(ref<str> text) -> Result<empty, ClipboardError> { return router_.write_clipboard(text); }
 inline auto EventContext::visual(UiId id) const -> const UiVisual * {
     return router_.update_->get(id);
 }

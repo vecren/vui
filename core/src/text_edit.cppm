@@ -27,6 +27,15 @@ struct TextEditState {
     auto selected_text() const -> ref<str> {
         auto range = selection.range(); return text.text()->get(usize(range.start), usize(range.end)).unwrap();
     }
+    auto committed_index(Index index, TextBoundaryBias bias = TextBoundaryBias::After) const -> Result<Index, TextError> {
+        if (!display.contains(index)) return Err(TextError::InvalidIndex);
+        if (composing) {
+            auto range = selection.range();
+            if (index >= composition.end) index = range.end + index - composition.end;
+            else if (index > composition.start) index = bias == TextBoundaryBias::Before ? range.start : range.end;
+        }
+        return text.snap(index, bias);
+    }
 };
 class TextEdit {
     struct Impl;

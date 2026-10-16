@@ -55,6 +55,8 @@ class Application {
             [this](PointerKind kind, bool enabled) { return window_.capture(kind, enabled); });
         session_.input().set_native_text_input(
             [this](Option<TextInputRequest> request) { return window_.set_text_input(request); }).unwrap();
+        session_.input().set_clipboard([this] { return window_.read_clipboard(); },
+            [this](ref<str> text) { return window_.write_clipboard(text); }).unwrap();
         opened_ = true;
         return Ok(empty{});
     }

@@ -15,4 +15,4 @@ vui-render = { workspace = true, pub = true }
 rstd-nostd = { workspace = true, usage = "link" }
 
 [external-dependencies.pkg-config]
-sdl2 = { module = "sdl2", version = ">= 2.0.18", pub = true }
+sdl2 = { module = "sdl2", version = ">= 2.0.22", pub = true }

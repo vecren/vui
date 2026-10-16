@@ -37,6 +37,7 @@ using vectext::TextCaret;
 using vectext::TextQueries;
 using vectext::TextLayoutData;
 using vectext::TextLayout;
+struct TextPlacement { TextLayout layout; Point origin; };
 using vectext::TextService;
 using FontFace = vectext::FontInstance;
 } // namespace vui
