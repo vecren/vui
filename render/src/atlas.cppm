@@ -15,7 +15,7 @@ struct AtlasPage {
 struct GlyphEntry {
     Serial font;
     Index glyph;
-    Scalar scale;
+    Scalar scale, outline;
     Index page{~Index{}}, x{}, y{}, width{}, height{};
     Point bearing;
 };
@@ -31,22 +31,62 @@ struct GlyphCache {
         stats.pages = stats.entries = 0;
         ++stats.clears;
     }
-    auto resolve(const FontFace &font, Index glyph, Scalar scale, Index max_extent)
+    auto resolve(const FontFace &font, Index glyph, Scalar scale, Index max_extent, Scalar outline = 0)
         -> Result<GlyphEntry, Error> {
         for (const auto &entry : entries)
-            if (entry.font == font.id() && entry.glyph == glyph && entry.scale == scale) {
+            if (entry.font == font.id() && entry.glyph == glyph && entry.scale == scale && entry.outline == outline) {
                 ++stats.hits;
                 return Ok(GlyphEntry(entry));
             }
         ++stats.misses;
         if (entries.len() >= usize(limits.max_entries))
             return Err(Error{Stage::TextCacheLimit});
-        ++stats.rasterizations;
-        auto raster = font.rasterize(glyph, scale);
-        if (raster.is_err())
-            return Err(Error{Stage::TextRaster, VK_SUCCESS, Some(raster.unwrap_err())});
-        auto bitmap = rstd::move(raster).unwrap();
-        GlyphEntry entry{font.id(), glyph, scale};
+        GlyphBitmap bitmap;
+        if (outline > 0) {
+            auto original = resolve(font, glyph, scale, max_extent);
+            if (original.is_err()) return Err(original.unwrap_err());
+            auto base = original.unwrap();
+            if (entries.len() >= usize(limits.max_entries)) return Err(Error{Stage::TextCacheLimit});
+            if (base.width && base.height) {
+                if (!finite(outline) || outline > 64) return Err(Error{Stage::TextCacheLimit});
+                auto radius = Index(std::ceil(outline));
+                if (max_extent < 2 * radius + 3 ||
+                    base.width > max_extent - 2 * radius - 2 ||
+                    base.height > max_extent - 2 * radius - 2)
+                    return Err(Error{Stage::TextCacheLimit});
+                bitmap.width = base.width + radius * 2;
+                bitmap.height = base.height + radius * 2;
+                bitmap.origin = {base.bearing.x - radius, base.bearing.y - radius};
+                bitmap.coverage.resize(usize(bitmap.width) * usize(bitmap.height), 0);
+                struct Neighbor { int x, y; Scalar weight; };
+                Vec<Neighbor> neighbors;
+                for (int y = -int(radius); y <= int(radius); ++y)
+                    for (int x = -int(radius); x <= int(radius); ++x) {
+                        auto weight = outline + 1 - std::hypot(Scalar(x), Scalar(y));
+                        if (weight > 0) neighbors.push({x, y, weight > 1 ? 1 : weight});
+                    }
+                const auto &page = pages[usize(base.page)];
+                const auto *source = page.pixels.data();
+                auto *target = bitmap.coverage.data();
+                for (Index y{}; y < base.height; ++y)
+                    for (Index x{}; x < base.width; ++x) {
+                        auto coverage = source[(base.y + y) * page.width + base.x + x];
+                        if (!coverage) continue;
+                        for (const auto &n : neighbors) {
+                            auto offset = (y + radius + n.y) * bitmap.width + x + radius + n.x;
+                            auto value = static_cast<unsigned char>(std::round(coverage * n.weight));
+                            if (value > target[offset]) target[offset] = value;
+                        }
+                    }
+            }
+        } else {
+            ++stats.rasterizations;
+            auto raster = font.rasterize(glyph, scale);
+            if (raster.is_err())
+                return Err(Error{Stage::TextRaster, VK_SUCCESS, Some(raster.unwrap_err())});
+            bitmap = rstd::move(raster).unwrap();
+        }
+        GlyphEntry entry{font.id(), glyph, scale, outline};
         entry.width = bitmap.width;
         entry.height = bitmap.height;
         entry.bearing = {bitmap.origin.x, bitmap.origin.y};

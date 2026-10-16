@@ -530,41 +530,44 @@ auto resolve_items(OwnedFrame &frame, GlyphCache &cache, ImageCache &images, Ind
                 }
             } else if (draw.is_Text()) {
                 const auto &value = draw.as_Text();
-                if (value.color.a == 0 || value.transform.inverse().is_none())
-                    continue;
+                if (!value.effects.valid()) return Err(Error{Stage::Unsupported});
+                if (value.transform.inverse().is_none()) continue;
                 auto scaled = glyph_scale(value.transform, raster_scale);
-                if (scaled.is_err())
-                    return Err(scaled.unwrap_err());
+                if (scaled.is_err()) return Err(scaled.unwrap_err());
                 Scalar scale = scaled.unwrap();
                 item.kind = DrawKind::Glyph;
                 item.data.params[3] = 2;
                 item.clip = value.clip;
                 transform_values(item.data, value.transform);
-                color(value.color);
-                for (const auto &glyph : value.layout.glyphs()) {
-                    if (!glyph.drawable)
-                        continue;
-                    auto resolved = cache.resolve(value.layout.fonts()[usize(glyph.font)],
-                                                  glyph.glyph, scale, max_extent);
-                    if (resolved.is_err())
-                        return Err(resolved.unwrap_err());
-                    auto entry = resolved.unwrap();
-                    if (!entry.width || !entry.height)
-                        continue;
-                    item.resource_index = entry.page;
-                    const auto &page = cache.pages[usize(entry.page)];
-                    rectangle_values(
-                        item.data.rect,
-                        {value.origin.x + glyph.position.x + (entry.bearing.x - 1) / scale,
-                         value.origin.y + glyph.position.y + (entry.bearing.y - 1) / scale,
-                         (entry.width + 2) / scale, (entry.height + 2) / scale});
-                    item.data.uv[0] = float(entry.x - 1) / page.width;
-                    item.data.uv[1] = float(entry.y - 1) / page.height;
-                    item.data.uv[2] = float(entry.width + 2) / page.width;
-                    item.data.uv[3] = float(entry.height + 2) / page.height;
-                    if (++total > 65536)
-                        return Err(Error{Stage::DrawLimit});
-                    items.push(PaintItem(item));
+                struct Pass { Color color; Point offset; Scalar outline; };
+                const auto &effect = value.effects;
+                Pass passes[]{{effect.shadow_color, effect.shadow_offset, effect.outline_width},
+                              {effect.outline_width > 0 ? effect.outline_color : Color{}, {}, effect.outline_width},
+                              {value.color, {}, 0}};
+                for (unsigned pass{}; pass < 3; ++pass) {
+                    const auto &paint = passes[pass];
+                    if (!paint.color.a || (pass == 1 && !effect.outline_width)) continue;
+                    color(paint.color);
+                    for (const auto &glyph : value.layout.glyphs()) {
+                        if (!glyph.drawable) continue;
+                        auto resolved = cache.resolve(value.layout.fonts()[usize(glyph.font)],
+                                                      glyph.glyph, scale, max_extent, paint.outline * scale);
+                        if (resolved.is_err()) return Err(resolved.unwrap_err());
+                        auto entry = resolved.unwrap();
+                        if (!entry.width || !entry.height) continue;
+                        item.resource_index = entry.page;
+                        const auto &page = cache.pages[usize(entry.page)];
+                        rectangle_values(item.data.rect,
+                            {value.origin.x + paint.offset.x + glyph.position.x + (entry.bearing.x - 1) / scale,
+                             value.origin.y + paint.offset.y + glyph.position.y + (entry.bearing.y - 1) / scale,
+                             (entry.width + 2) / scale, (entry.height + 2) / scale});
+                        item.data.uv[0] = float(entry.x - 1) / page.width;
+                        item.data.uv[1] = float(entry.y - 1) / page.height;
+                        item.data.uv[2] = float(entry.width + 2) / page.width;
+                        item.data.uv[3] = float(entry.height + 2) / page.height;
+                        if (++total > 65536) return Err(Error{Stage::DrawLimit});
+                        items.push(PaintItem(item));
+                    }
                 }
                 continue;
             } else

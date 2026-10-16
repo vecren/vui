@@ -285,6 +285,7 @@ class UiDocument {
         Scalar line_spacing{};
         bool bold{}, italic{}, dirty{true};
         Color color{0, 0, 0, 1};
+        TextEffects effects;
         Option<Scalar> width;
         Option<TextLayout> layout;
         Option<TextError> error;
@@ -1317,7 +1318,7 @@ class UiDocument {
                           style.radius);
         if (node.text.is_some() && (*node.text)->layout.is_some()) {
             auto &text = **node.text;
-            recorder.text(TextLayout(*text.layout), text_origin(node), text.color);
+            recorder.text(TextLayout(*text.layout), text_origin(node), text.color, text.effects);
         }
         if (node.image.is_some() && (*node.image)->data.is_some()) {
             auto &image = **node.image;
@@ -1393,18 +1394,6 @@ class UiDocument {
             content_bounds = {
                 left, top, rstd::cmp::max(layout_bounds.width, extent->x + extent->width) - left,
                 rstd::cmp::max(layout_bounds.height, extent->y + extent->height) - top};
-        }
-        if (node.text.is_some() && (*node.text)->layout.is_some()) {
-            auto ink = (*node.text)->layout->ink_bounds();
-            auto origin = text_origin(node);
-            auto left = ink.x + origin.x, top = ink.y + origin.y;
-            auto right = left + ink.width, bottom = top + ink.height;
-            content_bounds.x = left < 0 ? left : 0;
-            content_bounds.y = top < 0 ? top : 0;
-            content_bounds.width =
-                (right > layout_bounds.width ? right : layout_bounds.width) - content_bounds.x;
-            content_bounds.height =
-                (bottom > layout_bounds.height ? bottom : layout_bounds.height) - content_bounds.y;
         }
         auto style = effective_style(node);
         auto transform = node.layout_mapping == Transform{}
@@ -2380,6 +2369,18 @@ class UiDocument {
             text.line_spacing = format.line_spacing;
             text.dirty = true;
             changed(true, Some(id));
+        }
+        return Ok(empty{});
+    }
+    auto set_text_effects(UiId id, TextEffects effects) -> Result<empty, UiError> {
+        if (layout_active_ || painting_) return Err(UiError::Routing);
+        auto node = resolve(id);
+        if (!node) return Err(UiError::InvalidId);
+        if (node->text.is_none() || !effects.valid()) return Err(UiError::InvalidValue);
+        if ((*node->text)->effects != effects) {
+            (*node->text)->effects = effects;
+            node->paint_dirty = true;
+            changed(false);
         }
         return Ok(empty{});
     }

@@ -1,7 +1,20 @@
 export module vui:text;
 export import vectext;
+import :types;
 
 export namespace vui {
+struct TextEffects {
+    Scalar outline_width{};
+    Color outline_color{0, 0, 0, 1};
+    Point shadow_offset;
+    Color shadow_color{0, 0, 0, 0};
+    auto valid() const -> bool {
+        return finite(outline_width) && outline_width >= 0 && outline_width <= 16 &&
+               outline_color.valid() && shadow_color.valid() &&
+               finite(shadow_offset.x) && finite(shadow_offset.y);
+    }
+    auto operator==(const TextEffects &) const -> bool = default;
+};
 using vectext::TextError;
 using vectext::TextDirection;
 using vectext::TextWrap;

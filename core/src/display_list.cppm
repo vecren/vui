@@ -12,7 +12,7 @@ export namespace vui {
 class DrawOp {
     RSTD_ENUM(DrawOp, (Save), (Restore), (Transform, (vui::Transform value;)),
               (Clip, (vui::Clip value;)), (Rect, (vui::Rect rect; Color color; Scalar radius;)),
-              (Text, (TextLayout layout; Point origin; Color color;)),
+              (Text, (TextLayout layout; Point origin; Color color; TextEffects effects{};)),
               (Image, (ImageData data; Rect destination; Rect source; ImageSampling sampling;
                        Color tint; ImageEdges edges; bool clamp_source;)),
               (External, (ContentSource source; Rect destination; ImageFit fit;
@@ -165,16 +165,22 @@ class DisplayListRecorder {
         include(value);
         operations_.push(DrawOp::Rect(value, color, radius));
     }
-    void text(TextLayout layout, Point origin, Color color) {
+    void text(TextLayout layout, Point origin, Color color, TextEffects effects = {}) {
         if (!active())
             return;
-        if (!finite(origin.x) || !finite(origin.y) || !color.valid()) {
+        if (!finite(origin.x) || !finite(origin.y) || !color.valid() || !effects.valid()) {
             reject(RecordingError::InvalidValue);
             return;
         }
         auto ink = layout.ink_bounds();
-        include({ink.x + origin.x, ink.y + origin.y, ink.width, ink.height});
-        operations_.push(DrawOp::Text(rstd::move(layout), origin, color));
+        auto border = effects.outline_width > 0 ? effects.outline_width + 1 : 0;
+        Rect bounds{ink.x + origin.x - border, ink.y + origin.y - border,
+                    ink.width + border * 2, ink.height + border * 2};
+        include(bounds);
+        if (effects.shadow_color.a > 0)
+            include({bounds.x + effects.shadow_offset.x, bounds.y + effects.shadow_offset.y,
+                     bounds.width, bounds.height});
+        operations_.push(DrawOp::Text(rstd::move(layout), origin, color, effects));
     }
     void image(ImageData data, Rect destination, Rect source,
                ImageSampling sampling = ImageSampling::Linear, Color tint = {1, 1, 1, 1},

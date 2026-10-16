@@ -152,6 +152,8 @@ struct Window::Impl {
                 bool(value & KMOD_GUI)};
     }
     static auto key(SDL_Keycode value) -> Key {
+        if (value >= SDLK_a && value <= SDLK_z)
+            return Key(unsigned(Key::A) + unsigned(value - SDLK_a));
         switch (value) {
         case SDLK_TAB:
             return Key::Tab;

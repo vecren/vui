@@ -38,7 +38,8 @@ enum class Key {
     Home,
     End,
     PageUp,
-    PageDown
+    PageDown,
+    A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T, U, V, W, X, Y, Z
 };
 enum class ScrollUnit { Pixels, Lines };
 struct Modifiers {
