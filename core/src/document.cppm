@@ -2738,6 +2738,10 @@ class UiDocument {
             view.requested = offset;
             if (!layout_dirty_ && mounted(id))
                 clamp_viewport(view);
+            else {
+                dirty_arrange(id);
+                layout_dirty_ = true;
+            }
             changed(false, Some(id));
         }
         return Ok(empty{});
