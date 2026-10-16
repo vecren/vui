@@ -30,6 +30,7 @@ struct UiVisual {
     Rect layout_rect;
     Option<Rect> layout_slot;
     bool hit_self{true};
+    Option<Rect> text_input_area;
 };
 enum class RevealStatus { Contained, Partial, Hidden, NonInvertible };
 struct BringIntoViewResult {
@@ -1418,7 +1419,8 @@ class UiDocument {
             layout_bounds,
             {node.position.x, node.position.y, node.measured.width, node.measured.height},
             node.arranged_slot,
-            node.style.hit_self};
+            node.style.hit_self,
+            node.style.text_input_area};
         for (auto child : node.children)
             visual.children.push(UiId(child));
         return Ok(rstd::move(visual));
@@ -2685,6 +2687,17 @@ class UiDocument {
             return Err(UiError::InvalidId);
         if (node->style.hit_self != value) {
             node->style.hit_self = value;
+            changed(false, Some(id));
+        }
+        return Ok(empty{});
+    }
+    auto set_text_input_area(UiId id, Option<Rect> area) -> Result<empty, UiError> {
+        if (layout_active_ || painting_) return Err(UiError::Routing);
+        auto node = resolve(id);
+        if (!node) return Err(UiError::InvalidId);
+        if (area.is_some() && !area->valid()) return Err(UiError::InvalidValue);
+        if (node->style.text_input_area != area) {
+            node->style.text_input_area = area;
             changed(false, Some(id));
         }
         return Ok(empty{});

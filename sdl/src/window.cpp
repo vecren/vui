@@ -76,6 +76,36 @@ struct WakeState {
 };
 struct Window::Impl {
     SDL_Window *window{};
+    inline static Impl *text_owner{};
+    Option<TextInputRequest> text_request;
+    void stop_text_input() {
+        text_request = None();
+        if (text_owner == this) { SDL_StopTextInput(); text_owner = nullptr; }
+    }
+    auto set_text_input(Option<TextInputRequest> request) -> NativeTextInputResult {
+        if (request.is_none()) { stop_text_input(); return NativeTextInputResult::Succeeded; }
+        if (!window || !request->valid()) return NativeTextInputResult::Failed;
+        if (auto focused = SDL_GetKeyboardFocus(); focused && focused != window) return NativeTextInputResult::Failed;
+        int width{}, height{}; SDL_GetWindowSize(window, &width, &height);
+        if (width <= 0 || height <= 0 || metrics.logical_size.width <= 0 || metrics.logical_size.height <= 0)
+            return NativeTextInputResult::Failed;
+        auto rect = request->area;
+        auto x = __builtin_floor(rect.x * width / metrics.logical_size.width);
+        auto y = __builtin_floor(rect.y * height / metrics.logical_size.height);
+        auto right = __builtin_ceil((rect.x + rect.width) * width / metrics.logical_size.width);
+        auto bottom = __builtin_ceil((rect.y + rect.height) * height / metrics.logical_size.height);
+        auto valid = [](Scalar value) { return finite(value) && value >= -2147483648.0 && value <= 2147483647.0; };
+        if (!valid(x) || !valid(y) || !valid(right) || !valid(bottom) ||
+            right - x > 2147483647.0 || bottom - y > 2147483647.0) return NativeTextInputResult::Failed;
+        SDL_Rect area{int(x), int(y), int(rstd::cmp::max(Scalar(1), right - x)), int(rstd::cmp::max(Scalar(1), bottom - y))};
+        bool continuing = text_owner == this && text_request.is_some() && text_request->session == request->session && SDL_IsTextInputActive();
+        if (!continuing && text_owner) text_owner->stop_text_input();
+        SDL_SetTextInputRect(&area);
+        if (!continuing) SDL_StartTextInput();
+        if (!SDL_IsTextInputActive()) return NativeTextInputResult::Failed;
+        text_owner = this; text_request = request;
+        return NativeTextInputResult::Succeeded;
+    }
     bool minimized{}, trace_input{};
     InputTraceSource input_trace;
     Serial sample_clock{new_session()};
@@ -180,6 +210,10 @@ struct Window::Impl {
             return Key::PageUp;
         case SDLK_PAGEDOWN:
             return Key::PageDown;
+        case SDLK_BACKSPACE:
+            return Key::Backspace;
+        case SDLK_DELETE:
+            return Key::Delete;
         default:
             return Key::Unknown;
         }
@@ -189,6 +223,35 @@ struct Window::Impl {
         if (trace_input)
             input.stamp = input_trace.stamp();
         output.input.push(rstd::move(input));
+    }
+    void text_event(Events &output, InputEvent input, const char *value, size_t size, int cursor = -1, int length = -1) {
+        if (text_owner != this || text_request.is_none()) return;
+        auto decoded = rstd::str_::from_utf8(slice<u8>::from_raw_parts(reinterpret_cast<const rstd::byte *>(value), usize(size)));
+        if (decoded.is_err() || size > ~Index{} || cursor < -1 || length < -1) { ++output.dropped_input; return; }
+        auto text = decoded.unwrap();
+        auto offset = [&](Serial character) -> Option<Index> {
+            Serial count{};
+            for (usize i{}; i <= text->len(); ++i)
+                if (text->is_char_boundary(i) && count++ == character) return Some(Index(i.to_primitive()));
+            return None();
+        };
+        Option<TextInputSelection> selection;
+        if (cursor >= 0) {
+            auto start = offset(Serial(cursor));
+            auto end = length >= 0 ? offset(Serial(cursor) + Serial(length)) : None<Index>();
+            if (start.is_none() || (length >= 0 && end.is_none())) { ++output.dropped_input; return; }
+            selection = Some(TextInputSelection{*start, end});
+        }
+        auto payload = TextInput::create(text, selection);
+        if (payload.is_err()) { ++output.dropped_input; return; }
+        input.text = rstd::move(payload).unwrap(); input.text_session = text_request->session;
+        input.modifiers = modifiers(SDL_GetModState()); emit_input(output, rstd::move(input));
+    }
+    void consume(SDL_Event &value, Events &output) {
+        event(value, output);
+#if SDL_VERSION_ATLEAST(2, 0, 22)
+        if (value.type == SDL_TEXTEDITING_EXT) { SDL_free(value.editExt.text); value.editExt.text = nullptr; }
+#endif
     }
     void event(const SDL_Event &value, Events &output) {
         auto window_id = SDL_GetWindowID(window);
@@ -215,6 +278,7 @@ struct Window::Impl {
                 output.redraw = true;
                 SDL_CaptureMouse(SDL_FALSE);
                 touch_contacts.clear();
+                stop_text_input();
                 input.type = EventType::WindowFocusLost;
                 emit_input(output, rstd::move(input));
                 break;
@@ -232,6 +296,7 @@ struct Window::Impl {
             case SDL_WINDOWEVENT_FOCUS_LOST:
                 SDL_CaptureMouse(SDL_FALSE);
                 touch_contacts.clear();
+                stop_text_input();
                 input.type = EventType::WindowFocusLost;
                 emit_input(output, rstd::move(input));
                 break;
@@ -328,6 +393,26 @@ struct Window::Impl {
                 });
             break;
         }
+        case SDL_TEXTINPUT:
+        case SDL_TEXTEDITING: {
+            bool editing = value.type == SDL_TEXTEDITING;
+            if ((editing ? value.edit.windowID : value.text.windowID) != window_id) return;
+            const char *text = editing ? value.edit.text : value.text.text;
+            auto limit = editing ? sizeof(value.edit.text) : sizeof(value.text.text);
+            size_t length{}; while (length < limit && text[length]) ++length;
+            if (length == limit) { ++output.dropped_input; return; }
+            input.type = editing ? EventType::TextEditing : EventType::TextInput;
+            text_event(output, rstd::move(input), text, length, editing ? value.edit.start : -1, editing ? value.edit.length : -1);
+            return;
+        }
+#if SDL_VERSION_ATLEAST(2, 0, 22)
+        case SDL_TEXTEDITING_EXT:
+            if (value.editExt.windowID != window_id) return;
+            if (!value.editExt.text) { ++output.dropped_input; return; }
+            input.type = EventType::TextEditing;
+            text_event(output, rstd::move(input), value.editExt.text, SDL_strlen(value.editExt.text), value.editExt.start, value.editExt.length);
+            return;
+#endif
         case SDL_KEYDOWN:
         case SDL_KEYUP:
             if (value.key.windowID != window_id)
@@ -347,6 +432,7 @@ struct Window::Impl {
 };
 Window::Window() : impl_(Box<Impl>::make()) {}
 Window::~Window() {
+    impl_->stop_text_input();
     if (impl_->wake.is_some())
         (*impl_->wake)->close();
 }
@@ -364,6 +450,13 @@ auto Window::open(const char *title, Index width, Index height) -> Result<empty,
         return Err(gpu::Error{gpu::Stage::Surface});
     }
     impl_->native = Some(rstd::sync::Arc<NativeWindow>::make(impl_->window));
+    if (!Impl::text_owner) SDL_StopTextInput();
+#ifdef SDL_HINT_IME_SHOW_UI
+    SDL_SetHint(SDL_HINT_IME_SHOW_UI, "1");
+#endif
+#if SDL_VERSION_ATLEAST(2, 0, 22)
+    SDL_SetHint(SDL_HINT_IME_SUPPORT_EXTENDED_TEXT, "1");
+#endif
     auto type = SDL_RegisterEvents(1);
     if (type == Uint32(-1)) {
         impl_->native = None();
@@ -414,10 +507,10 @@ auto Window::wait(Index milliseconds) -> Events {
     SDL_Event event;
     if (milliseconds && !output.redraw &&
         SDL_WaitEventTimeout(&event, milliseconds > 1000 ? 1000 : static_cast<int>(milliseconds)))
-        impl_->event(event, output);
+        impl_->consume(event, output);
     unsigned count{};
     while (count++ < 4096 && output.input.len() < usize(2048) && SDL_PollEvent(&event))
-        impl_->event(event, output);
+        impl_->consume(event, output);
     output.redraw = impl_->update_metrics() || output.redraw;
     output.redraw = (*impl_->wake)->take() || output.redraw;
     output.surface = impl_->metrics;
@@ -432,6 +525,8 @@ auto Window::capture(PointerKind kind, bool enabled) -> NativeCaptureResult {
     return SDL_CaptureMouse(enabled ? SDL_TRUE : SDL_FALSE) == 0 ? NativeCaptureResult::Succeeded
                                                                  : NativeCaptureResult::Failed;
 }
+auto Window::set_text_input(Option<TextInputRequest> request) -> NativeTextInputResult { return impl_->set_text_input(request); }
+auto Window::text_input_request() const -> Option<TextInputRequest> { return impl_->text_request; }
 void Window::set_input_tracing(bool enabled) { impl_->trace_input = enabled; }
 auto Window::timing() const -> FrameTiming {
     auto frequency = SDL_GetPerformanceFrequency();

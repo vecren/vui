@@ -36,10 +36,13 @@ class Window final : public gpu::SurfaceHost {
     auto wait(Index milliseconds) -> Events;
     auto frame_waker() const -> Option<FrameWaker>;
     auto wake_stats() const -> WakeStats;
+    // Borrows the event; its caller retains SDL_TEXTEDITING_EXT allocation ownership.
     auto handle_event(const SDL_Event &event) -> Events;
     auto timing() const -> FrameTiming;
     void set_input_tracing(bool enabled);
     auto capture(PointerKind kind, bool enabled) -> NativeCaptureResult;
+    auto set_text_input(Option<TextInputRequest>) -> NativeTextInputResult;
+    auto text_input_request() const -> Option<TextInputRequest>;
     auto resize(Index width, Index height) -> Result<empty, gpu::Error>;
     auto set_mode(WindowMode) -> Result<empty, gpu::Error>;
     auto mode() const -> Option<WindowMode>;

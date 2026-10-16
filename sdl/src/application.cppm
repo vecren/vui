@@ -53,6 +53,8 @@ class Application {
         }
         session_.input().set_native_capture(
             [this](PointerKind kind, bool enabled) { return window_.capture(kind, enabled); });
+        session_.input().set_native_text_input(
+            [this](Option<TextInputRequest> request) { return window_.set_text_input(request); }).unwrap();
         opened_ = true;
         return Ok(empty{});
     }

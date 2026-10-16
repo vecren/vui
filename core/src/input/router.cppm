@@ -188,6 +188,10 @@ class EventRouter {
     InputWork work_;
     Option<Box<rstd::dyn<rstd::FnMut<void(EventRouter &, const InputEvent &)>>>> navigation_;
     Option<Box<rstd::dyn<rstd::FnMut<NativeCaptureResult(PointerKind, bool)>>>> native_capture_;
+    Option<Box<rstd::dyn<rstd::FnMut<NativeTextInputResult(Option<TextInputRequest>)>>>> native_text_input_;
+    Option<TextInputRequest> text_request_;
+    Option<UiId> text_client_;
+    NativeTextInputResult text_result_{NativeTextInputResult::Unsupported};
     static void path(const InputSnapshot &update, UiId id, Vec<UiId> &result) {
         result.clear();
         auto cursor = Some(id);
@@ -257,6 +261,7 @@ class EventRouter {
                 if (target == event.current)
                     return;
         bool cleanup = type == EventType::PointerCancel || type == EventType::CaptureLost ||
+                       type == EventType::TextInputCancelled ||
                        type == EventType::FocusLost || type == EventType::FocusGained ||
                        type == EventType::PointerUp || type == EventType::KeyUp ||
                        type == EventType::PointerEnter || type == EventType::PointerLeave;
@@ -287,8 +292,10 @@ class EventRouter {
         EventContext context(*this, event, stopped, prevented, remaining);
         bool cleanup = input.type == EventType::PointerCancel ||
                        input.type == EventType::CaptureLost || input.type == EventType::FocusLost ||
-                       input.type == EventType::PointerLeave;
+                       input.type == EventType::PointerLeave || input.type == EventType::TextInputCancelled;
         bool pointer_input = input.type != EventType::KeyDown && input.type != EventType::KeyUp &&
+                             input.type != EventType::TextInput && input.type != EventType::TextEditing &&
+                             input.type != EventType::TextInputCancelled &&
                              input.type != EventType::FocusGained &&
                              input.type != EventType::FocusLost;
         bool allowed = cleanup || scopes_.allows(update, event.current, pointer_input);
@@ -420,18 +427,57 @@ class EventRouter {
         pointer.relinquished = false;
         pointer.sequence_target = None();
     }
-    void change_focus(Option<UiId> target) {
+    void change_focus(Option<UiId> target, CancelReason text_reason = CancelReason::FocusLost) {
         if (focus_ == target)
             return;
         if (focus_revision_ == ~Serial{})
             rstd::panic("vui focus revision exhausted");
         ++focus_revision_;
+        cancel_text_input(text_reason);
         auto old = focus_;
         focus_ = target;
         if (old.is_some())
             route(*update_, *old, {EventType::FocusLost}, true);
         if (target.is_some())
             route(*update_, *target, {EventType::FocusGained}, true);
+    }
+    void cancel_text_input(CancelReason reason) {
+        if (text_client_.is_none()) return;
+        auto client = *text_client_;
+        text_client_ = None(); text_request_ = None();
+        text_result_ = native_text_input_.is_some() ? (*native_text_input_)->operator()(None<TextInputRequest>())
+                                                  : NativeTextInputResult::Unsupported;
+        auto controls = rstd::exchange(controls_, false);
+        InputEvent event; event.type = EventType::TextInputCancelled; event.cancel_reason = reason;
+        route(*update_, client, event, true);
+        controls_ = controls;
+    }
+    void refresh_text_input(bool force = false) {
+        Option<UiId> client;
+        Option<Rect> area;
+        const auto *node = update_.is_some() && focus_.is_some() ? update_->get(*focus_) : nullptr;
+        if (window_focused_ && node && node->text_input_area.is_some() && eligible(*update_, *focus_, false)) {
+            auto matrix = update_->local_to_surface(*focus_);
+            if (matrix.is_ok() && matrix.unwrap().inverse().is_some()) {
+                auto rect = *node->text_input_area;
+                Point points[]{matrix.unwrap().map({rect.x, rect.y}), matrix.unwrap().map({rect.x + rect.width, rect.y}),
+                    matrix.unwrap().map({rect.x, rect.y + rect.height}), matrix.unwrap().map({rect.x + rect.width, rect.y + rect.height})};
+                Scalar left = points[0].x, top = points[0].y, right = left, bottom = top;
+                for (auto point : points) {
+                    left = rstd::cmp::min(left, point.x); top = rstd::cmp::min(top, point.y);
+                    right = rstd::cmp::max(right, point.x); bottom = rstd::cmp::max(bottom, point.y);
+                }
+                Rect mapped{left, top, right - left, bottom - top};
+                if (mapped.valid()) { client = focus_; area = Some(mapped); }
+            }
+        }
+        if (client != text_client_) cancel_text_input(CancelReason::Explicit);
+        if (client.is_none()) return;
+        TextInputRequest request{text_request_.is_some() ? text_request_->session : new_session(), *area};
+        if (!force && text_request_ == Some(request)) return;
+        text_client_ = client; text_request_ = Some(request);
+        text_result_ = native_text_input_.is_some() ? (*native_text_input_)->operator()(text_request_)
+                                                  : NativeTextInputResult::Unsupported;
     }
     void apply_transfer(const OwnershipChange &change) {
         auto state = pointer(change.pointer.pointer, change.pointer.device);
@@ -534,6 +580,7 @@ class EventRouter {
     }
     auto end() -> Result<empty, InputError> {
         drain();
+        refresh_text_input();
         scope_ = None();
         busy_ = false;
         if (prune_requested_) {
@@ -606,6 +653,10 @@ class EventRouter {
 
   public:
     explicit EventRouter(UiDocument &document) : document_(document) {}
+    ~EventRouter() {
+        if (native_text_input_.is_some() && text_request_.is_some())
+            (*native_text_input_)->operator()(None<TextInputRequest>());
+    }
     void begin_input_batch() {
         if (!busy_)
             prune_requested_ = true;
@@ -746,6 +797,24 @@ class EventRouter {
             Some(Box<rstd::dyn<rstd::FnMut<NativeCaptureResult(PointerKind, bool)>>>::make(
                 rstd::move(callback)));
     }
+    // Keep the host alive until this router is closed, destroyed, or explicitly unbound.
+    template <class F> auto set_native_text_input(F callback) -> Result<empty, InputError> {
+        if (closed_) return Err(InputError::Unavailable);
+        if (busy_ || !document_.can_route()) return Err(InputError::Reentrant);
+        if (native_text_input_.is_some()) (*native_text_input_)->operator()(None<TextInputRequest>());
+        native_text_input_ = Some(Box<rstd::dyn<rstd::FnMut<NativeTextInputResult(Option<TextInputRequest>)>>>::make(rstd::move(callback)));
+        text_result_ = (*native_text_input_)->operator()(text_request_);
+        return Ok(empty{});
+    }
+    auto clear_native_text_input() -> Result<empty, InputError> {
+        if (busy_ || !document_.can_route()) return Err(InputError::Reentrant);
+        if (native_text_input_.is_some()) (*native_text_input_)->operator()(None<TextInputRequest>());
+        native_text_input_ = None(); text_result_ = NativeTextInputResult::Unsupported;
+        return Ok(empty{});
+    }
+    auto text_input_request() const -> Option<TextInputRequest> { return text_request_; }
+    auto text_input_client() const -> Option<UiId> { return text_client_; }
+    auto text_input_result() const -> NativeTextInputResult { return text_result_; }
     auto native_capture(Index id, DeviceId device = 0) const -> NativeCaptureResult {
         for (const auto &pointer : pointers_)
             if (pointer.id == id && pointer.device == device)
@@ -963,11 +1032,15 @@ class EventRouter {
             input.type == EventType::PointerMove || input.type == EventType::PointerDown ||
             input.type == EventType::PointerUp || input.type == EventType::PointerCancel;
         bool key_event = input.type == EventType::KeyDown || input.type == EventType::KeyUp;
+        bool text_event = input.type == EventType::TextInput || input.type == EventType::TextEditing;
         bool wheel_event = input.type == EventType::Wheel;
         bool device_event = input.type == EventType::DeviceLost;
         bool window_event =
             input.type == EventType::WindowFocusLost || input.type == EventType::WindowFocusGained;
-        if ((!pointer_event && !key_event && !window_event && !wheel_event && !device_event) ||
+        if ((!pointer_event && !key_event && !text_event && !window_event && !wheel_event && !device_event) ||
+            (text_event && (!input.text.present() ||
+                (input.type == EventType::TextInput && input.text.selection().is_some()))) ||
+            (!text_event && (input.text.present() || input.text_session != 0)) ||
             ((pointer_event || wheel_event) &&
              (!finite(input.position.x) || !finite(input.position.y))) ||
             (wheel_event &&
@@ -1025,6 +1098,7 @@ class EventRouter {
             controls_ = true;
         } else if (input.type == EventType::WindowFocusGained) {
             window_focused_ = true;
+            refresh_text_input(true);
         } else if (device_event) {
             controls_ = false;
             for (auto &value : pointers_)
@@ -1038,6 +1112,10 @@ class EventRouter {
             auto hit = hit_at(*update_, input.position);
             if (hit.is_some())
                 route(*update_, *hit, input);
+        } else if (text_event) {
+            if (text_client_.is_some() && text_request_.is_some() &&
+                (input.text_session == 0 || input.text_session == text_request_->session))
+                route(*update_, *text_client_, input);
         } else if (key_event) {
             auto target = focus_.is_some() ? focus_ : scopes_.focus_root();
             bool prevented = target.is_some() && route(*update_, *target, input);
@@ -1172,7 +1250,7 @@ class EventRouter {
                 hover(pointer, None());
             }
             pointers_.clear();
-            change_focus(None());
+            change_focus(None(), CancelReason::Closed);
             auto result = end();
             if (result.is_err())
                 return result;
