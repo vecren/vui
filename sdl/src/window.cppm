@@ -16,6 +16,12 @@ struct WakeStats {
     bool pending{}, closed{};
 };
 enum class WindowMode { Windowed, Fullscreen };
+struct DisplayInfo {
+    Index index{};
+    // Screen coordinates, in the same units as Window.resize.
+    Rect bounds, usable_bounds;
+    Option<Index> refresh_rate;
+};
 class Window final : public gpu::SurfaceHost {
     struct Impl;
     Box<Impl> impl_;
@@ -38,6 +44,7 @@ class Window final : public gpu::SurfaceHost {
     auto set_mode(WindowMode) -> Result<empty, gpu::Error>;
     auto mode() const -> Option<WindowMode>;
     auto refresh_rate() const -> Option<Index>;
+    auto display_info() const -> Result<DisplayInfo, gpu::Error>;
     void minimize();
     void restore();
     auto id() const -> Index;

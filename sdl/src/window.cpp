@@ -460,13 +460,27 @@ auto Window::mode() const -> Option<WindowMode> {
     return Some((SDL_GetWindowFlags(impl_->window) & SDL_WINDOW_FULLSCREEN)
                     ? WindowMode::Fullscreen : WindowMode::Windowed);
 }
-auto Window::refresh_rate() const -> Option<Index> {
-    if (!impl_->window) return None();
-    auto display = SDL_GetWindowDisplayIndex(impl_->window);
+namespace {
+auto display_refresh_rate(int display) -> Option<Index> {
     SDL_DisplayMode mode;
     if (display < 0 || SDL_GetCurrentDisplayMode(display, &mode) != 0 || mode.refresh_rate <= 0)
         return None();
     return Some(Index(mode.refresh_rate));
+}
+} // namespace
+auto Window::refresh_rate() const -> Option<Index> {
+    return impl_->window ? display_refresh_rate(SDL_GetWindowDisplayIndex(impl_->window)) : None<Index>();
+}
+auto Window::display_info() const -> Result<DisplayInfo, gpu::Error> {
+    if (!impl_->window) return Err(gpu::Error{gpu::Stage::State});
+    auto index = SDL_GetWindowDisplayIndex(impl_->window);
+    SDL_Rect bounds{}, usable{};
+    if (index < 0 || SDL_GetDisplayBounds(index, &bounds) != 0 ||
+        SDL_GetDisplayUsableBounds(index, &usable) != 0 ||
+        bounds.w <= 0 || bounds.h <= 0 || usable.w <= 0 || usable.h <= 0)
+        return Err(gpu::Error{gpu::Stage::Surface});
+    return Ok(DisplayInfo{Index(index), {Scalar(bounds.x), Scalar(bounds.y), Scalar(bounds.w), Scalar(bounds.h)},
+                          {Scalar(usable.x), Scalar(usable.y), Scalar(usable.w), Scalar(usable.h)}, display_refresh_rate(index)});
 }
 void Window::minimize() {
     if (impl_->window)
