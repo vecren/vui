@@ -41,9 +41,10 @@ auto make_upload(rstd::sync::Arc<SampledImage> image, slice<unsigned char> pixel
     upload.target = image->view;
     upload.width = image->extent.width;
     upload.height = image->extent.height;
-    upload.bytes.reserve(pixels.len());
-    for (auto byte : pixels)
-        upload.bytes.push(u8(byte));
+    Vec<u8> bytes;
+    bytes.resize(pixels.len(), u8(0));
+    std::memcpy(bytes.as_mut_slice().as_raw_ptr(), pixels.as_raw_ptr(), pixels.len().to_primitive());
+    upload.bytes = rstd::move(bytes);
     return Ok(rstd::move(upload));
 }
 
