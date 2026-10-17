@@ -103,6 +103,10 @@ class ScrollState {
 };
 class ScrollView {
   public:
+    static auto on_metrics_changed(UiDocument &ui, UiId id, auto callback) -> Result<Binding, UiError> {
+        auto state = ui.state<ScrollState>(id);
+        return state ? ui.on_viewport_changed(state->viewport(), rstd::move(callback)) : Result<Binding, UiError>(Err(UiError::InvalidId));
+    }
     // Programmatic offsets and layout clamping do not emit this input notification.
     static auto on_user_scrolled(UiDocument &ui, UiId id, auto callback) -> Result<Binding, UiError> {
         auto state = ui.state<ScrollState>(id);

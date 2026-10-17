@@ -20,6 +20,7 @@ struct ScrollAxes {
 struct ViewportMetrics {
     Size viewport, extent;
     Point offset, maximum;
+    auto operator==(const ViewportMetrics &) const -> bool = default;
 };
 struct Image {
     static constexpr LayoutKind layout = LayoutKind::Image;

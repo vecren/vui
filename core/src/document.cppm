@@ -5,6 +5,7 @@ import :animation;
 import :layout;
 import :diagnostics;
 import :binding;
+import :signal;
 import :layout.protocol;
 import :paint.protocol;
 import :motion.properties;
@@ -245,10 +246,17 @@ class InputSnapshot {
 };
 
 class UiDocument {
+    struct ViewportObserver {
+        Signal<void(ViewportMetrics)> changed;
+        Vec<BindingGuard> subscribers;
+        Option<ViewportMetrics> published;
+        Serial mount{};
+    };
     struct ViewportLayout {
         ScrollAxes axes;
         Point requested;
         ViewportMetrics metrics;
+        Option<rstd::rc::Rc<ViewportObserver>> observer;
     };
     struct State {
         virtual ~State() = default;
@@ -389,6 +397,8 @@ class UiDocument {
     BindingRegistry bindings_;
     Binding lease_owner_{bindings_.make()};
     Vec<rstd::rc::Weak<UiTargetState>> value_targets_;
+    Vec<UiId> observed_viewports_;
+    bool pending_viewports_{};
     Serial next_lease_{1};
     Vec<PaintDiagnostic> paint_diagnostics_;
     UpdateTimings *active_timings_{};
@@ -1472,6 +1482,7 @@ class UiDocument {
     }
     void erase(UiId id) {
         auto &slot = slots_[usize(id.slot)];
+        if (slot.node->viewport.is_some() && (*slot.node->viewport)->observer.is_some()) (*(*slot.node->viewport)->observer).get()->changed.close();
         if (slot.node->layout_binding.is_some())
             slot.node->layout_binding->disconnect();
         if (slot.node->paint_binding.is_some())
@@ -2797,6 +2808,42 @@ class UiDocument {
         if (layout_dirty_ || !mounted(id))
             return Err(UiError::LayoutPending);
         return Ok(ViewportMetrics((*node->viewport)->metrics));
+    }
+    // Observers receive a completed layout snapshot; structural changes must be deferred.
+    auto on_viewport_changed(UiId id, auto callback) -> Result<Binding, UiError> {
+        auto node = resolve(id); if (!node) return Err(UiError::InvalidId);
+        if (node->viewport.is_none()) return Err(UiError::InvalidValue);
+        auto &view = **node->viewport;
+        if (view.observer.is_none()) {
+            view.observer = Some(rstd::rc::make_rc<ViewportObserver>()); observed_viewports_.push(UiId(id));
+        }
+        auto observer = *view.observer;
+        auto connected = observer.get()->changed.connect(bindings_, rstd::move(callback));
+        if (connected.is_err()) return Err(UiError::Limit);
+        auto binding = rstd::move(connected).unwrap(); observer.get()->subscribers.push(binding.guard());
+        observer.get()->published = None(); pending_viewports_ = true; bindings_.wake();
+        return Ok(rstd::move(binding));
+    }
+    auto pending_viewport_callbacks() const -> bool { return pending_viewports_; }
+    template <class Snapshot> auto dispatch_viewport_callbacks(const Snapshot &snapshot) -> Result<empty, UiError> {
+        auto scope = acquire_route(); if (scope.is_err()) return Err(scope.unwrap_err());
+        if (snapshot.document() != session_) return Err(UiError::InvalidValue);
+        pending_viewports_ = false;
+        auto observed = Vec<UiId>::from(observed_viewports_.as_slice());
+        for (auto id : observed) {
+            auto node = resolve(id); if (!node || node->viewport.is_none() || (*node->viewport)->observer.is_none()) continue;
+            auto observer = *(*node->viewport)->observer;
+            observer.get()->subscribers.retain([](const auto &guard) { return guard.alive(); });
+            if (observer->subscribers.is_empty()) { observer.get()->changed.close(); (*node->viewport)->observer = None(); continue; }
+            auto visual = snapshot.get(id);
+            if (!visual || visual->viewport.is_none()) { observer.get()->published = None(); continue; }
+            auto metrics = *visual->viewport;
+            if (observer->published == Some(metrics) && observer->mount == visual->mount_generation) continue;
+            observer.get()->published = Some(metrics); observer.get()->mount = visual->mount_generation;
+            auto emitted = observer.get()->changed.emit(metrics); if (emitted.is_err()) return Err(UiError::Routing);
+        }
+        observed_viewports_.retain([this](UiId id) { auto node = resolve(id); return node && node->viewport.is_some() && (*node->viewport)->observer.is_some(); });
+        return Ok(empty{});
     }
     auto viewport_content(UiId id) -> Result<Option<UiId>, UiError> {
         auto node = resolve(id);
