@@ -35,6 +35,7 @@ using vectext::TextRun;
 using vectext::TextLine;
 using vectext::TextHit;
 using vectext::TextCaret;
+using vectext::TextRangeBox;
 using vectext::TextQueries;
 using vectext::TextLayoutData;
 using vectext::TextLayout;
@@ -91,6 +92,87 @@ class TextColors {
         return fallback;
     }
     auto operator==(const TextColors &other) const -> bool {
+        if (data_.is_none() || other.data_.is_none()) return data_.is_none() && other.data_.is_none();
+        return rstd::sync::Arc<Data>::ptr_eq(*data_, *other.data_) ||
+               ((*data_)->text == (*other.data_)->text && spans() == other.spans());
+    }
+};
+struct TextDecorationSpan {
+    TextRange range;
+    Color background{0, 0, 0, 0}, underline{0, 0, 0, 0};
+    Scalar thickness{1}, offset{1};
+    auto valid() const -> bool {
+        return background.valid() && underline.valid() && finite(thickness) && thickness > 0 && finite(offset);
+    }
+    auto operator==(const TextDecorationSpan &) const -> bool = default;
+};
+struct TextDecorationRect {
+    Rect bounds;
+    Color color;
+    bool foreground{};
+};
+class TextDecorations {
+    struct Data {
+        String text;
+        Vec<TextDecorationSpan> spans;
+        Data(ref<str> text, Vec<TextDecorationSpan> spans) : text(String::make(text)), spans(rstd::move(spans)) {}
+    };
+    Option<rstd::sync::Arc<Data>> data_;
+    TextDecorations(ref<str> text, Vec<TextDecorationSpan> spans)
+        : data_(Some(rstd::sync::Arc<Data>::make(text, rstd::move(spans)))) {}
+  public:
+    TextDecorations() = default;
+    TextDecorations(const TextDecorations &other) : data_(other.data_.is_some() ? Some(other.data_->clone()) : None<rstd::sync::Arc<Data>>()) {}
+    auto operator=(const TextDecorations &other) -> TextDecorations & {
+        if (this != &other) data_ = other.data_.is_some() ? Some(other.data_->clone()) : None<rstd::sync::Arc<Data>>();
+        return *this;
+    }
+    TextDecorations(TextDecorations &&) = default;
+    auto operator=(TextDecorations &&) -> TextDecorations & = default;
+    static auto create(ref<str> text, slice<TextDecorationSpan> spans) -> Result<TextDecorations, TextError> {
+        if (text->len() > usize(~Index{})) return Err(TextError::InvalidValue);
+        Vec<TextDecorationSpan> checked;
+        Index end{};
+        for (auto span : spans) {
+            if (span.range.start < end || span.range.start >= span.range.end || usize(span.range.end) > text->len() ||
+                !text->is_char_boundary(usize(span.range.start)) || !text->is_char_boundary(usize(span.range.end)) || !span.valid())
+                return Err(TextError::InvalidValue);
+            end = span.range.end;
+            if (!checked.is_empty()) {
+                auto previous = checked[checked.len() - usize(1)]; previous.range = span.range;
+                if (previous == span && checked[checked.len() - usize(1)].range.end == span.range.start) {
+                    checked[checked.len() - usize(1)].range.end = span.range.end;
+                    continue;
+                }
+            }
+            checked.push(rstd::move(span));
+        }
+        if (checked.is_empty()) return Ok(TextDecorations{});
+        return Ok(TextDecorations(text, rstd::move(checked)));
+    }
+    auto spans() const -> slice<TextDecorationSpan> { return data_.is_some() ? (*data_)->spans.as_slice() : slice<TextDecorationSpan>{}; }
+    auto matches(ref<str> text) const -> bool { return data_.is_none() || (*data_)->text.as_str() == text; }
+    auto rects(const TextLayout &layout, Point origin = {}) const -> Result<Vec<TextDecorationRect>, TextError> {
+        if (!matches(layout.text()) || !finite(origin.x) || !finite(origin.y)) return Err(TextError::InvalidValue);
+        Vec<TextDecorationRect> result;
+        for (const auto &span : spans()) {
+            if (span.background.a == 0 && span.underline.a == 0) continue;
+            auto boxes = layout.range_boxes(span.range);
+            if (boxes.is_err()) return Err(boxes.unwrap_err());
+            for (const auto &box : boxes.unwrap()) {
+                Rect bounds{box.bounds.x + origin.x, box.bounds.y + origin.y, box.bounds.width, box.bounds.height};
+                if (!bounds.valid()) return Err(TextError::InvalidValue);
+                if (span.background.a > 0) result.push({bounds, span.background, false});
+                if (span.underline.a > 0) {
+                    bounds.y = box.baseline + origin.y + span.offset; bounds.height = span.thickness;
+                    if (!bounds.valid()) return Err(TextError::InvalidValue);
+                    result.push({bounds, span.underline, true});
+                }
+            }
+        }
+        return Ok(rstd::move(result));
+    }
+    auto operator==(const TextDecorations &other) const -> bool {
         if (data_.is_none() || other.data_.is_none()) return data_.is_none() && other.data_.is_none();
         return rstd::sync::Arc<Data>::ptr_eq(*data_, *other.data_) ||
                ((*data_)->text == (*other.data_)->text && spans() == other.spans());

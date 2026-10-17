@@ -166,13 +166,17 @@ class DisplayListRecorder {
         include(value);
         operations_.push(DrawOp::Rect(value, color, radius));
     }
-    void text(TextLayout layout, Point origin, Color color, TextEffects effects = {}, TextColors colors = {}) {
+    void text(TextLayout layout, Point origin, Color color, TextEffects effects = {}, TextColors colors = {}, TextDecorations decorations = {}) {
         if (!active())
             return;
         if (!finite(origin.x) || !finite(origin.y) || !color.valid() || !effects.valid() || !colors.matches(layout.text())) {
             reject(RecordingError::InvalidValue);
             return;
         }
+        auto decoration_rects = decorations.rects(layout, origin);
+        if (decoration_rects.is_err()) { reject(RecordingError::InvalidValue); return; }
+        auto geometry = rstd::move(decoration_rects).unwrap();
+        for (const auto &decoration : geometry) if (!decoration.foreground) rect(decoration.bounds, decoration.color);
         auto ink = layout.ink_bounds();
         auto border = effects.outline_width > 0 ? effects.outline_width + 1 : 0;
         Rect bounds{ink.x + origin.x - border, ink.y + origin.y - border,
@@ -182,6 +186,7 @@ class DisplayListRecorder {
             include({bounds.x + effects.shadow_offset.x, bounds.y + effects.shadow_offset.y,
                      bounds.width, bounds.height});
         operations_.push(DrawOp::Text(rstd::move(layout), origin, color, effects, rstd::move(colors)));
+        for (const auto &decoration : geometry) if (decoration.foreground) rect(decoration.bounds, decoration.color);
     }
     void image(ImageData data, Rect destination, Rect source,
                ImageSampling sampling = ImageSampling::Linear, Color tint = {1, 1, 1, 1},

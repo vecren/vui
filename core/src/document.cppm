@@ -291,6 +291,7 @@ class UiDocument {
         bool bold{}, italic{}, dirty{true};
         Color color{0, 0, 0, 1};
         TextColors colors;
+        TextDecorations decorations;
         TextEffects effects;
         Option<Scalar> width;
         Option<TextLayout> layout;
@@ -446,7 +447,7 @@ class UiDocument {
         auto &text = **node.text;
         if (text.value.as_str() == value.as_str() && (!boundaries.present() || boundaries == text.boundaries))
             return false;
-        if (text.value.as_str() != value.as_str()) text.colors = {};
+        if (text.value.as_str() != value.as_str()) { text.colors = {}; text.decorations = {}; }
         text.value = rstd::move(value);
         text.boundaries = rstd::move(boundaries);
         text.dirty = true;
@@ -1350,7 +1351,7 @@ class UiDocument {
                           style.radius);
         if (node.text.is_some() && (*node.text)->layout.is_some()) {
             auto &text = **node.text;
-            recorder.text(TextLayout(*text.layout), text_origin(node), text.color, text.effects, TextColors(text.colors));
+            recorder.text(TextLayout(*text.layout), text_origin(node), text.color, text.effects, TextColors(text.colors), TextDecorations(text.decorations));
         }
         if (node.image.is_some() && (*node.image)->data.is_some()) {
             auto &image = **node.image;
@@ -2463,6 +2464,27 @@ class UiDocument {
         auto colors = TextColors::create((*node->text)->value.as_str(), spans);
         if (colors.is_err()) return Err(UiError::InvalidValue);
         return set_text_colors(id, rstd::move(colors).unwrap());
+    }
+    auto set_text_decorations(UiId id, TextDecorations decorations) -> Result<empty, UiError> {
+        if (layout_active_ || painting_) return Err(UiError::Routing);
+        auto node = resolve(id);
+        if (!node) return Err(UiError::InvalidId);
+        if (node->text.is_none() || !decorations.matches((*node->text)->value.as_str())) return Err(UiError::InvalidValue);
+        if ((*node->text)->decorations != decorations) {
+            (*node->text)->decorations = rstd::move(decorations);
+            node->paint_dirty = true;
+            changed(false);
+        }
+        return Ok(empty{});
+    }
+    auto set_text_decorations(UiId id, slice<TextDecorationSpan> spans) -> Result<empty, UiError> {
+        if (layout_active_ || painting_) return Err(UiError::Routing);
+        auto node = resolve(id);
+        if (!node) return Err(UiError::InvalidId);
+        if (node->text.is_none()) return Err(UiError::InvalidValue);
+        auto decorations = TextDecorations::create((*node->text)->value.as_str(), spans);
+        if (decorations.is_err()) return Err(UiError::InvalidValue);
+        return set_text_decorations(id, rstd::move(decorations).unwrap());
     }
     auto text_layout(UiId id) -> Result<TextLayout, UiError> {
         auto node = resolve(id);
