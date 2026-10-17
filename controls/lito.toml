@@ -7,7 +7,7 @@ license.workspace = true
 name = "vui-controls"
 module = "vui.controls"
 archive = "vui-controls"
-sources = ["src/lib.cppm", "src/types.cppm", "src/button.cppm", "src/scroll_types.cppm", "src/scroll_motion.cppm", "src/scroll_view.cppm", "src/virtual_list.cppm", "src/popup.cppm", "src/text_field.cppm"]
+sources = ["src/lib.cppm", "src/types.cppm", "src/button.cppm", "src/scroll_types.cppm", "src/scroll_motion.cppm", "src/scroll_view.cppm", "src/scrollbar.cppm", "src/virtual_list.cppm", "src/popup.cppm", "src/text_field.cppm"]
 
 [dependencies]
 vui = { workspace = true, pub = true }
