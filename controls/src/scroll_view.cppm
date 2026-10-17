@@ -8,9 +8,13 @@ struct ScrollStyle {
     Scalar line_step{40};
     auto valid() const -> bool { return finite(line_step) && line_step > 0; }
 };
+struct UserScroll {
+    Point offset, maximum;
+};
 class ScrollState {
     UiId viewport_;
     Scalar line_step_;
+    Signal<void(UserScroll)> user_scrolled_;
     static auto shift(Scalar value, Scalar amount, Scalar step, Scalar maximum) -> Scalar {
         if (amount > 0)
             return amount >= (maximum - value) / step ? maximum : value + amount * step;
@@ -25,6 +29,10 @@ class ScrollState {
   public:
     ScrollState(UiId viewport, Scalar step) : viewport_(viewport), line_step_(step) {}
     auto viewport() const -> UiId { return viewport_; }
+    auto on_user_scrolled(UiDocument &ui, auto callback) -> Result<Binding, UiError> {
+        auto connected = user_scrolled_.connect(ui.bindings(), rstd::move(callback));
+        return connected.is_ok() ? Result<Binding, UiError>(Ok(rstd::move(connected).unwrap())) : Result<Binding, UiError>(Err(UiError::Limit));
+    }
     auto set_style(UiDocument &ui, ScrollStyle style) -> Result<empty, UiError> {
         if (!style.valid())
             return Err(UiError::InvalidValue);
@@ -56,6 +64,7 @@ class ScrollState {
                                     consumed(next.y - metrics.offset.y, step, remaining.y)});
             if (context.scroll_remaining() == Point{})
                 context.prevent_default();
+            user_scrolled_.emit({next, metrics.maximum}).unwrap();
         } else if (event.input.type == EventType::KeyDown && event.target == event.current) {
             switch (event.input.key) {
             case Key::Left:
@@ -85,13 +94,20 @@ class ScrollState {
             default:
                 return;
             }
-            if (context.document().set_viewport_offset(viewport_, next).is_ok())
+            if (context.document().set_viewport_offset(viewport_, next).is_ok()) {
                 context.prevent_default();
+                if (next != metrics.offset) user_scrolled_.emit({next, metrics.maximum}).unwrap();
+            }
         }
     }
 };
 class ScrollView {
   public:
+    // Programmatic offsets and layout clamping do not emit this input notification.
+    static auto on_user_scrolled(UiDocument &ui, UiId id, auto callback) -> Result<Binding, UiError> {
+        auto state = ui.state<ScrollState>(id);
+        return state ? state->on_user_scrolled(ui, rstd::move(callback)) : Result<Binding, UiError>(Err(UiError::InvalidId));
+    }
     static auto create(UiSession &session, UiId content, NodeStyle style, ScrollStyle scroll = {})
         -> Result<UiId, ControlError> {
         auto &ui = session.document();
