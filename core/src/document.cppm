@@ -293,6 +293,7 @@ class UiDocument {
         TextColors colors;
         TextDecorations decorations;
         TextInlineImages inline_images;
+        TextFontSpans font_spans;
         TextEffects effects;
         Option<Scalar> width;
         Option<TextLayout> layout;
@@ -448,7 +449,7 @@ class UiDocument {
         auto &text = **node.text;
         if (text.value.as_str() == value.as_str() && (!boundaries.present() || boundaries == text.boundaries))
             return false;
-        if (text.value.as_str() != value.as_str()) { text.colors = {}; text.decorations = {}; text.inline_images = {}; }
+        if (text.value.as_str() != value.as_str()) { text.colors = {}; text.decorations = {}; text.inline_images = {}; text.font_spans = {}; }
         text.value = rstd::move(value);
         text.boundaries = rstd::move(boundaries);
         text.dirty = true;
@@ -1125,13 +1126,14 @@ class UiDocument {
                 else if (text.layout.is_some() && text.layout->text() == text.value.as_str())
                     request.boundaries = &text.layout->boundaries();
                 request.inline_objects = text.inline_images.objects();
+                request.font_spans = text.font_spans;
                 auto result = (*text_service_)->layout(request);
                 if (result.is_err()) {
                     text.error = Some(result.unwrap_err());
                     return Some(UiError::TextLayoutFailed);
                 }
                 text.layout = Some(rstd::move(result).unwrap());
-                if (text.layout->inline_objects() != text.inline_images.objects()) {
+                if (text.layout->inline_objects() != text.inline_images.objects() || text.layout->font_spans() != text.font_spans) {
                     text.error = Some(TextError::Unsupported);
                     return Some(UiError::TextLayoutFailed);
                 }
@@ -2422,6 +2424,22 @@ class UiDocument {
             changed(true, Some(id));
         }
         return Ok(empty{});
+    }
+    auto set_text_font_spans(UiId id, TextFontSpans spans) -> Result<empty,UiError> {
+        if (layout_active_ || painting_) return Err(UiError::Routing);
+        auto node=resolve(id); if (!node) return Err(UiError::InvalidId);
+        if (node->text.is_none() || !spans.matches((*node->text)->value.as_str())) return Err(UiError::InvalidValue);
+        auto &text=**node->text;
+        if (text.font_spans != spans) { text.font_spans=rstd::move(spans); text.dirty=true; changed(true,Some(id)); }
+        return Ok(empty{});
+    }
+    auto set_text_font_spans(UiId id, slice<TextFontSpan> spans) -> Result<empty,UiError> {
+        if (layout_active_ || painting_) return Err(UiError::Routing);
+        auto node=resolve(id); if (!node) return Err(UiError::InvalidId);
+        if (node->text.is_none()) return Err(UiError::InvalidValue);
+        auto value=TextFontSpans::create((*node->text)->value.as_str(),spans);
+        if (value.is_err()) return Err(UiError::InvalidValue);
+        return set_text_font_spans(id,rstd::move(value).unwrap());
     }
     auto set_text_effects(UiId id, TextEffects effects) -> Result<empty, UiError> {
         if (layout_active_ || painting_) return Err(UiError::Routing);
