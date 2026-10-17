@@ -1082,21 +1082,6 @@ auto Renderer::initialize(SurfaceHost &host, bool validation, bool readback)
     return impl_->observe_result(initialize_impl(&host, validation, readback));
 }
 namespace {
-auto session_error(vk::DeviceSessionError error) -> Error {
-    switch (error.stage) {
-    case vk::DeviceSessionStage::Invalid:
-        return {Stage::State, error.result};
-    case vk::DeviceSessionStage::Instance:
-        return {Stage::Instance, error.result};
-    case vk::DeviceSessionStage::Surface:
-        return {Stage::Surface, error.result};
-    case vk::DeviceSessionStage::Device:
-        return {Stage::Device, error.result};
-    case vk::DeviceSessionStage::Lost:
-        return {Stage::Lost, error.result};
-    }
-    return {Stage::State, error.result};
-}
 struct SurfaceAdapter {
     SurfaceHost &host;
     Option<Error> error;
@@ -1146,7 +1131,7 @@ auto Renderer::initialize_impl(SurfaceHost *host, bool validation, bool readback
     if (created.is_err()) {
         if (adapter.is_some() && adapter->error.is_some())
             return Err(*adapter->error);
-        return Err(session_error(created.unwrap_err()));
+        return Err(Error::session(created.unwrap_err()));
     }
     self.session = Some(created.unwrap());
     return finish_initialize();
@@ -2118,7 +2103,7 @@ auto Renderer::resize_impl(VkExtent2D extent, Serial timeout_nanoseconds, Option
         return Ok(empty{});
     auto resized = self.session->resize_surface(extent, self.swapchain_options());
     if (resized.is_err())
-        return Err(session_error(resized.unwrap_err()));
+        return Err(Error::session(resized.unwrap_err()));
     auto features = self.device()
                         .gpu()
                         .GetFormatProperties(self.device().swapchain().format())

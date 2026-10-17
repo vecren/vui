@@ -37,19 +37,31 @@ struct Error {
     Option<TextError> text{};
     Option<vrento::texture::Error> content{};
     Option<vrento::vulkan::GraphExecutionError> graph_error{};
+    vrento::vulkan::BackendErrorSnapshot backend;
     Error(Stage value, VkResult native = VK_SUCCESS, Option<TextError> text_error = {},
           Option<vrento::texture::Error> texture_error = {})
         : stage(value), result(native), text(rstd::move(text_error)),
           content(rstd::move(texture_error)) {}
     Error(const Error &other)
         : stage(other.stage), result(other.result), text(other.text.clone()),
-          content(other.content.clone()), graph_error(other.graph_error.clone()) {}
+          content(other.content.clone()), graph_error(other.graph_error.clone()), backend(other.backend) {}
     Error(Error &&) = default;
     auto operator=(Error &&) -> Error & = default;
     auto operator=(const Error &other) -> Error & {
         if (this != &other)
             *this = Error(other);
         return *this;
+    }
+    static auto session(vrento::vulkan::DeviceSessionError cause) -> Error {
+        Stage stage{Stage::State};
+        switch (cause.stage) {
+        case vrento::vulkan::DeviceSessionStage::Invalid: stage = Stage::State; break;
+        case vrento::vulkan::DeviceSessionStage::Instance: stage = Stage::Instance; break;
+        case vrento::vulkan::DeviceSessionStage::Surface: stage = Stage::Surface; break;
+        case vrento::vulkan::DeviceSessionStage::Device: stage = Stage::Device; break;
+        case vrento::vulkan::DeviceSessionStage::Lost: stage = Stage::Lost; break;
+        }
+        Error result{stage, cause.result}; result.backend = rstd::move(cause.cause); return result;
     }
     static auto graph(vrento::vulkan::GraphExecutionError cause) -> Error {
         Error result{Stage::Graph, cause.native_result()};
