@@ -77,14 +77,16 @@ struct ArbitrationPolicy {
     template <class T> using Funcs = rstd::TraitFuncs<&T::resolve>;
 };
 struct PriorityArbitration {
-    auto resolve(InputContext &, slice<ClaimRequest> requests)
+    auto resolve(InputContext &context, slice<ClaimRequest> requests)
         -> Result<ClaimResolution, InputError> {
         ClaimResolution result;
         if (requests.is_empty())
             return Ok(rstd::move(result));
         usize chosen{};
         for (usize i{1}; i < requests.len(); ++i)
-            if (requests[i].priority > requests[chosen].priority)
+            if (requests[i].priority > requests[chosen].priority ||
+                (requests[i].priority==requests[chosen].priority && requests[i].target!=requests[chosen].target &&
+                 input_descendant(context.snapshot(),requests[chosen].target,requests[i].target)))
                 chosen = i;
         const auto &winner = requests[chosen];
         result.winners.push(ParticipantId(winner.participant));

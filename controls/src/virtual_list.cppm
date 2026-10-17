@@ -16,6 +16,7 @@ struct VirtualListOptions {
     Scalar line_step{40};
     ScrollWheelMode wheel_mode{ScrollWheelMode::Direct};
     Point wheel_direction{1,1};
+    ScrollMotionOptions motion;
     auto valid() const -> bool {
         return finite(item_extent) && item_extent > 0 && finite(spacing) && spacing >= 0 && finite(item_extent + spacing) &&
             finite(padding.left) && padding.left >= 0 && finite(padding.top) && padding.top >= 0 &&
@@ -23,7 +24,7 @@ struct VirtualListOptions {
             finite(padding.left + padding.right) && finite(padding.top + padding.bottom) &&
             (item_cross_extent.is_none() || (finite(*item_cross_extent) && *item_cross_extent >= 0 &&
                 finite(*item_cross_extent + padding.left + padding.right) && finite(*item_cross_extent + padding.top + padding.bottom))) &&
-            max_materialized && overscan <= max_materialized && ScrollStyle{{horizontal,!horizontal},line_step,wheel_mode,wheel_direction}.valid();
+            max_materialized && overscan <= max_materialized && ScrollStyle{{horizontal,!horizontal},line_step,wheel_mode,wheel_direction,motion}.valid();
     }
 };
 struct VirtualItemFactory {
@@ -208,7 +209,7 @@ class VirtualList {
         auto made = ui.create<Stack>(content_style); if (made.is_err()) return Err(ControlError{Some(made.unwrap_err()), {}});
         auto content = made.unwrap();
         auto state = rstd::rc::make_rc<VirtualListState>(session, Box<rstd::dyn<VirtualItemFactory>>::make(Adapter{rstd::move(factory)}), content, options);
-        auto scroll = ScrollView::create(session, content, style, {{options.horizontal, !options.horizontal}, options.line_step,options.wheel_mode,options.wheel_direction});
+        auto scroll = ScrollView::create(session, content, style, {{options.horizontal, !options.horizontal}, options.line_step,options.wheel_mode,options.wheel_direction,options.motion});
         if (scroll.is_err()) { ui.destroy(content); return Err(scroll.unwrap_err()); }
         auto id = scroll.unwrap();
         ui.install_layout(content, VirtualListContentLayout{state}).unwrap(); ui.attach_state(content, VirtualListHandle{state}).unwrap(); state.get()->connect(state.downgrade(), id);

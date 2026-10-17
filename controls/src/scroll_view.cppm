@@ -1,24 +1,15 @@
 export module vui.controls:scroll_view;
 import vui;
+export import :scroll_types;
 import :types;
+import :scroll_motion;
 using namespace rstd::prelude;
 export namespace vui {
-enum class ScrollWheelMode { Direct, SingleAxis };
-struct ScrollStyle {
-    ScrollAxes axes;
-    Scalar line_step{40};
-    ScrollWheelMode wheel_mode{ScrollWheelMode::Direct};
-    Point wheel_direction{1,1};
-    auto valid() const -> bool { return finite(line_step) && line_step > 0 && (wheel_mode==ScrollWheelMode::Direct || wheel_mode==ScrollWheelMode::SingleAxis) &&
-        (wheel_direction.x==1 || wheel_direction.x==-1) && (wheel_direction.y==1 || wheel_direction.y==-1); }
-};
-struct UserScroll {
-    Point offset, maximum;
-};
 class ScrollState {
     UiId viewport_;
     ScrollStyle style_;
     Signal<void(UserScroll)> user_scrolled_;
+    Option<rstd::rc::Rc<ScrollInteraction>> interaction_;
     static auto shift(Scalar value, Scalar amount, Scalar step, Scalar maximum) -> Scalar {
         if (amount > 0)
             return amount >= (maximum - value) / step ? maximum : value + amount * step;
@@ -33,6 +24,12 @@ class ScrollState {
   public:
     ScrollState(UiId viewport, ScrollStyle style) : viewport_(viewport), style_(style) {}
     auto viewport() const -> UiId { return viewport_; }
+    auto connect(UiSession &session,UiId root) -> Result<empty,ControlError> {
+        auto value=ScrollInteraction::make(session,root,viewport_,style_,user_scrolled_);if (value.is_err()) return Err(value.unwrap_err());
+        interaction_=Some(rstd::move(value).unwrap());return Ok(empty{});
+    }
+    void stop() {if (interaction_.is_some()) interaction_->get()->stop();}
+    auto status() const -> ScrollStatus {return interaction_.is_some() ? interaction_->get()->status() : ScrollStatus{};}
     auto on_user_scrolled(UiDocument &ui, auto callback) -> Result<Binding, UiError> {
         auto connected = user_scrolled_.connect(ui.bindings(), rstd::move(callback));
         return connected.is_ok() ? Result<Binding, UiError>(Ok(rstd::move(connected).unwrap())) : Result<Binding, UiError>(Err(UiError::Limit));
@@ -40,16 +37,22 @@ class ScrollState {
     auto set_style(UiDocument &ui, ScrollStyle style) -> Result<empty, UiError> {
         if (!style.valid())
             return Err(UiError::InvalidValue);
+        stop();
         auto result = ui.set_viewport_axes(viewport_, style.axes);
-        if (result.is_ok())
+        if (result.is_ok()) {
             style_ = style;
+            if (interaction_.is_some()) interaction_->get()->configure();
+        }
         return result;
     }
     void handle(EventContext &context, const RoutedEvent &event) {
+        if (interaction_.is_some() && interaction_->get()->handle(context,event)) return;
+        if (event.input.type==EventType::Wheel || (event.input.type==EventType::KeyDown && event.target==event.current)) stop();
         auto visual = context.visual(viewport_);
         if (!visual || visual->viewport.is_none())
             return;
-        const auto &metrics = *visual->viewport;
+        auto actual=context.document().viewport_metrics(viewport_);
+        auto metrics=actual.is_ok() ? *actual : *visual->viewport;
         auto next = metrics.offset;
         if (event.input.type == EventType::PointerDown &&
             event.input.button == PointerButton::Primary) {
@@ -153,10 +156,13 @@ class ScrollView {
         auto attached = ui.attach(view, content);
         if (attached.is_err())
             return failure(attached.unwrap_err());
+        auto connected=ui.state<ScrollState>(id)->connect(session,id);
+        if (connected.is_err()) {ui.destroy(id);return Err(connected.unwrap_err());}
         return Ok(id);
     }
     static auto set_offset(UiDocument &ui, UiId id, Point value) -> Result<empty, UiError> {
         auto state = ui.state<ScrollState>(id);
+        if (state) state->stop();
         return state ? ui.set_viewport_offset(state->viewport(), value)
                      : Result<empty, UiError>(Err(UiError::InvalidId));
     }
@@ -164,6 +170,12 @@ class ScrollView {
         auto state = ui.state<ScrollState>(id);
         return state ? ui.viewport_metrics(state->viewport())
                      : Result<ViewportMetrics, UiError>(Err(UiError::InvalidId));
+    }
+    static auto status(UiDocument &ui,UiId id) -> Result<ScrollStatus,UiError> {
+        auto state=ui.state<ScrollState>(id);return state ? Result<ScrollStatus,UiError>(Ok(state->status())) : Result<ScrollStatus,UiError>(Err(UiError::InvalidId));
+    }
+    static auto stop(UiDocument &ui,UiId id) -> Result<empty,UiError> {
+        auto state=ui.state<ScrollState>(id);if (!state) return Err(UiError::InvalidId);state->stop();return Ok(empty{});
     }
     static auto content(UiDocument &ui, UiId id) -> Result<Option<UiId>, UiError> {
         auto state = ui.state<ScrollState>(id);

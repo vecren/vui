@@ -126,6 +126,14 @@ class EventRouter {
     Serial owner_{new_session()}, next_handler_{1};
     Vec<Box<Handler>> handlers_;
     Vec<Box<BehaviorEntry>> behaviors_;
+    struct PointerObserver {
+        UiId target;
+        BindingGuard guard;
+        bool available{};
+        Box<rstd::dyn<rstd::FnMut<void(bool)>>> changed;
+    };
+    Vec<PointerObserver> pointer_observers_;
+    bool availability_dirty_{};
     struct NodeRoutes {
         Vec<usize> behaviors, handlers;
     };
@@ -594,6 +602,16 @@ class EventRouter {
         failure_ = None();
     }
     auto end() -> Result<empty, InputError> {
+        if (availability_dirty_) {
+            availability_dirty_=false;
+            for (auto &observer:pointer_observers_) {
+                if (!observer.guard.alive()) continue;
+                auto available=pointer_available(observer.target);
+                if (available!=observer.available) {observer.available=available;observer.changed->operator()(available);}
+                if (!document_.valid(observer.target)) observer.guard.disconnect();
+            }
+            pointer_observers_.retain([](const auto &observer){return observer.guard.alive();});
+        }
         drain();
         refresh_text_input();
         scope_ = None();
@@ -867,6 +885,30 @@ class EventRouter {
             Some(Box<rstd::dyn<rstd::FnMut<void(EventRouter &, const InputEvent &)>>>::make(
                 rstd::move(policy)));
     }
+    auto pointer_available(UiId id) const -> bool {
+        if (closed_ || !window_focused_ || update_.is_none() || !eligible(*update_,id,true)) return false;
+        auto mount=document_.mount_state(id);auto visual=update_->get(id);
+        if (mount.is_err() || !mount->mounted || !visual || visual->mount_generation!=mount->generation) return false;
+        auto cursor=Some(id);
+        for (unsigned depth{};cursor.is_some() && depth<256;++depth) {
+            auto style=document_.resolved_style(*cursor);
+            if (style.is_err() || !style->visible || !style->enabled || !style->hit_test_visible || style->transform.inverse().is_none()) return false;
+            auto relation=document_.parent_relation(*cursor);if (relation.is_err()) return false;
+            if (relation->is_none()) return cursor==update_->root();
+            cursor=Some(UiId((**relation).parent));
+        }
+        return false;
+    }
+    template <class F> auto on_pointer_availability_changed(UiId target,F callback) -> Result<Binding,InputError> {
+        if (closed_) return Err(InputError::Unavailable);
+        if (busy_ || !document_.can_route()) return Err(InputError::Reentrant);
+        if (!document_.valid(target)) return Err(InputError::InvalidId);
+        pointer_observers_.retain([](const auto &observer){return observer.guard.alive();});
+        if (pointer_observers_.len()>=usize(65536)) return Err(InputError::Limit);
+        auto binding=document_.bindings().make();
+        pointer_observers_.push({target,binding.guard(),pointer_available(target),Box<rstd::dyn<rstd::FnMut<void(bool)>>>::make(rstd::move(callback))});
+        return Ok(rstd::move(binding));
+    }
     auto focus_candidates() const -> Vec<UiId> {
         Vec<UiId> candidates;
         if (update_.is_some())
@@ -1015,6 +1057,7 @@ class EventRouter {
         if (prune_requested_)
             arena_.prune();
         update_ = Some(rstd::move(update));
+        availability_dirty_=true;
         controls_ = true;
         if (window_focused_) {
             if (restore.is_some())
@@ -1128,6 +1171,7 @@ class EventRouter {
         }
         begin();
         if (input.type == EventType::WindowFocusLost) {
+            availability_dirty_=true;
             controls_ = false;
             window_focused_ = false;
             for (auto &value : pointers_) {
@@ -1138,6 +1182,7 @@ class EventRouter {
             change_focus(None());
             controls_ = true;
         } else if (input.type == EventType::WindowFocusGained) {
+            availability_dirty_=true;
             window_focused_ = true;
             refresh_text_input(true);
         } else if (device_event) {
@@ -1286,6 +1331,7 @@ class EventRouter {
             begin();
             controls_ = false;
             window_focused_ = false;
+            availability_dirty_=true;
             for (auto &pointer : pointers_) {
                 cancel(pointer, CancelReason::Closed);
                 hover(pointer, None());
@@ -1297,6 +1343,8 @@ class EventRouter {
                 return result;
         }
         closed_ = true;
+        for (auto &observer:pointer_observers_) observer.guard.disconnect();
+        pointer_observers_.clear();
         for (const auto &handler : handlers_)
             if (handler->owns_binding && handler->binding.is_some())
                 handler->binding->disconnect();
