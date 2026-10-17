@@ -249,12 +249,14 @@ class UiSession {
             auto snapshot = rstd::move(next).unwrap();
             auto viewport_callbacks = document_.dispatch_viewport_callbacks(snapshot);
             if (viewport_callbacks.is_err()) return Err(SessionError{SessionStage::Update, Some(viewport_callbacks.unwrap_err())});
+            auto geometry_callbacks = document_.dispatch_geometry_callbacks(snapshot);
+            if (geometry_callbacks.is_err()) return Err(SessionError{SessionStage::Update, Some(geometry_callbacks.unwrap_err())});
             auto revision = snapshot.revision();
             auto synced = input_.synchronize(rstd::move(snapshot));
             if (synced.is_err())
                 return Err(SessionError{SessionStage::Input, {}, Some(synced.unwrap_err())});
             if (revision == document_.revision() && document_.pending_mutations() == usize() &&
-                !document_.pending_animation_callbacks() && !document_.pending_viewport_callbacks() && !input_.pending_sync() &&
+                !document_.pending_animation_callbacks() && !document_.pending_viewport_callbacks() && !document_.pending_geometry_callbacks() && !input_.pending_sync() &&
                 !state_bindings_.pending()) {
                 auto revealed = reveal_focus(input_.snapshot().unwrap());
                 if (revealed.is_err())
@@ -308,13 +310,15 @@ class UiSession {
             update_ = Some(next.unwrap());
             auto viewport_callbacks = document_.dispatch_viewport_callbacks(*update_);
             if (viewport_callbacks.is_err()) return Err(SessionError{SessionStage::Update, Some(viewport_callbacks.unwrap_err())});
+            auto geometry_callbacks = document_.dispatch_geometry_callbacks(*update_);
+            if (geometry_callbacks.is_err()) return Err(SessionError{SessionStage::Update, Some(geometry_callbacks.unwrap_err())});
             stats.add(update_->stats());
             auto synced = input_.synchronize(*update_);
             if (synced.is_err())
                 return Err(SessionError{SessionStage::Input, {}, Some(synced.unwrap_err())});
             if (document_.revision() == update_->revision() &&
                 document_.pending_mutations() == usize() &&
-                !document_.pending_animation_callbacks() && !document_.pending_viewport_callbacks() && !input_.pending_sync() &&
+                !document_.pending_animation_callbacks() && !document_.pending_viewport_callbacks() && !document_.pending_geometry_callbacks() && !input_.pending_sync() &&
                 (!state_result.pending || state_result.groups >= usize(16))) {
                 auto revealed = reveal_focus(*update_);
                 if (revealed.is_err())

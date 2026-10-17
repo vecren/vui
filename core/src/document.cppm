@@ -42,6 +42,13 @@ struct UiMountState {
     bool mounted{};
     Serial generation{};
 };
+struct RelativeGeometry {
+    Rect bounds, reference_bounds;
+    Transform local_to_reference;
+    Serial mount_generation{}, reference_generation{};
+    bool visible{};
+    auto operator==(const RelativeGeometry &) const -> bool = default;
+};
 struct UpdateStats {
     Serial measurements{}, recordings{}, text_layouts{}, arrangements{}, layout_passes{};
     Serial measure_cache_hits{}, arrange_cache_hits{};
@@ -91,6 +98,29 @@ auto between_transform(const Snapshot &snapshot, UiId from, UiId to) -> Result<T
     if (inverse.is_none())
         return Err(UiError::InvalidValue);
     return Ok(*inverse * source.unwrap());
+}
+template <class Snapshot>
+auto relative_geometry(const Snapshot &snapshot, UiId from, UiId to) -> Option<RelativeGeometry> {
+    auto source = snapshot.get(from), reference = snapshot.get(to);
+    if (!source || !reference) return None();
+    auto transform = between_transform(snapshot, from, to);
+    if (transform.is_err()) return None();
+    bool visible = true;
+    UiId targets[]{from, to};
+    for (auto id : targets) {
+        auto cursor = Some(id);
+        unsigned depth{};
+        while (cursor.is_some() && depth++ < 256) {
+            auto node = snapshot.get(*cursor);
+            if (!node) return None();
+            visible = visible && node->properties.visible;
+            cursor = node->parent;
+        }
+        if (cursor.is_some()) return None();
+    }
+    return Some(RelativeGeometry{source->layout_bounds, reference->layout_bounds,
+                                 transform.unwrap(), source->mount_generation,
+                                 reference->mount_generation, visible});
 }
 class UiDocument;
 class UiUpdate {
@@ -246,6 +276,14 @@ class InputSnapshot {
 };
 
 class UiDocument {
+    struct GeometryObserver {
+        UiId source, reference;
+        Signal<void(Option<RelativeGeometry>)> changed;
+        BindingGuard subscriber;
+        Option<RelativeGeometry> published;
+        bool initialized{};
+        GeometryObserver(UiId from, UiId to) : source(from), reference(to) {}
+    };
     struct ViewportObserver {
         Signal<void(ViewportMetrics)> changed;
         Vec<BindingGuard> subscribers;
@@ -403,6 +441,8 @@ class UiDocument {
     Vec<rstd::rc::Weak<UiTargetState>> value_targets_;
     Vec<UiId> observed_viewports_;
     bool pending_viewports_{};
+    Vec<rstd::rc::Rc<GeometryObserver>> observed_geometry_;
+    bool pending_geometry_{};
     Serial next_lease_{1};
     Vec<PaintDiagnostic> paint_diagnostics_;
     UpdateTimings *active_timings_{};
@@ -2908,6 +2948,38 @@ class UiDocument {
         if (layout_dirty_ || !mounted(id))
             return Err(UiError::LayoutPending);
         return Ok(ViewportMetrics((*node->viewport)->metrics));
+    }
+    // Callbacks observe a completed snapshot; structural changes must be deferred.
+    auto on_geometry_changed(UiId source, UiId reference, auto callback) -> Result<Binding, UiError> {
+        if (!valid(source) || !valid(reference)) return Err(UiError::InvalidId);
+        observed_geometry_.retain([](const auto &observer) { return observer->subscriber.alive(); });
+        if (observed_geometry_.len() >= usize(4096)) return Err(UiError::Limit);
+        auto observer = rstd::rc::make_rc<GeometryObserver>(source, reference);
+        auto connected = observer.get()->changed.connect(bindings_, rstd::move(callback));
+        if (connected.is_err()) return Err(UiError::Limit);
+        auto binding = rstd::move(connected).unwrap();
+        observer.get()->subscriber = binding.guard();
+        observed_geometry_.push(rstd::move(observer));
+        pending_geometry_ = true; bindings_.wake();
+        return Ok(rstd::move(binding));
+    }
+    auto pending_geometry_callbacks() const -> bool { return pending_geometry_; }
+    template <class Snapshot> auto dispatch_geometry_callbacks(const Snapshot &snapshot) -> Result<empty, UiError> {
+        auto scope = acquire_route(); if (scope.is_err()) return Err(scope.unwrap_err());
+        if (snapshot.document() != session_) return Err(UiError::InvalidValue);
+        pending_geometry_ = false;
+        auto observers = Vec<rstd::rc::Rc<GeometryObserver>>::from(observed_geometry_.as_slice());
+        for (auto &observer : observers) {
+            if (snapshot.revision() != revision_) { pending_geometry_ = true; return Ok(empty{}); }
+            if (!observer->subscriber.alive()) continue;
+            auto geometry = relative_geometry(snapshot, observer->source, observer->reference);
+            if (observer->initialized && observer->published == geometry) continue;
+            observer.get()->initialized = true; observer.get()->published = geometry;
+            auto emitted = observer.get()->changed.emit(geometry);
+            if (emitted.is_err()) return Err(UiError::Routing);
+        }
+        observed_geometry_.retain([](const auto &observer) { return observer->subscriber.alive(); });
+        return Ok(empty{});
     }
     // Observers receive a completed layout snapshot; structural changes must be deferred.
     auto on_viewport_changed(UiId id, auto callback) -> Result<Binding, UiError> {
