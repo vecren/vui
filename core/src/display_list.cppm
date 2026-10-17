@@ -12,7 +12,7 @@ export namespace vui {
 class DrawOp {
     RSTD_ENUM(DrawOp, (Save), (Restore), (Transform, (vui::Transform value;)),
               (Clip, (vui::Clip value;)), (Rect, (vui::Rect rect; Color color; Scalar radius;)),
-              (Text, (TextLayout layout; Point origin; Color color; TextEffects effects{};)),
+              (Text, (TextLayout layout; Point origin; Color color; TextEffects effects{}; TextColors colors{};)),
               (Image, (ImageData data; Rect destination; Rect source; ImageSampling sampling;
                        Color tint; ImageEdges edges; bool clamp_source;
                        ImageBlend blend{ImageBlend::SourceOver};)),
@@ -166,10 +166,10 @@ class DisplayListRecorder {
         include(value);
         operations_.push(DrawOp::Rect(value, color, radius));
     }
-    void text(TextLayout layout, Point origin, Color color, TextEffects effects = {}) {
+    void text(TextLayout layout, Point origin, Color color, TextEffects effects = {}, TextColors colors = {}) {
         if (!active())
             return;
-        if (!finite(origin.x) || !finite(origin.y) || !color.valid() || !effects.valid()) {
+        if (!finite(origin.x) || !finite(origin.y) || !color.valid() || !effects.valid() || !colors.matches(layout.text())) {
             reject(RecordingError::InvalidValue);
             return;
         }
@@ -181,7 +181,7 @@ class DisplayListRecorder {
         if (effects.shadow_color.a > 0)
             include({bounds.x + effects.shadow_offset.x, bounds.y + effects.shadow_offset.y,
                      bounds.width, bounds.height});
-        operations_.push(DrawOp::Text(rstd::move(layout), origin, color, effects));
+        operations_.push(DrawOp::Text(rstd::move(layout), origin, color, effects, rstd::move(colors)));
     }
     void image(ImageData data, Rect destination, Rect source,
                ImageSampling sampling = ImageSampling::Linear, Color tint = {1, 1, 1, 1},

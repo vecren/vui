@@ -550,10 +550,12 @@ auto resolve_items(OwnedFrame &frame, GlyphCache &cache, ImageCache &images, Ind
                               {value.color, {}, 0}};
                 for (unsigned pass{}; pass < 3; ++pass) {
                     const auto &paint = passes[pass];
-                    if (!paint.color.a || (pass == 1 && !effect.outline_width)) continue;
-                    color(paint.color);
+                    if ((pass < 2 && !paint.color.a) || (pass == 1 && !effect.outline_width)) continue;
                     for (const auto &glyph : value.layout.glyphs()) {
                         if (!glyph.drawable) continue;
+                        auto fill = pass == 2 ? value.colors.color(glyph.byte_start, paint.color) : paint.color;
+                        if (!fill.a) continue;
+                        color(fill);
                         auto resolved = cache.resolve(value.layout.fonts()[usize(glyph.font)],
                                                       glyph.glyph, scale, max_extent, paint.outline * scale);
                         if (resolved.is_err()) return Err(resolved.unwrap_err());

@@ -290,6 +290,7 @@ class UiDocument {
         Scalar line_spacing{};
         bool bold{}, italic{}, dirty{true};
         Color color{0, 0, 0, 1};
+        TextColors colors;
         TextEffects effects;
         Option<Scalar> width;
         Option<TextLayout> layout;
@@ -445,6 +446,7 @@ class UiDocument {
         auto &text = **node.text;
         if (text.value.as_str() == value.as_str() && (!boundaries.present() || boundaries == text.boundaries))
             return false;
+        if (text.value.as_str() != value.as_str()) text.colors = {};
         text.value = rstd::move(value);
         text.boundaries = rstd::move(boundaries);
         text.dirty = true;
@@ -1348,7 +1350,7 @@ class UiDocument {
                           style.radius);
         if (node.text.is_some() && (*node.text)->layout.is_some()) {
             auto &text = **node.text;
-            recorder.text(TextLayout(*text.layout), text_origin(node), text.color, text.effects);
+            recorder.text(TextLayout(*text.layout), text_origin(node), text.color, text.effects, TextColors(text.colors));
         }
         if (node.image.is_some() && (*node.image)->data.is_some()) {
             auto &image = **node.image;
@@ -2440,6 +2442,27 @@ class UiDocument {
             changed(false);
         }
         return Ok(empty{});
+    }
+    auto set_text_colors(UiId id, TextColors colors) -> Result<empty, UiError> {
+        if (layout_active_ || painting_) return Err(UiError::Routing);
+        auto node = resolve(id);
+        if (!node) return Err(UiError::InvalidId);
+        if (node->text.is_none() || !colors.matches((*node->text)->value.as_str())) return Err(UiError::InvalidValue);
+        if ((*node->text)->colors != colors) {
+            (*node->text)->colors = rstd::move(colors);
+            node->paint_dirty = true;
+            changed(false);
+        }
+        return Ok(empty{});
+    }
+    auto set_text_colors(UiId id, slice<TextColorSpan> spans) -> Result<empty, UiError> {
+        if (layout_active_ || painting_) return Err(UiError::Routing);
+        auto node = resolve(id);
+        if (!node) return Err(UiError::InvalidId);
+        if (node->text.is_none()) return Err(UiError::InvalidValue);
+        auto colors = TextColors::create((*node->text)->value.as_str(), spans);
+        if (colors.is_err()) return Err(UiError::InvalidValue);
+        return set_text_colors(id, rstd::move(colors).unwrap());
     }
     auto text_layout(UiId id) -> Result<TextLayout, UiError> {
         auto node = resolve(id);

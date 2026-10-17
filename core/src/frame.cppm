@@ -28,7 +28,7 @@ class FrameDraw {
               (Rectangle, (Rect rect; Color color; Scalar radius; Transform transform; Index clip;
                            RenderId node;)),
               (Text, (TextLayout layout; Point origin; Color color; Transform transform; Index clip;
-                      RenderId node; TextEffects effects{};)),
+                      RenderId node; TextEffects effects{}; TextColors colors{};)),
               (Image, (ImageData data; Rect destination; Rect source; ImageSampling sampling;
                        Color tint; ImageEdges edges; bool clamp_source; Transform transform;
                        Index clip; RenderId node; ImageBlend blend{ImageBlend::SourceOver};)),
@@ -146,7 +146,7 @@ class FramePlanner {
                 const auto &value = op.as_Text();
                 output_.passes[usize(target)].draws.push(
                     FrameDraw::Text(TextLayout(value.layout), value.origin, value.color,
-                                    state.transform, state.clip, id, value.effects));
+                                    state.transform, state.clip, id, value.effects, TextColors(value.colors)));
             } else if (op.is_Image()) {
                 const auto &value = op.as_Image();
                 output_.passes[usize(target)].draws.push(FrameDraw::Image(
