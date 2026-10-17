@@ -901,7 +901,7 @@ class EventRouter {
     }
     template <class F> auto on_pointer_availability_changed(UiId target,F callback) -> Result<Binding,InputError> {
         if (closed_) return Err(InputError::Unavailable);
-        if (busy_ || !document_.can_route()) return Err(InputError::Reentrant);
+        if (busy_ || document_.routing()) return Err(InputError::Reentrant);
         if (!document_.valid(target)) return Err(InputError::InvalidId);
         pointer_observers_.retain([](const auto &observer){return observer.guard.alive();});
         if (pointer_observers_.len()>=usize(65536)) return Err(InputError::Limit);
