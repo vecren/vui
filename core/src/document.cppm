@@ -1333,8 +1333,11 @@ class UiDocument {
         return None();
     }
     static auto text_origin(const Node &node) -> Point {
-        auto bounds = (*node.text)->layout->logical_bounds();
-        return {node.style.layout.padding - bounds.x, node.style.layout.padding - bounds.y};
+        const auto &text = **node.text;
+        auto bounds = text.layout->logical_bounds();
+        // Explicit alignment keeps the request box origin when content overflows it.
+        auto aligned = text.width.is_some() && text.alignment != TextAlignment::Natural;
+        return {node.style.layout.padding - (aligned ? 0 : bounds.x), node.style.layout.padding - bounds.y};
     }
     static auto place_image_content(const Node &node) -> Option<ImagePlacement> {
         const auto &image = **node.image;
