@@ -17,9 +17,11 @@ struct ScrollAxes {
     bool horizontal{}, vertical{true};
     friend auto operator==(const ScrollAxes &, const ScrollAxes &) -> bool = default;
 };
+enum class ViewportBoundary { Clamped, Unclamped };
 struct ViewportMetrics {
     Size viewport, extent;
     Point offset, maximum;
+    ViewportBoundary boundary{ViewportBoundary::Clamped};
     auto operator==(const ViewportMetrics &) const -> bool = default;
 };
 struct Image {

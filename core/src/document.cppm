@@ -712,8 +712,7 @@ class UiDocument {
         case PresentationProperty::ViewportOffset: {
             auto &viewport = **node.viewport;
             viewport.requested = write.point;
-            viewport.metrics.offset = {bounded(write.point.x, 0, Some(viewport.metrics.maximum.x)),
-                                       bounded(write.point.y, 0, Some(viewport.metrics.maximum.y))};
+            viewport.metrics.offset = viewport_offset(viewport,write.point);
             break;
         }
         }
@@ -889,9 +888,13 @@ class UiDocument {
         }
         return false;
     }
+    static auto viewport_offset(const ViewportLayout &view, Point requested) -> Point {
+        if (view.metrics.boundary==ViewportBoundary::Clamped)
+            return {limit(requested.x,view.metrics.maximum.x),limit(requested.y,view.metrics.maximum.y)};
+        return {view.axes.horizontal ? requested.x : 0,view.axes.vertical ? requested.y : 0};
+    }
     static void clamp_viewport(ViewportLayout &view) {
-        view.metrics.offset = {limit(view.requested.x, view.metrics.maximum.x),
-                               limit(view.requested.y, view.metrics.maximum.y)};
+        view.metrics.offset = viewport_offset(view,view.requested);
         view.requested = view.metrics.offset;
     }
     static auto intersection(Option<Scalar> a, Option<Scalar> b) -> Option<Scalar> {
@@ -2856,6 +2859,18 @@ class UiDocument {
         }
         return Ok(empty{});
     }
+    auto set_viewport_boundary(UiId id, ViewportBoundary boundary) -> Result<empty,UiError> {
+        if (layout_active_ || painting_) return Err(UiError::Routing);
+        auto node=resolve(id); if (!node) return Err(UiError::InvalidId);
+        if (node->viewport.is_none() || (boundary!=ViewportBoundary::Clamped && boundary!=ViewportBoundary::Unclamped)) return Err(UiError::InvalidValue);
+        auto &view=**node->viewport;
+        if (view.metrics.boundary!=boundary) {
+            view.metrics.boundary=boundary;
+            if (!layout_dirty_ && mounted(id)) clamp_viewport(view);
+            changed(false,Some(id));
+        }
+        return Ok(empty{});
+    }
     auto set_viewport_offset(UiId id, Point offset) -> Result<empty, UiError> {
         if ((layout_active_ || painting_))
             return Err(UiError::Routing);
@@ -2868,8 +2883,7 @@ class UiDocument {
             return Err(UiError::InvalidValue);
         auto &view = **node->viewport;
         if (!layout_dirty_ && mounted(id))
-            offset = {limit(offset.x, view.metrics.maximum.x),
-                      limit(offset.y, view.metrics.maximum.y)};
+            offset = viewport_offset(view,offset);
         if (view.requested != offset) {
             view.requested = offset;
             if (!layout_dirty_ && mounted(id))
