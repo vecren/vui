@@ -3,17 +3,21 @@ import vui;
 import :types;
 using namespace rstd::prelude;
 export namespace vui {
+enum class ScrollWheelMode { Direct, SingleAxis };
 struct ScrollStyle {
     ScrollAxes axes;
     Scalar line_step{40};
-    auto valid() const -> bool { return finite(line_step) && line_step > 0; }
+    ScrollWheelMode wheel_mode{ScrollWheelMode::Direct};
+    Point wheel_direction{1,1};
+    auto valid() const -> bool { return finite(line_step) && line_step > 0 && (wheel_mode==ScrollWheelMode::Direct || wheel_mode==ScrollWheelMode::SingleAxis) &&
+        (wheel_direction.x==1 || wheel_direction.x==-1) && (wheel_direction.y==1 || wheel_direction.y==-1); }
 };
 struct UserScroll {
     Point offset, maximum;
 };
 class ScrollState {
     UiId viewport_;
-    Scalar line_step_;
+    ScrollStyle style_;
     Signal<void(UserScroll)> user_scrolled_;
     static auto shift(Scalar value, Scalar amount, Scalar step, Scalar maximum) -> Scalar {
         if (amount > 0)
@@ -27,7 +31,7 @@ class ScrollState {
     }
 
   public:
-    ScrollState(UiId viewport, Scalar step) : viewport_(viewport), line_step_(step) {}
+    ScrollState(UiId viewport, ScrollStyle style) : viewport_(viewport), style_(style) {}
     auto viewport() const -> UiId { return viewport_; }
     auto on_user_scrolled(UiDocument &ui, auto callback) -> Result<Binding, UiError> {
         auto connected = user_scrolled_.connect(ui.bindings(), rstd::move(callback));
@@ -38,7 +42,7 @@ class ScrollState {
             return Err(UiError::InvalidValue);
         auto result = ui.set_viewport_axes(viewport_, style.axes);
         if (result.is_ok())
-            line_step_ = style.line_step;
+            style_ = style;
         return result;
     }
     void handle(EventContext &context, const RoutedEvent &event) {
@@ -53,37 +57,42 @@ class ScrollState {
                 context.prevent_default();
         } else if (event.input.type == EventType::Wheel) {
             auto remaining = context.scroll_remaining();
-            auto step = event.input.scroll_unit == ScrollUnit::Lines ? line_step_ : Scalar(1);
-            next = {shift(next.x, remaining.x, step, metrics.maximum.x),
-                    shift(next.y, remaining.y, step, metrics.maximum.y)};
+            bool horizontal=style_.wheel_mode==ScrollWheelMode::SingleAxis && style_.axes.horizontal && !style_.axes.vertical && __builtin_fabs(remaining.y)>__builtin_fabs(remaining.x);
+            bool vertical=style_.wheel_mode==ScrollWheelMode::SingleAxis && style_.axes.vertical && !style_.axes.horizontal && __builtin_fabs(remaining.x)>__builtin_fabs(remaining.y);
+            auto amount=horizontal ? Point{remaining.y,0} : vertical ? Point{0,remaining.x} : remaining;
+            auto step = event.input.scroll_unit == ScrollUnit::Lines ? style_.line_step : Scalar(1);
+            next = {shift(next.x, amount.x*style_.wheel_direction.x, step, metrics.maximum.x),
+                    shift(next.y, amount.y*style_.wheel_direction.y, step, metrics.maximum.y)};
             if (next == metrics.offset)
                 return;
             if (context.document().set_viewport_offset(viewport_, next).is_err())
                 return;
-            context.consume_scroll({consumed(next.x - metrics.offset.x, step, remaining.x),
-                                    consumed(next.y - metrics.offset.y, step, remaining.y)});
+            Point used{consumed((next.x-metrics.offset.x)*style_.wheel_direction.x,step,amount.x),consumed((next.y-metrics.offset.y)*style_.wheel_direction.y,step,amount.y)};
+            context.consume_scroll(horizontal ? Point{0,used.x} : vertical ? Point{used.y,0} : used);
             if (context.scroll_remaining() == Point{})
                 context.prevent_default();
             user_scrolled_.emit({next, metrics.maximum}).unwrap();
         } else if (event.input.type == EventType::KeyDown && event.target == event.current) {
             switch (event.input.key) {
             case Key::Left:
-                next.x = shift(next.x, -1, line_step_, metrics.maximum.x);
+                next.x = shift(next.x, -1, style_.line_step, metrics.maximum.x);
                 break;
             case Key::Right:
-                next.x = shift(next.x, 1, line_step_, metrics.maximum.x);
+                next.x = shift(next.x, 1, style_.line_step, metrics.maximum.x);
                 break;
             case Key::Up:
-                next.y = shift(next.y, -1, line_step_, metrics.maximum.y);
+                next.y = shift(next.y, -1, style_.line_step, metrics.maximum.y);
                 break;
             case Key::Down:
-                next.y = shift(next.y, 1, line_step_, metrics.maximum.y);
+                next.y = shift(next.y, 1, style_.line_step, metrics.maximum.y);
                 break;
             case Key::PageUp:
-                next.y = shift(next.y, -metrics.viewport.height, 1, metrics.maximum.y);
+                if (style_.axes.horizontal && !style_.axes.vertical) next.x=shift(next.x,-metrics.viewport.width,1,metrics.maximum.x);
+                else next.y = shift(next.y, -metrics.viewport.height, 1, metrics.maximum.y);
                 break;
             case Key::PageDown:
-                next.y = shift(next.y, metrics.viewport.height, 1, metrics.maximum.y);
+                if (style_.axes.horizontal && !style_.axes.vertical) next.x=shift(next.x,metrics.viewport.width,1,metrics.maximum.x);
+                else next.y = shift(next.y, metrics.viewport.height, 1, metrics.maximum.y);
                 break;
             case Key::Home:
                 next = {};
@@ -133,7 +142,7 @@ class ScrollView {
             return failure(viewport.unwrap_err());
         auto view = viewport.unwrap();
         ui.set_viewport_axes(view, scroll.axes).unwrap();
-        auto stored = ui.attach_state(id, ScrollState(view, scroll.line_step));
+        auto stored = ui.attach_state(id, ScrollState(view, scroll));
         if (stored.is_err())
             return failure(stored.unwrap_err());
         auto behavior = session.input().attach_behavior<ScrollState>(id);
