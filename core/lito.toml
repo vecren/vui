@@ -43,6 +43,7 @@ sources = [
     "src/state/targets.cppm",
     "src/state/bindings.cppm",
     "src/text.cppm",
+    "src/text_images.cppm",
     "src/text_edit.cppm",
     "src/text_edit.cpp",
     "src/types.cppm",

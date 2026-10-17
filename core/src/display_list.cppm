@@ -2,6 +2,7 @@ module;
 #include <rstd/enum.hpp>
 export module vui:display_list;
 import :text;
+import :text_images;
 import :image;
 import :image.nine_patch;
 import :content;
@@ -166,7 +167,7 @@ class DisplayListRecorder {
         include(value);
         operations_.push(DrawOp::Rect(value, color, radius));
     }
-    void text(TextLayout layout, Point origin, Color color, TextEffects effects = {}, TextColors colors = {}, TextDecorations decorations = {}) {
+    void text(TextLayout layout, Point origin, Color color, TextEffects effects = {}, TextColors colors = {}, TextDecorations decorations = {}, TextInlineImages inline_images = {}) {
         if (!active())
             return;
         if (!finite(origin.x) || !finite(origin.y) || !color.valid() || !effects.valid() || !colors.matches(layout.text())) {
@@ -176,6 +177,9 @@ class DisplayListRecorder {
         auto decoration_rects = decorations.rects(layout, origin);
         if (decoration_rects.is_err()) { reject(RecordingError::InvalidValue); return; }
         auto geometry = rstd::move(decoration_rects).unwrap();
+        auto image_placements = inline_images.placements(layout, origin);
+        if (image_placements.is_err()) { reject(RecordingError::InvalidValue); return; }
+        auto placed_images = rstd::move(image_placements).unwrap();
         for (const auto &decoration : geometry) if (!decoration.foreground) rect(decoration.bounds, decoration.color);
         auto ink = layout.ink_bounds();
         auto border = effects.outline_width > 0 ? effects.outline_width + 1 : 0;
@@ -186,6 +190,10 @@ class DisplayListRecorder {
             include({bounds.x + effects.shadow_offset.x, bounds.y + effects.shadow_offset.y,
                      bounds.width, bounds.height});
         operations_.push(DrawOp::Text(rstd::move(layout), origin, color, effects, rstd::move(colors)));
+        for (const auto &placed : placed_images) {
+            const auto &source = inline_images.images()[usize(placed.image)];
+            image(ImageData(source.image), placed.destination, source.source, source.sampling, source.tint, ImageEdges::All, true, source.blend);
+        }
         for (const auto &decoration : geometry) if (decoration.foreground) rect(decoration.bounds, decoration.color);
     }
     void image(ImageData data, Rect destination, Rect source,

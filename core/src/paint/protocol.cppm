@@ -27,8 +27,8 @@ class PaintContext {
     void transform(Transform value) { recorder_.transform(value); }
     void clip(Clip value) { recorder_.clip(value); }
     void rect(Rect value, Color color, Scalar radius = 0) { recorder_.rect(value, color, radius); }
-    void text(TextLayout value, Point origin, Color color, TextEffects effects = {}, TextColors colors = {}, TextDecorations decorations = {}) {
-        recorder_.text(rstd::move(value), origin, color, effects, rstd::move(colors), rstd::move(decorations));
+    void text(TextLayout value, Point origin, Color color, TextEffects effects = {}, TextColors colors = {}, TextDecorations decorations = {}, TextInlineImages inline_images = {}) {
+        recorder_.text(rstd::move(value), origin, color, effects, rstd::move(colors), rstd::move(decorations), rstd::move(inline_images));
     }
     void image(ImageData value, Rect destination, Rect source,
                ImageSampling sampling = ImageSampling::Linear, Color tint = {1, 1, 1, 1},

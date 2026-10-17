@@ -292,6 +292,7 @@ class UiDocument {
         Color color{0, 0, 0, 1};
         TextColors colors;
         TextDecorations decorations;
+        TextInlineImages inline_images;
         TextEffects effects;
         Option<Scalar> width;
         Option<TextLayout> layout;
@@ -447,7 +448,7 @@ class UiDocument {
         auto &text = **node.text;
         if (text.value.as_str() == value.as_str() && (!boundaries.present() || boundaries == text.boundaries))
             return false;
-        if (text.value.as_str() != value.as_str()) { text.colors = {}; text.decorations = {}; }
+        if (text.value.as_str() != value.as_str()) { text.colors = {}; text.decorations = {}; text.inline_images = {}; }
         text.value = rstd::move(value);
         text.boundaries = rstd::move(boundaries);
         text.dirty = true;
@@ -1123,12 +1124,17 @@ class UiDocument {
                 if (text.boundaries.present()) request.boundaries = &text.boundaries;
                 else if (text.layout.is_some() && text.layout->text() == text.value.as_str())
                     request.boundaries = &text.layout->boundaries();
+                request.inline_objects = text.inline_images.objects();
                 auto result = (*text_service_)->layout(request);
                 if (result.is_err()) {
                     text.error = Some(result.unwrap_err());
                     return Some(UiError::TextLayoutFailed);
                 }
                 text.layout = Some(rstd::move(result).unwrap());
+                if (text.layout->inline_objects() != text.inline_images.objects()) {
+                    text.error = Some(TextError::Unsupported);
+                    return Some(UiError::TextLayoutFailed);
+                }
                 text.width = wrap_width;
                 text.error = None();
                 text.dirty = false;
@@ -1351,7 +1357,7 @@ class UiDocument {
                           style.radius);
         if (node.text.is_some() && (*node.text)->layout.is_some()) {
             auto &text = **node.text;
-            recorder.text(TextLayout(*text.layout), text_origin(node), text.color, text.effects, TextColors(text.colors), TextDecorations(text.decorations));
+            recorder.text(TextLayout(*text.layout), text_origin(node), text.color, text.effects, TextColors(text.colors), TextDecorations(text.decorations), TextInlineImages(text.inline_images));
         }
         if (node.image.is_some() && (*node.image)->data.is_some()) {
             auto &image = **node.image;
@@ -2485,6 +2491,20 @@ class UiDocument {
         auto decorations = TextDecorations::create((*node->text)->value.as_str(), spans);
         if (decorations.is_err()) return Err(UiError::InvalidValue);
         return set_text_decorations(id, rstd::move(decorations).unwrap());
+    }
+    auto set_text_inline_images(UiId id, TextInlineImages images) -> Result<empty, UiError> {
+        if (layout_active_ || painting_) return Err(UiError::Routing);
+        auto node = resolve(id);
+        if (!node) return Err(UiError::InvalidId);
+        if (node->text.is_none() || !images.matches((*node->text)->value.as_str())) return Err(UiError::InvalidValue);
+        auto &text = **node->text;
+        if (text.inline_images != images) {
+            bool layout = text.inline_images.objects() != images.objects();
+            text.inline_images = rstd::move(images);
+            node->paint_dirty = true;
+            if (layout) { text.dirty = true; changed(true, Some(id)); } else changed(false);
+        }
+        return Ok(empty{});
     }
     auto text_layout(UiId id) -> Result<TextLayout, UiError> {
         auto node = resolve(id);
