@@ -5,55 +5,107 @@ import :scroll_view;
 using namespace rstd::prelude;
 export namespace vui {
 enum class ScrollbarAxis { Horizontal, Vertical };
+enum class ScrollbarPageStep { Viewport, HandleFraction };
 struct ScrollbarOptions {
     ScrollbarAxis axis{ScrollbarAxis::Horizontal};
     Scalar minimum_handle{8}, line_step{.1};
-    auto valid() const -> bool {return (axis==ScrollbarAxis::Horizontal || axis==ScrollbarAxis::Vertical) && finite(minimum_handle) && minimum_handle>=0 && minimum_handle<=1048576 && finite(line_step) && line_step>0 && line_step<=1;}
+    Insets handle_insets{};
+    ScrollbarPageStep page_step{ScrollbarPageStep::Viewport};
+    bool repeat_track{};
+    Scalar track_quantum{};
+    auto valid() const -> bool {
+        Scalar insets[]{handle_insets.left,handle_insets.top,handle_insets.right,handle_insets.bottom};for (auto value:insets) if (!finite(value) || value<0 || value>1048576) return false;
+        return (axis==ScrollbarAxis::Horizontal || axis==ScrollbarAxis::Vertical) && finite(minimum_handle) && minimum_handle>=0 && minimum_handle<=1048576 && finite(line_step) && line_step>0 && line_step<=1 &&
+            (page_step==ScrollbarPageStep::Viewport || page_step==ScrollbarPageStep::HandleFraction) && finite(track_quantum) && track_quantum>=0 && track_quantum<=1;
+    }
 };
 struct ScrollbarValue {
     Scalar position{}, size{1};
     auto valid() const -> bool {return finite(position) && position>=0 && position<=1 && finite(size) && size>=0 && size<=1;}
     auto operator==(const ScrollbarValue &) const -> bool = default;
 };
-struct ScrollbarStatus {ScrollbarValue value;bool dragging{};};
+struct ScrollbarStatus {ScrollbarValue value;bool dragging{},repeating{};};
 struct ScrollbarLayout {
     ScrollbarOptions options;
     ScrollbarValue value;
     auto length(Scalar track) const -> Scalar {auto desired=track*value.size;return desired<options.minimum_handle ? (options.minimum_handle<track ? options.minimum_handle : track) : desired;}
     auto measure(LayoutMeasureContext &context,LayoutConstraints constraints) -> Result<Size,UiError> {return context.measure_child(usize(),constraints);}
-    auto arrange(LayoutArrangeContext &context,Size size) -> Result<empty,UiError> {
+    auto bounds(Size size) const -> Rect {
         bool vertical=options.axis==ScrollbarAxis::Vertical;auto track=vertical ? size.height : size.width;auto handle=length(track);auto start=(track-handle)*value.position;
         Rect rect=vertical ? Rect{0,start,size.width,handle} : Rect{start,0,handle,size.height};
+        const auto &insets=options.handle_insets;rect.x+=insets.left;rect.y+=insets.top;rect.width=rstd::cmp::max(Scalar(0),rect.width-insets.left-insets.right);rect.height=rstd::cmp::max(Scalar(0),rect.height-insets.top-insets.bottom);return rect;
+    }
+    auto arrange(LayoutArrangeContext &context,Size size) -> Result<empty,UiError> {
+        auto rect=bounds(size);
         return context.place_child(usize(),{rect,{rect.width,rect.height},{}});
     }
 };
 class ScrollbarState {
+    struct Repeat {
+        UiSession &session;UiId id;
+        auto sample(MotionContext &context,FrameTiming) -> Result<MotionStatus,MotionError> {
+            auto state=session.document().state<ScrollbarState>(id);return state ? state->sample_repeat(id,context) : Result<MotionStatus,MotionError>(Ok(MotionStatus::Finished));
+        }
+    };
+    UiSession &session_;
     UiId handle_,scroll_;
     ScrollbarOptions options_;
     ScrollbarValue value_;
     Option<PointerKey> pointer_;
     Scalar grab_{};
     bool layout_pending_{};
+    bool repeating_{};
+    Point track_position_;
+    Serial press_generation_{},repeat_sampled_{};
+    rstd::rc::Rc<Repeat> repeat_;
+    MotionRegistration motion_;
     Signal<void(Scalar)> changed_;
-    Binding lifetime_,metrics_;
+    Binding lifetime_,metrics_,availability_;
     Serial generation_{};
     static auto bounded(Scalar value) -> Scalar {return value<0 ? 0 : value>1 ? 1 : value;}
     auto vertical() const -> bool {return options_.axis==ScrollbarAxis::Vertical;}
-    auto page() const -> Scalar {return value_.size>0 && value_.size<1 ? value_.size/(1-value_.size) : options_.line_step;}
-    void write(EventContext &context,UiId id,Scalar value) {
+    auto page() const -> Scalar {return options_.page_step==ScrollbarPageStep::HandleFraction ? value_.size : value_.size>0 && value_.size<1 ? value_.size/(1-value_.size) : options_.line_step;}
+    void wake() {if (motion_.binding.alive()) session_.motion().request(motion_.id);}
+    void clear_press(bool request=true) {pointer_=None();repeating_=false;++press_generation_;if (request) wake();}
+    void write(UiDocument &ui,UiId id,Scalar value) {
         value=bounded(value);if (value_.size==1) value=0;if (value==value_.position) return;
-        auto next=value_;next.position=value;set(context.document(),id,next).unwrap();
+        auto next=value_;next.position=value;set(ui,id,next).unwrap();
         if (scroll_.valid()) {
-            auto metrics=ScrollView::metrics(context.document(),scroll_);
-            if (metrics.is_ok()) {auto offset=metrics->offset;if (vertical()) offset.y=value*metrics->maximum.y;else offset.x=value*metrics->maximum.x;ScrollView::set_offset(context.document(),scroll_,offset).unwrap();}
+            auto metrics=ScrollView::metrics(ui,scroll_);
+            if (metrics.is_ok()) {auto offset=metrics->offset;if (vertical()) offset.y=value*metrics->maximum.y;else offset.x=value*metrics->maximum.x;ScrollView::set_offset(ui,scroll_,offset).unwrap();}
             else unbind_scroll();
         }
         changed_.emit(value).unwrap();
     }
+    void page_at(UiId id,Point local,Size size) {
+        auto rect=ScrollbarLayout{options_,value_}.bounds(size);if (rect.contains(local)) return;
+        auto coordinate=vertical() ? local.y : local.x,center=vertical() ? rect.y+rect.height/2 : rect.x+rect.width/2;
+        auto next=bounded(value_.position+(coordinate<center ? -page() : page()));
+        if (options_.track_quantum>0) next=bounded(__builtin_roundeven(next/options_.track_quantum)*options_.track_quantum);
+        write(session_.document(),id,next);
+    }
+    auto sample_repeat(UiId id,MotionContext &context) -> Result<MotionStatus,MotionError> {
+        if (!repeating_ || pointer_.is_none()) return Ok(MotionStatus::Idle);
+        if (!session_.input().pointer_available(id)) {clear_press(false);return Ok(MotionStatus::Idle);}
+        if (repeat_sampled_!=context.now_ns()) {
+            repeat_sampled_=context.now_ns();auto generation=press_generation_;
+            session_.document().defer(id,lifetime_.guard(),[id,generation](UiDocument &ui)->Result<empty,UiError>{
+                auto state=ui.state<ScrollbarState>(id);if (!state || !state->repeating_ || state->press_generation_!=generation || !state->session_.input().pointer_available(id)) return Ok(empty{});
+                auto snapshot=state->session_.input().snapshot();if (snapshot.is_none()) return Ok(empty{});auto transform=snapshot->local_to_surface(id);if (transform.is_err() || transform->inverse().is_none()) return Ok(empty{});
+                auto bounds=snapshot->get(id)->layout_bounds;state->page_at(id,transform->inverse()->map(state->track_position_),{bounds.width,bounds.height});return Ok(empty{});
+            }).unwrap();
+        }
+        return Ok(MotionStatus::Running);
+    }
   public:
-    ScrollbarState(UiDocument &ui,UiId handle,ScrollbarOptions options):handle_(handle),options_(options),lifetime_(ui.bindings().make()) {}
+    ScrollbarState(UiSession &session,UiId handle,ScrollbarOptions options):session_(session),handle_(handle),options_(options),lifetime_(session.document().bindings().make()) {}
+    auto connect(UiId id) -> Result<empty,ControlError> {
+        if (!options_.repeat_track) return Ok(empty{});
+        repeat_=rstd::rc::make_rc<Repeat>(session_,id);auto motion=session_.motion().bind(repeat_.downgrade());if (motion.is_err()) return Err(ControlError{Some(UiError::Limit),{}});motion_=rstd::move(motion).unwrap();
+        auto availability=session_.input().on_pointer_availability_changed(id,[&session=session_,id](bool available){if (auto state=session.document().state<ScrollbarState>(id);state && !available) state->clear_press();});if (availability.is_err()) return Err(ControlError{{},Some(availability.unwrap_err())});availability_=rstd::move(availability).unwrap();return Ok(empty{});
+    }
     auto thumb() const -> UiId {return handle_;}
-    auto status() const -> ScrollbarStatus {return {value_,pointer_.is_some()};}
+    auto status() const -> ScrollbarStatus {return {value_,pointer_.is_some() && !repeating_,repeating_};}
     auto set_value(UiDocument &ui,UiId id,ScrollbarValue value) -> Result<empty,UiError> {return scroll_.valid() ? Result<empty,UiError>(Err(UiError::InvalidValue)) : set(ui,id,value);}
     auto set(UiDocument &ui,UiId id,ScrollbarValue value) -> Result<empty,UiError> {
         if (!value.valid()) return Err(UiError::InvalidValue);if (value.size==1) value.position=0;
@@ -93,31 +145,35 @@ class ScrollbarState {
         const auto &input=event.input;auto visual=context.visual(event.current);if (!visual) return;
         PointerKey pointer{input.device,input.pointer};bool vertical=this->vertical();auto coordinate=vertical ? event.local.y : event.local.x;
         auto track=vertical ? visual->layout_bounds.height : visual->layout_bounds.width;
-        auto length=ScrollbarLayout{options_,value_}.length(track);auto travel=track-length;
-        auto drag=[&]{if (travel>0) write(context,event.current,(coordinate-grab_*length)/travel);};
+        auto geometry=ScrollbarLayout{options_,value_};auto rect=geometry.bounds({visual->layout_bounds.width,visual->layout_bounds.height});auto length=vertical ? rect.height : rect.width;auto travel=track-geometry.length(track);
+        auto lead=vertical ? options_.handle_insets.top : options_.handle_insets.left;
+        auto drag=[&]{if (travel>0) write(context.document(),event.current,(coordinate-lead-grab_*length)/travel);};
         switch (input.type) {
         case EventType::PointerDown: {
             if (pointer_.is_some() || (input.pointer_kind!=PointerKind::Touch && input.button!=PointerButton::Primary)) return;
             context.focus();if (scroll_.valid() && ScrollView::stop(context.document(),scroll_).is_err()) unbind_scroll();
-            auto start=travel*value_.position;
-            if (coordinate>=start && coordinate<=start+length && travel>0) {
+            auto start=vertical ? rect.y : rect.x;
+            if (rect.contains(event.local) && travel>0) {
                 if (context.capture_pointer().is_err()) return;pointer_=Some(pointer);grab_=length>0 ? (coordinate-start)/length : Scalar(0);
-            } else if (travel>0) write(context,event.current,value_.position+(coordinate<start ? -page() : page()));
+            } else if (travel>0) {
+                if (options_.repeat_track) {if (context.capture_pointer().is_err()) return;pointer_=Some(pointer);repeating_=true;track_position_=input.position;++press_generation_;repeat_sampled_=context.document().animation_sample_time().unwrap_or(0);wake();}
+                page_at(event.current,event.local,{visual->layout_bounds.width,visual->layout_bounds.height});
+            }
             break;
         }
-        case EventType::PointerMove:if (pointer_!=Some(pointer)) return;drag();break;
+        case EventType::PointerMove:if (pointer_!=Some(pointer)) return;if (repeating_) {if (input.position==track_position_) break;repeating_=false;++press_generation_;grab_=.5;wake();}drag();break;
         case EventType::PointerUp:
             if (pointer_!=Some(pointer) || (input.pointer_kind!=PointerKind::Touch && input.button!=PointerButton::Primary)) return;
-            drag();pointer_=None();context.release_pointer();break;
+            if (!repeating_) drag();clear_press();context.release_pointer();break;
         case EventType::PointerCancel:
-        case EventType::CaptureLost:if (pointer_!=Some(pointer)) return;pointer_=None();return;
+        case EventType::CaptureLost:if (pointer_!=Some(pointer)) return;clear_press();return;
         case EventType::KeyDown: {
             if (event.target!=event.current) return;Scalar next=value_.position;
             if (input.key==Key::Home) next=0;else if (input.key==Key::End) next=1;
             else if (input.key==Key::PageUp) next-=page();else if (input.key==Key::PageDown) next+=page();
             else if (input.key==(vertical ? Key::Up : Key::Left)) next-=options_.line_step;
             else if (input.key==(vertical ? Key::Down : Key::Right)) next+=options_.line_step;else return;
-            write(context,event.current,next);break;
+            write(context.document(),event.current,next);break;
         }
         default:return;
         }
@@ -130,9 +186,10 @@ class Scrollbar {
         auto &ui=session.document();if (!options.valid()) return Err(ControlError{Some(UiError::InvalidValue),{}});if (!ui.valid(handle)) return Err(ControlError{Some(UiError::InvalidId),{}});
         style.focusable=true;auto created=ui.create<Stack>(style);if (created.is_err()) return Err(ControlError{Some(created.unwrap_err()),{}});auto id=*created;
         auto fail=[&](UiError error)->Result<UiId,ControlError>{ui.destroy(id);return Err(ControlError{Some(error),{}});};
-        auto state=ui.attach_state(id,ScrollbarState(ui,handle,options));if (state.is_err()) return fail(state.unwrap_err());
+        auto state=ui.attach_state(id,ScrollbarState(session,handle,options));if (state.is_err()) return fail(state.unwrap_err());
         auto behavior=session.input().attach_behavior<ScrollbarState>(id);if (behavior.is_err()) {ui.destroy(id);return Err(ControlError{{},Some(behavior.unwrap_err())});}
         auto layout=ui.install_layout(id,ScrollbarLayout{options,{}});if (layout.is_err()) return fail(layout.unwrap_err());
+        auto connected=ui.state<ScrollbarState>(id)->connect(id);if (connected.is_err()) {ui.destroy(id);return Err(connected.unwrap_err());}
         auto attached=ui.attach(id,handle);if (attached.is_err()) return fail(attached.unwrap_err());return Ok(id);
     }
     // A bound ScrollView owns the displayed value; change its offset instead.
