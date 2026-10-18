@@ -202,7 +202,7 @@ class DisplayListRecorder {
                ImageBlend blend = ImageBlend::SourceOver, ImageRadialFill radial = {}) {
         if (!active())
             return;
-        if (!radial.valid() || (blend != ImageBlend::SourceOver && blend != ImageBlend::Additive) ||
+        if (!radial.valid() || !valid(blend) ||
             static_cast<unsigned>(edges) > 15 || !tint.valid() || !destination.valid() ||
             !source.valid() || source.x < 0 || source.y < 0 ||
             source.x + source.width > data.width() || source.y + source.height > data.height() ||
@@ -220,7 +220,7 @@ class DisplayListRecorder {
                     ImageBlend blend = ImageBlend::SourceOver) {
         if (!active())
             return;
-        if (blend != ImageBlend::SourceOver && blend != ImageBlend::Additive) {
+        if (!valid(blend)) {
             reject(RecordingError::InvalidValue);
             return;
         }

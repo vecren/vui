@@ -9,7 +9,10 @@ enum class ImageError { InvalidValue, Limit };
 enum class ImageFit { Fill, Contain, Cover };
 enum class ImageSampling { Nearest, Linear };
 // Additive matches straight-alpha SrcAlpha/One for both color and alpha.
-enum class ImageBlend { SourceOver, Additive };
+enum class ImageBlend { SourceOver, Additive, AdditiveRgb };
+constexpr auto valid(ImageBlend value) -> bool {
+    return value == ImageBlend::SourceOver || value == ImageBlend::Additive || value == ImageBlend::AdditiveRgb;
+}
 struct ImageRadialFill {
     Scalar amount{1};
     // Radians in the normalized destination rectangle, positive clockwise from the right.

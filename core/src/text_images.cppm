@@ -14,7 +14,7 @@ struct TextInlineImage {
         return source.valid() && source.width > 0 && source.height > 0 && source.x >= 0 && source.y >= 0 &&
             source.x + source.width <= image.width() && source.y + source.height <= image.height() && tint.valid() &&
             (sampling == ImageSampling::Nearest || sampling == ImageSampling::Linear) &&
-            (blend == ImageBlend::SourceOver || blend == ImageBlend::Additive);
+            vui::valid(blend);
     }
     auto operator==(const TextInlineImage &other) const -> bool {
         return image.id() == other.image.id() && source == other.source && tint == other.tint && sampling == other.sampling && blend == other.blend;
