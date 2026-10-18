@@ -343,6 +343,7 @@ class UiDocument {
         ImageFit fit{ImageFit::Contain};
         ImageSampling sampling{ImageSampling::Linear};
         Color tint{1, 1, 1, 1};
+        ImageRadialFill radial;
     };
     struct SceneContent {
         Option<ContentSource> source;
@@ -1411,7 +1412,8 @@ class UiDocument {
             auto &image = **node.image;
             auto placed = *place_image_content(node);
             recorder.image(ImageData(*image.data), placed.destination, placed.source,
-                           image.sampling, image.tint);
+                           image.sampling, image.tint, ImageEdges::All, false,
+                           ImageBlend::SourceOver, image.radial);
         }
         if (node.scene.is_some()) {
             const auto &scene = **node.scene;
@@ -2352,6 +2354,18 @@ class UiDocument {
             return Err(UiError::InvalidValue);
         if ((*node->image)->tint != tint) {
             (*node->image)->tint = tint;
+            node->paint_dirty = true;
+            changed(false, Some(id));
+        }
+        return Ok(empty{});
+    }
+    auto set_image_radial_fill(UiId id, ImageRadialFill radial) -> Result<empty, UiError> {
+        if (layout_active_ || painting_) return Err(UiError::Routing);
+        auto node = resolve(id);
+        if (!node) return Err(UiError::InvalidId);
+        if (node->image.is_none() || !radial.valid()) return Err(UiError::InvalidValue);
+        if ((*node->image)->radial != radial) {
+            (*node->image)->radial = radial;
             node->paint_dirty = true;
             changed(false, Some(id));
         }

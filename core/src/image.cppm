@@ -10,6 +10,16 @@ enum class ImageFit { Fill, Contain, Cover };
 enum class ImageSampling { Nearest, Linear };
 // Additive matches straight-alpha SrcAlpha/One for both color and alpha.
 enum class ImageBlend { SourceOver, Additive };
+struct ImageRadialFill {
+    Scalar amount{1};
+    // Radians in the normalized destination rectangle, positive clockwise from the right.
+    Scalar start_angle{-1.5707963267948966};
+    bool clockwise{true};
+    auto valid() const -> bool {
+        return finite(amount) && amount >= 0 && amount <= 1 && finite(start_angle);
+    }
+    auto operator==(const ImageRadialFill &) const -> bool = default;
+};
 class ImageData {
     struct Data {
         Serial id{new_session()};

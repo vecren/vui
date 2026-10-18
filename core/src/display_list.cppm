@@ -16,7 +16,7 @@ class DrawOp {
               (Text, (TextLayout layout; Point origin; Color color; TextEffects effects{}; TextColors colors{};)),
               (Image, (ImageData data; Rect destination; Rect source; ImageSampling sampling;
                        Color tint; ImageEdges edges; bool clamp_source;
-                       ImageBlend blend{ImageBlend::SourceOver};)),
+                       ImageBlend blend{ImageBlend::SourceOver}; ImageRadialFill radial{};)),
               (External, (ContentSource source; Rect destination; ImageFit fit;
                           ImageSampling sampling; Color placeholder;)),
               (Children))
@@ -199,10 +199,10 @@ class DisplayListRecorder {
     void image(ImageData data, Rect destination, Rect source,
                ImageSampling sampling = ImageSampling::Linear, Color tint = {1, 1, 1, 1},
                ImageEdges edges = ImageEdges::All, bool clamp_source = false,
-               ImageBlend blend = ImageBlend::SourceOver) {
+               ImageBlend blend = ImageBlend::SourceOver, ImageRadialFill radial = {}) {
         if (!active())
             return;
-        if ((blend != ImageBlend::SourceOver && blend != ImageBlend::Additive) ||
+        if (!radial.valid() || (blend != ImageBlend::SourceOver && blend != ImageBlend::Additive) ||
             static_cast<unsigned>(edges) > 15 || !tint.valid() || !destination.valid() ||
             !source.valid() || source.x < 0 || source.y < 0 ||
             source.x + source.width > data.width() || source.y + source.height > data.height() ||
@@ -210,9 +210,10 @@ class DisplayListRecorder {
             reject(RecordingError::InvalidValue);
             return;
         }
+        if (radial.amount == 0) return;
         include(destination);
         operations_.push(DrawOp::Image(rstd::move(data), destination, source, sampling, tint, edges,
-                                       clamp_source, blend));
+                                       clamp_source, blend, radial));
     }
     void nine_patch(const ImageRegion &region, const NinePatchSpec &spec, Rect destination,
                     Color tint = {1, 1, 1, 1}, ImageSampling sampling = ImageSampling::Linear,

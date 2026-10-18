@@ -7,6 +7,7 @@ struct DrawData {
     vec3 surface;
     float image_edges;
     vec4 uv;
+    vec4 radial;
 };
 layout(std430,set=0,binding=2) readonly buffer Instances { DrawData instances[]; };
 #ifdef VUI_VERTEX

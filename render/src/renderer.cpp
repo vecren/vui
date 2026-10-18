@@ -480,6 +480,10 @@ auto resolve_items(OwnedFrame &frame, GlyphCache &cache, ImageCache &images, Ind
                 item.data.uv[1] = value.source.y / value.data.height();
                 item.data.uv[2] = value.source.width / value.data.width();
                 item.data.uv[3] = value.source.height / value.data.height();
+                item.data.radial[0] = std::cos(value.radial.start_angle);
+                item.data.radial[1] = std::sin(value.radial.start_angle);
+                item.data.radial[2] = (value.radial.clockwise ? 1 : -1) * value.radial.amount * 6.283185307179586;
+                item.data.radial[3] = value.radial.amount;
             } else if (draw.is_External()) {
                 const auto &value = draw.as_External();
                 if (!value.destination.width || !value.destination.height ||

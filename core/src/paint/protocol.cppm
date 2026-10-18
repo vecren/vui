@@ -33,9 +33,9 @@ class PaintContext {
     void image(ImageData value, Rect destination, Rect source,
                ImageSampling sampling = ImageSampling::Linear, Color tint = {1, 1, 1, 1},
                ImageEdges edges = ImageEdges::All, bool clamp_source = false,
-               ImageBlend blend = ImageBlend::SourceOver) {
+               ImageBlend blend = ImageBlend::SourceOver, ImageRadialFill radial = {}) {
         recorder_.image(rstd::move(value), destination, source, sampling, tint, edges,
-                        clamp_source, blend);
+                        clamp_source, blend, radial);
     }
     void nine_patch(const ImageRegion &region, const NinePatchSpec &spec, Rect destination,
                     Color tint = {1, 1, 1, 1}, ImageSampling sampling = ImageSampling::Linear,
