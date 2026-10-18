@@ -18,7 +18,7 @@ struct VirtualListOptions {
     Point wheel_direction{1,1};
     ScrollMotionOptions motion;
     auto valid() const -> bool {
-        return finite(item_extent) && item_extent > 0 && finite(spacing) && spacing >= 0 && finite(item_extent + spacing) &&
+        return finite(item_extent) && item_extent > 0 && finite(spacing) && finite(item_extent + spacing) && item_extent + spacing > 0 &&
             finite(padding.left) && padding.left >= 0 && finite(padding.top) && padding.top >= 0 &&
             finite(padding.right) && padding.right >= 0 && finite(padding.bottom) && padding.bottom >= 0 &&
             finite(padding.left + padding.right) && finite(padding.top + padding.bottom) &&
@@ -57,7 +57,7 @@ class VirtualListState {
     auto range() const -> Range {
         if (keys_.is_empty() || axis(metrics_.viewport) <= 0) return {};
         auto count = Scalar(keys_.len().to_primitive()); auto step = options_.item_extent + options_.spacing;
-        auto first = __builtin_floor((axis(metrics_.offset) - start()) / step);
+        auto first = __builtin_floor((axis(metrics_.offset) - start() - options_.item_extent) / step) + 1;
         auto last = __builtin_ceil((axis(metrics_.offset) + axis(metrics_.viewport) - start()) / step);
         first = rstd::cmp::max(Scalar(0), rstd::cmp::min(count, first - options_.overscan));
         last = rstd::cmp::max(first, rstd::cmp::min(count, last + options_.overscan));
