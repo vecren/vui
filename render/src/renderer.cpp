@@ -56,7 +56,7 @@ struct RecordContext {
     VkCommandBuffer command;
     const vvk::DeviceDispatch &dispatch;
     VkPipelineLayout layout;
-    VkPipeline rectangle, composite, glyph, image, additive, additive_rgb;
+    VkPipeline rectangle, composite, glyph, image, additive, additive_rgb, plus;
 };
 struct PreparedDraw {
     VkDescriptorSet descriptor{};
@@ -299,7 +299,7 @@ auto UiExecutor::record(RecordContext &context) const -> Result<empty, vk::Graph
     for (const auto &draw : draws) {
         d.vkCmdBindPipeline(context.command, VK_PIPELINE_BIND_POINT_GRAPHICS,
                             draw.kind == DrawKind::Image || draw.kind == DrawKind::External
-                                ? (draw.blend == ImageBlend::AdditiveRgb ? context.additive_rgb : draw.blend == ImageBlend::Additive ? context.additive : context.image)
+                                ? (draw.blend == ImageBlend::Plus ? context.plus : draw.blend == ImageBlend::AdditiveRgb ? context.additive_rgb : draw.blend == ImageBlend::Additive ? context.additive : context.image)
                             : draw.kind == DrawKind::Glyph     ? context.glyph
                             : draw.kind == DrawKind::Composite ? context.composite
                                                                : context.rectangle);
@@ -736,7 +736,8 @@ auto UiDrawPass::Instantiate(const vk::GraphPrepareContext &inputs,
                          *(*pipelines)[usize(2)].pipeline->pipeline.handle,
                          *(*pipelines)[usize(3)].pipeline->pipeline.handle,
                          *(*pipelines)[usize(4)].pipeline->pipeline.handle,
-                         *(*pipelines)[usize(5)].pipeline->pipeline.handle};
+                         *(*pipelines)[usize(5)].pipeline->pipeline.handle,
+                         *(*pipelines)[usize(6)].pipeline->pipeline.handle};
     return Ok(rstd::sync::Arc<dyn<vk::VulkanPass>>::make(
         UiPrepared{context.frame.gpu.clone(), assets.clone(), pipelines.clone(),
                    rstd::move(executor), native}));
@@ -799,10 +800,10 @@ auto UiAssets::initialize(vk::PipelinePreparationMode mode) -> Result<empty, Err
             VK_BLEND_FACTOR_ONE;
         description.color_blend.dstColorBlendFactor = description.color_blend.dstAlphaBlendFactor =
             VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-        if (blend == ImageBlend::Additive || blend == ImageBlend::AdditiveRgb) {
+        if (blend == ImageBlend::Additive || blend == ImageBlend::AdditiveRgb || blend == ImageBlend::Plus) {
             description.color_blend.dstColorBlendFactor = description.color_blend.dstAlphaBlendFactor =
                 VK_BLEND_FACTOR_ONE;
-            description.color_blend.srcAlphaBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+            if (blend != ImageBlend::Plus) description.color_blend.srcAlphaBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
         }
         description.color_blend.colorBlendOp = description.color_blend.alphaBlendOp =
             VK_BLEND_OP_ADD;
@@ -842,7 +843,9 @@ auto UiAssets::initialize(vk::PipelinePreparationMode mode) -> Result<empty, Err
         return image;
     auto additive = add(shaders::image, ImageBlend::Additive);
     if (additive.is_err()) return additive;
-    return add(shaders::image, ImageBlend::AdditiveRgb);
+    auto rgb = add(shaders::image, ImageBlend::AdditiveRgb);
+    if (rgb.is_err()) return rgb;
+    return add(shaders::image, ImageBlend::Plus);
 }
 } // namespace
 
