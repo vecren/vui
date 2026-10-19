@@ -30,6 +30,8 @@ struct StateAnimationDefinition {
     Vec<Scalar> defaults;Vec<StateAnimationParameter> parameters;Vec<StateAnimationState> states;
     Vec<StateAnimationTransition> transitions;Index initial{};
 };
+enum class StateAnimationSampleSide { After,Before };
+struct StateAnimationTime {Scalar now{},started{},offset{};StateAnimationSampleSide side{};};
 class StateAnimationProgram {
     struct Data {StateAnimationDefinition definition;explicit Data(StateAnimationDefinition value):definition(rstd::move(value)) {}};
     rstd::sync::Arc<Data> data_;
@@ -44,6 +46,8 @@ class StateAnimationProgram {
         }
         return false;
     }
+    auto period(Index index) const -> Scalar {const auto &s=definition().states[usize(index)];return (s.clip.stop-s.clip.start)/s.speed;}
+    auto position(Index index,Scalar elapsed,Scalar offset) const -> Scalar {auto duration=period(index);return duration>0 ? offset+elapsed/duration:Scalar(1);}
     friend class StateAnimationPlayer;
   public:
     StateAnimationProgram(const StateAnimationProgram &other):data_(other.data_.clone()) {}
@@ -51,6 +55,52 @@ class StateAnimationProgram {
     auto operator=(const StateAnimationProgram &other) -> StateAnimationProgram & {if (this!=&other) data_=other.data_.clone();return *this;}
     auto operator=(StateAnimationProgram &&) -> StateAnimationProgram & =default;
     auto definition() const -> const StateAnimationDefinition & {return data_->definition;}
+    // Sampling a state does not evaluate transitions or produce playback events.
+    auto sample_state(Index index,StateAnimationTime time,slice<Scalar> inherited={}) const -> Result<Vec<Scalar>,StateAnimationError> {
+        if (usize(index)>=definition().states.len()) return Err(StateAnimationError::InvalidState);
+        if (!finite(time.now) || !finite(time.started) || time.started<0 || time.now<time.started || !finite(time.offset) || time.offset<0 || unsigned(time.side)>1 ||
+            (!inherited.is_empty() && inherited.len()!=definition().defaults.len()))
+            return Err(StateAnimationError::InvalidValue);
+        const auto &s=definition().states[usize(index)];const auto &clip=s.clip;
+        auto baseline=s.write_defaults || inherited.is_empty() ? definition().defaults.as_slice():inherited;
+        for (auto value:baseline) if (!finite(value)) return Err(StateAnimationError::InvalidValue);
+        auto values=Vec<Scalar>::from(baseline);auto p=position(index,time.now-time.started,time.offset);
+        if (!finite(p)) return Err(StateAnimationError::InvalidValue);
+        auto duration=period(index);
+        if (s.loop && duration>0) {
+            auto cycle=__builtin_floor(p);bool edge{};
+            for (unsigned i{};i<2;++i) {
+                auto ordinal=cycle+Scalar(i);
+                if (ordinal>0 && time.now==time.started+(ordinal-time.offset)*duration) edge=true;
+            }
+            p=edge ? (time.side==StateAnimationSampleSide::Before ? Scalar(1):Scalar(0)) : p-cycle;
+        } else p=duration>0 && time.now==time.started+(1-time.offset)*duration ? Scalar(1):__builtin_fmax(0,__builtin_fmin(1,p));
+        auto sample=clip.start+(clip.stop-clip.start)*p;
+        for (const auto &track:clip.tracks) {
+            auto value=track.curve.constant.is_some() ? *track.curve.constant : ScalarCurve{clip.start,clip.stop,1,track.curve.keys.as_slice()}.sample(sample-clip.start);
+            if (!finite(value)) return Err(StateAnimationError::InvalidValue);values[usize(track.channel)]=value;
+        }
+        return Ok(rstd::move(values));
+    }
+    auto sample_state(Index index,Scalar elapsed,Scalar offset=0,slice<Scalar> inherited={},StateAnimationSampleSide side=StateAnimationSampleSide::After) const -> Result<Vec<Scalar>,StateAnimationError> {
+        return sample_state(index,StateAnimationTime{elapsed,0,offset,side},inherited);
+    }
+    auto next_state_boundary(Index index,StateAnimationTime begin,Scalar end) const -> Result<Option<Scalar>,StateAnimationError> {
+        if (usize(index)>=definition().states.len()) return Err(StateAnimationError::InvalidState);
+        if (!finite(begin.now) || !finite(begin.started) || begin.started<0 || begin.now<begin.started || !finite(begin.offset) || begin.offset<0 || !finite(end) || end<begin.now)
+            return Err(StateAnimationError::InvalidValue);
+        auto duration=period(index);if (!duration) return Ok(Option<Scalar>{});
+        auto p=position(index,begin.now-begin.started,begin.offset);if (!finite(p)) return Err(StateAnimationError::InvalidValue);
+        const auto &state=definition().states[usize(index)];auto cycle=state.loop ? __builtin_floor(p)+1:Scalar(1);
+        for (unsigned attempt{};attempt<2;++attempt) {
+            auto time=begin.started+(cycle-begin.offset)*duration;
+            if (!finite(time)) return Err(StateAnimationError::Limit);
+            if (time>begin.now) return time<end ? Ok(Some(time)):Ok(Option<Scalar>{});
+            if (!state.loop) return Ok(Option<Scalar>{});
+            if (cycle+1<=cycle) return Err(StateAnimationError::Limit);cycle+=1;
+        }
+        return Err(StateAnimationError::Limit);
+    }
     static auto create(StateAnimationDefinition value) -> Result<StateAnimationProgram,StateAnimationError> {
         if (value.states.is_empty() || usize(value.initial)>=value.states.len()) return Err(StateAnimationError::InvalidState);
         if (value.states.len()>usize(1024) || value.defaults.len()>usize(4096) || value.parameters.len()>usize(256)) return Err(StateAnimationError::Limit);
@@ -127,22 +177,12 @@ class StateAnimationPlayer {
     }
     auto definition() const -> const StateAnimationDefinition & {return program_.definition();}
     auto state(const Cursor &cursor) const -> const StateAnimationState & {return definition().states[usize(cursor.state)];}
-    auto period(const Cursor &cursor) const -> Scalar {const auto &s=state(cursor);return (s.clip.stop-s.clip.start)/s.speed;}
+    auto period(const Cursor &cursor) const -> Scalar {return program_.period(cursor.state);}
     auto position(const Cursor &cursor,Serial time) const -> Scalar {
-        auto duration=period(cursor);return duration>0 ? cursor.offset+Scalar(time>=cursor.started ? time-cursor.started : 0)/1e9/duration : 1;
+        return program_.position(cursor.state,Scalar(time>=cursor.started ? time-cursor.started : 0)/1e9,cursor.offset);
     }
     auto values_at(const Cursor &cursor,Serial time) const -> Result<Vec<Scalar>,StateAnimationError> {
-        const auto &s=state(cursor);const auto &clip=s.clip;
-        auto values=Vec<Scalar>::from(s.write_defaults ? definition().defaults.as_slice():cursor.inherited.as_slice());
-        auto p=position(cursor,time);
-        if (!finite(p)) return Err(StateAnimationError::InvalidValue);
-        if (s.loop && clip.stop>clip.start) p-=__builtin_floor(p);else p=__builtin_fmax(0,__builtin_fmin(1,p));
-        auto sample=clip.start+(clip.stop-clip.start)*p;
-        for (const auto &track:clip.tracks) {
-            auto value=track.curve.constant.is_some() ? *track.curve.constant : ScalarCurve{clip.start,clip.stop,1,track.curve.keys.as_slice()}.sample(sample-clip.start);
-            if (!finite(value)) return Err(StateAnimationError::InvalidValue);values[usize(track.channel)]=value;
-        }
-        return Ok(rstd::move(values));
+        return program_.sample_state(cursor.state,Scalar(time>=cursor.started ? time-cursor.started : 0)/1e9,cursor.offset,cursor.inherited.as_slice());
     }
     auto emit(StateAnimationEventKind kind,const Cursor &cursor,Serial time) -> Result<empty,StateAnimationError> {
         if (events_.len()>=usize(4096)) return Err(StateAnimationError::Limit);
