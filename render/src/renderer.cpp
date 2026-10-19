@@ -748,8 +748,8 @@ template <rstd::size_t N>
 auto ui_shader(const unsigned (&words)[N], vrento::ShaderType type) -> vk::Uni_ShaderSpv {
     auto result = Box<vk::ShaderSpv>::make();
     result->stage = type;
-    for (auto word : words)
-        result->spirv.push(unsigned(word));
+    result->spirv = vrento::ShaderCode::from(
+        slice<rstd::uint32_t>::from_raw_parts(words, usize(N)));
     return result;
 }
 auto UiAssets::initialize(vk::PipelinePreparationMode mode) -> Result<empty, Error> {
