@@ -147,6 +147,11 @@ class ButtonTintState {
         return Ok(rstd::move(owner));
     }
     auto target() const -> UiId { return target_; }
+    auto set_frame_interval(Serial value) -> Result<empty, UiError> {
+        if (!value) return Err(UiError::InvalidValue);
+        style_.frame_interval_ns = value;
+        wake(); return Ok(empty{});
+    }
     auto status() const -> ButtonTintStatus { return {current_, transitioning_, error_}; }
     void update(ButtonStatus value) {
         button_status_ = value;

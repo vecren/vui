@@ -55,6 +55,10 @@ class ButtonState {
         tint_ = Some(rstd::move(value).unwrap());
         return Ok(empty{});
     }
+    auto set_tint_frame_interval(Serial value) -> Result<empty, UiError> {
+        return tint_.is_some() ? tint_->get()->set_frame_interval(value)
+                              : Result<empty, UiError>(Err(UiError::InvalidValue));
+    }
     void clear_tint() { tint_ = None(); }
     auto tint_status() const -> Option<ButtonTintStatus> {
         return tint_.is_some() ? Some(tint_->get()->status()) : None<ButtonTintStatus>();
@@ -317,6 +321,12 @@ class Button {
         auto state = session.document().state<ButtonState>(id);
         return state ? state->set_tint(session, id, target, style)
                      : Result<empty, ControlError>(Err(ControlError{Some(UiError::InvalidId), {}}));
+    }
+    static auto set_tint_frame_interval(UiDocument &ui, UiId id, Serial value)
+        -> Result<empty, UiError> {
+        auto state = ui.state<ButtonState>(id);
+        return state ? state->set_tint_frame_interval(value)
+                     : Result<empty, UiError>(Err(UiError::InvalidId));
     }
     static auto clear_tint(UiDocument &ui, UiId id) -> Result<empty, UiError> {
         auto state = ui.state<ButtonState>(id);
