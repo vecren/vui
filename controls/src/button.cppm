@@ -1,6 +1,7 @@
 export module vui.controls:button;
 import vui;
 import :types;
+import :button_tint;
 using namespace rstd::prelude;
 export namespace vui {
 struct ButtonStyle {
@@ -13,14 +14,13 @@ struct ButtonStyle {
                radius >= 0;
     }
 };
-struct ButtonStatus {
-    bool pressed{}, focused{}, hovered{};
-    friend auto operator==(const ButtonStatus &, const ButtonStatus &) -> bool = default;
-};
 
 class ButtonState {
     ButtonStyle style_;
     ButtonOptions options_;
+    Color original_background_;
+    Scalar original_radius_{};
+    Option<rstd::rc::Rc<ButtonTintState>> tint_;
     Signal<void(EventContext &, const ClickEvent &)> clicked_;
     Signal<void(UiDocument &, UiId, const ButtonStatus &)> status_changed_;
     Option<PointerKey> pointer_;
@@ -40,7 +40,35 @@ class ButtonState {
 
   public:
     explicit ButtonState(ButtonStyle style, ButtonOptions options = {})
-        : style_(style), options_(options) {}
+        : ButtonState(style, options, Color{}, 0) {}
+    ButtonState(ButtonStyle style, ButtonOptions options, Color background, Scalar radius)
+        : style_(style), options_(options), original_background_(background), original_radius_(radius) {}
+    auto set_tint(UiSession &session, UiId id, UiId target, ButtonTintStyle style)
+        -> Result<empty, ControlError> {
+        if (tint_.is_some() && tint_->get()->target() == target) {
+            auto result = tint_->get()->configure(style);
+            return result.is_ok() ? Result<empty, ControlError>(Ok(empty{}))
+                                 : Result<empty, ControlError>(Err(ControlError{Some(result.unwrap_err()), {}}));
+        }
+        auto value = ButtonTintState::make(session, id, target, style, status());
+        if (value.is_err()) return Err(value.unwrap_err());
+        tint_ = Some(rstd::move(value).unwrap());
+        return Ok(empty{});
+    }
+    void clear_tint() { tint_ = None(); }
+    auto tint_status() const -> Option<ButtonTintStatus> {
+        return tint_.is_some() ? Some(tint_->get()->status()) : None<ButtonTintStatus>();
+    }
+    auto set_appearance(UiDocument &ui, UiId id, ButtonAppearance appearance) -> Result<empty, UiError> {
+        if (appearance != ButtonAppearance::Default && appearance != ButtonAppearance::Custom)
+            return Err(UiError::InvalidValue);
+        if (appearance == options_.appearance) return Ok(empty{});
+        auto color = appearance == ButtonAppearance::Custom ? original_background_
+            : status().pressed ? style_.pressed : focused_ ? style_.focused : style_.normal;
+        auto result = ui.set_background(id, color, appearance == ButtonAppearance::Custom ? original_radius_ : style_.radius);
+        if (result.is_ok()) options_.appearance = appearance;
+        return result;
+    }
     template <class F>
     auto on_clicked(BindingRegistry &registry, F callback) -> Result<Binding, SignalError> {
         return clicked_.connect(registry, rstd::move(callback));
@@ -60,7 +88,8 @@ class ButtonState {
         return status_changed_.bind(registry, rstd::move(receiver), rstd::move(callback));
     }
     auto status() const -> ButtonStatus {
-        return {key_.is_some() || (pointer_.is_some() && inside_), focused_, hovered_};
+        return {key_.is_some() || (pointer_.is_some() && inside_), focused_, hovered_,
+                key_.is_some() || pointer_.is_some()};
     }
     auto set_style(UiDocument &document, UiId id, ButtonStyle style) -> Result<empty, UiError> {
         if (!style.valid())
@@ -160,8 +189,10 @@ class ButtonState {
         }
         paint(context, event.current);
         auto current = status();
-        if (previous != current)
+        if (previous != current) {
+            if (tint_.is_some()) tint_->get()->update(current);
             status_changed_.emit(context.document(), event.current, current).unwrap();
+        }
         if (activate)
             clicked_.emit(context, ClickEvent{event.current, input}).unwrap();
     }
@@ -173,6 +204,8 @@ class Button {
                        ButtonOptions options = {}) -> Result<UiId, ControlError> {
         if (!appearance.valid())
             return Err(ControlError{Some(UiError::InvalidValue), {}});
+        auto original_background = style.background;
+        auto original_radius = style.radius;
         if (options.appearance == ButtonAppearance::Default) {
             style.background = appearance.normal;
             style.radius = appearance.radius;
@@ -183,7 +216,7 @@ class Button {
         if (created.is_err())
             return Err(ControlError{Some(created.unwrap_err()), {}});
         auto id = created.unwrap();
-        auto state = document.attach_state(id, ButtonState(appearance, options));
+        auto state = document.attach_state(id, ButtonState(appearance, options, original_background, original_radius));
         if (state.is_err()) {
             document.destroy(id);
             return Err(ControlError{Some(state.unwrap_err()), {}});
@@ -278,6 +311,27 @@ class Button {
         if (auto state = document.state<ButtonState>(id))
             return Some(state->status());
         return None();
+    }
+    static auto set_tint(UiSession &session, UiId id, UiId target, ButtonTintStyle style = {})
+        -> Result<empty, ControlError> {
+        auto state = session.document().state<ButtonState>(id);
+        return state ? state->set_tint(session, id, target, style)
+                     : Result<empty, ControlError>(Err(ControlError{Some(UiError::InvalidId), {}}));
+    }
+    static auto clear_tint(UiDocument &ui, UiId id) -> Result<empty, UiError> {
+        auto state = ui.state<ButtonState>(id);
+        if (!state) return Err(UiError::InvalidId);
+        state->clear_tint(); return Ok(empty{});
+    }
+    static auto tint_status(UiDocument &ui, UiId id) -> Option<ButtonTintStatus> {
+        auto state = ui.state<ButtonState>(id);
+        return state ? state->tint_status() : None<ButtonTintStatus>();
+    }
+    static auto set_appearance(UiDocument &ui, UiId id, ButtonAppearance appearance)
+        -> Result<empty, UiError> {
+        auto state = ui.state<ButtonState>(id);
+        return state ? state->set_appearance(ui, id, appearance)
+                     : Result<empty, UiError>(Err(UiError::InvalidId));
     }
     static auto set_style(UiDocument &document, UiId id, ButtonStyle style)
         -> Result<empty, UiError> {
