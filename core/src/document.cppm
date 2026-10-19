@@ -2093,6 +2093,19 @@ class UiDocument {
         }
         return Ok(empty{});
     }
+    auto set_presentation(const PresentationBatch &batch) -> Result<empty, UiError> {
+        if (layout_active_ || painting_) return Err(UiError::Routing);
+        if (batch.writes().len()>usize(256)) return Err(UiError::Limit);
+        for (usize i{};i<batch.writes().len();++i) {
+            const auto &write=batch.writes()[i];auto node=resolve(write.key.target);
+            if (!node) return Err(UiError::InvalidId);
+            if (!valid_property(write,*node)) return Err(UiError::InvalidValue);
+            if (property_occupied(*node,write.key.property)) return Err(UiError::PropertyOwned);
+            for (usize j{};j<i;++j) if (batch.writes()[j].key==write.key) return Err(UiError::InvalidValue);
+        }
+        for (const auto &write:batch.writes()) apply_property(*resolve(write.key.target),write);
+        return Ok(empty{});
+    }
     auto release_presentation(PresentationLease &lease,
                               LeaseEndPolicy policy = LeaseEndPolicy::CommitCurrent)
         -> Result<empty, UiError> {

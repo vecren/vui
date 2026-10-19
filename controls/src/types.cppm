@@ -14,6 +14,13 @@ struct ButtonStatus {
     bool pressed{}, focused{}, hovered{}, held{};
     friend auto operator==(const ButtonStatus &, const ButtonStatus &) -> bool = default;
 };
+enum class ButtonVisualState { Normal, Hovered, Pressed, Focused, Disabled };
+inline auto button_visual_state(ButtonStatus status, bool enabled, bool retain_press_outside=false) -> ButtonVisualState {
+    return !enabled ? ButtonVisualState::Disabled
+        : (retain_press_outside ? status.held : status.pressed) ? ButtonVisualState::Pressed
+        : status.focused ? ButtonVisualState::Focused
+        : status.hovered ? ButtonVisualState::Hovered : ButtonVisualState::Normal;
+}
 struct ButtonTintStyle {
     Color normal{1, 1, 1, 1}, hovered{1, 1, 1, 1}, pressed{1, 1, 1, 1},
         focused{1, 1, 1, 1}, disabled{.5, .5, .5, .5};

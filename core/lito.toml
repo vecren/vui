@@ -9,6 +9,9 @@ module = "vui"
 archive = "vui"
 sources = [
     "src/animation.cppm",
+    "src/curves.cppm",
+    "src/state_animation.cppm",
+    "src/state_animation_motion.cppm",
     "src/binding/scope.cppm",
     "src/binding/signal.cppm",
     "src/composition.cppm",

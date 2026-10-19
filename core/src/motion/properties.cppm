@@ -35,6 +35,7 @@ class PresentationBatch {
 
   public:
     auto writes() const -> slice<PropertyWrite> { return writes_.as_slice(); }
+    void append(PropertyWrite value) { writes_.push(rstd::move(value)); }
     void transform(UiId id, Transform value) {
         writes_.push({{id, PresentationProperty::Transform}, AnimationValue::Matrix(value)});
     }

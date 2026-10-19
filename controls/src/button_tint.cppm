@@ -24,10 +24,11 @@ class ButtonTintState {
         return value.is_some() ? *value : 0;
     }
     auto desired() const -> Color {
-        auto value = !source_.enabled ? style_.disabled
-            : (style_.retain_press_outside ? button_status_.held : button_status_.pressed) ? style_.pressed
-            : button_status_.focused ? style_.focused
-            : button_status_.hovered ? style_.hovered : style_.normal;
+        auto state = button_visual_state(button_status_, source_.enabled, style_.retain_press_outside);
+        auto value = state == ButtonVisualState::Disabled ? style_.disabled
+            : state == ButtonVisualState::Pressed ? style_.pressed
+            : state == ButtonVisualState::Focused ? style_.focused
+            : state == ButtonVisualState::Hovered ? style_.hovered : style_.normal;
         return base_.modulate(value);
     }
     auto value_at(Serial time) const -> Color {
