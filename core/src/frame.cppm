@@ -142,7 +142,7 @@ class FramePlanner {
             } else if (op.is_Rect()) {
                 const auto &value = op.as_Rect();
                 output_.passes[usize(target)].draws.push(FrameDraw::Rectangle(
-                    value.rect, value.color.modulate(node->properties.content_tint), value.radius, state.transform, state.clip, id));
+                    value.rect, (value.color_source == DrawColorSource::Current ? node->properties.paint_color : value.color).modulate(node->properties.content_tint), value.radius, state.transform, state.clip, id));
             } else if (op.is_Text()) {
                 const auto &value = op.as_Text();
                 output_.passes[usize(target)].draws.push(
@@ -152,7 +152,7 @@ class FramePlanner {
                 const auto &value = op.as_Image();
                 output_.passes[usize(target)].draws.push(FrameDraw::Image(
                     ImageData(value.data), value.destination, value.source, value.sampling,
-                    value.tint.modulate(node->properties.content_tint), value.edges, value.clamp_source, state.transform, state.clip, id,
+                    (value.color_source == DrawColorSource::Current ? node->properties.paint_color : value.tint).modulate(node->properties.content_tint), value.edges, value.clamp_source, state.transform, state.clip, id,
                     value.blend, value.radial));
             } else if (op.is_External()) {
                 const auto &value = op.as_External();

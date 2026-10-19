@@ -707,6 +707,9 @@ class UiDocument {
         case PresentationProperty::ContentTint:
             result.value = AnimationValue::Tint(style.content_tint);
             break;
+        case PresentationProperty::PaintColor:
+            result.value = AnimationValue::Tint(style.paint_color);
+            break;
         case PresentationProperty::Count:
             break;
         case PresentationProperty::Clip:
@@ -725,7 +728,7 @@ class UiDocument {
         if (write.automatic_size)
             return property == PresentationProperty::Width ||
                    property == PresentationProperty::Height;
-        if (property == PresentationProperty::ContentTint)
+        if (property == PresentationProperty::ContentTint || property == PresentationProperty::PaintColor)
             return write.value.is_Tint() && write.value.as_Tint().value.valid();
         if (property == PresentationProperty::Clip)
             return write.clip.valid() && node.viewport.is_none();
@@ -757,6 +760,9 @@ class UiDocument {
         case PresentationProperty::ContentTint:
             node.style.content_tint = write.value.as_Tint().value;
             break;
+        case PresentationProperty::PaintColor:
+            node.style.paint_color = write.value.as_Tint().value;
+            break;
         case PresentationProperty::Count:
             break;
         case PresentationProperty::Clip:
@@ -775,7 +781,7 @@ class UiDocument {
             node.paint_dirty = true;
         if (before.transform != after.transform || before.opacity != after.opacity ||
             before.background != after.background || before.clip != after.clip ||
-            before.layout != after.layout || before.content_tint != after.content_tint || offset != next_offset)
+            before.layout != after.layout || before.content_tint != after.content_tint || before.paint_color != after.paint_color || offset != next_offset)
             changed(before.layout != after.layout, Some(UiId(write.key.target)));
     }
     auto animation_index(AnimationId id) const -> Option<usize> {
@@ -1501,7 +1507,7 @@ class UiDocument {
                              ? placement * style.transform
                              : placement * node.layout_mapping * style.transform;
         RenderProperties properties{transform,     content_bounds, clip,
-                                    style.opacity, style.visible,  node.layout_clip, style.content_tint};
+                                    style.opacity, style.visible,  node.layout_clip, style.content_tint, style.paint_color};
         if (!properties.valid())
             return Err(UiError::InvalidValue);
         UiVisual visual{
@@ -2859,6 +2865,22 @@ class UiDocument {
             return Err(UiError::InvalidValue);
         if (node->style.content_tint != value) {
             node->style.content_tint = value;
+            changed(false, Some(id));
+        }
+        return Ok(empty{});
+    }
+    auto set_paint_color(UiId id, Color value) -> Result<empty, UiError> {
+        if (layout_active_ || painting_)
+            return Err(UiError::Routing);
+        auto node = resolve(id);
+        if (!node)
+            return Err(UiError::InvalidId);
+        if (property_occupied(*node, PresentationProperty::PaintColor))
+            return Err(UiError::PropertyOwned);
+        if (!value.valid())
+            return Err(UiError::InvalidValue);
+        if (node->style.paint_color != value) {
+            node->style.paint_color = value;
             changed(false, Some(id));
         }
         return Ok(empty{});

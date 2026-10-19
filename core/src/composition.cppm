@@ -28,8 +28,9 @@ struct RenderProperties {
     bool visible{true};
     Clip layout_clip;
     Color content_tint{1, 1, 1, 1};
+    Color paint_color{1, 1, 1, 1};
     auto valid() const -> bool {
-        return transform.valid() && bounds.valid() && clip.valid() && layout_clip.valid() && content_tint.valid() &&
+        return transform.valid() && bounds.valid() && clip.valid() && layout_clip.valid() && content_tint.valid() && paint_color.valid() &&
                finite(opacity) && opacity >= 0 && opacity <= 1;
     }
     friend auto operator==(const RenderProperties &, const RenderProperties &) -> bool = default;

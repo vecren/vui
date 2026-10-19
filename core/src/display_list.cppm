@@ -10,13 +10,18 @@ import :content;
 using namespace rstd::prelude;
 
 export namespace vui {
+enum class DrawColorSource { Fixed, Current };
+inline auto valid(DrawColorSource source) -> bool {
+    return source == DrawColorSource::Fixed || source == DrawColorSource::Current;
+}
 class DrawOp {
     RSTD_ENUM(DrawOp, (Save), (Restore), (Transform, (vui::Transform value;)),
-              (Clip, (vui::Clip value;)), (Rect, (vui::Rect rect; Color color; Scalar radius;)),
+              (Clip, (vui::Clip value;)), (Rect, (vui::Rect rect; Color color; Scalar radius; DrawColorSource color_source{DrawColorSource::Fixed};)),
               (Text, (TextLayout layout; Point origin; Color color; TextEffects effects{}; TextColors colors{};)),
               (Image, (ImageData data; Rect destination; Rect source; ImageSampling sampling;
                        Color tint; ImageEdges edges; bool clamp_source;
-                       ImageBlend blend{ImageBlend::SourceOver}; ImageRadialFill radial{};)),
+                       ImageBlend blend{ImageBlend::SourceOver}; ImageRadialFill radial{};
+                       DrawColorSource color_source{DrawColorSource::Fixed};)),
               (External, (ContentSource source; Rect destination; ImageFit fit;
                           ImageSampling sampling; Color placeholder;)),
               (Children))
@@ -157,15 +162,15 @@ class DisplayListRecorder {
             base_modified_ = true;
         operations_.push(DrawOp::Clip(value));
     }
-    void rect(Rect value, Color color, Scalar radius = 0) {
+    void rect(Rect value, Color color, Scalar radius = 0, DrawColorSource color_source = DrawColorSource::Fixed) {
         if (!active())
             return;
-        if (!value.valid() || !color.valid() || !finite(radius) || radius < 0) {
+        if (!value.valid() || !color.valid() || !valid(color_source) || !finite(radius) || radius < 0) {
             reject(RecordingError::InvalidValue);
             return;
         }
         include(value);
-        operations_.push(DrawOp::Rect(value, color, radius));
+        operations_.push(DrawOp::Rect(value, color, radius, color_source));
     }
     void text(TextLayout layout, Point origin, Color color, TextEffects effects = {}, TextColors colors = {}, TextDecorations decorations = {}, TextInlineImages inline_images = {}) {
         if (!active())
@@ -199,10 +204,11 @@ class DisplayListRecorder {
     void image(ImageData data, Rect destination, Rect source,
                ImageSampling sampling = ImageSampling::Linear, Color tint = {1, 1, 1, 1},
                ImageEdges edges = ImageEdges::All, bool clamp_source = false,
-               ImageBlend blend = ImageBlend::SourceOver, ImageRadialFill radial = {}) {
+               ImageBlend blend = ImageBlend::SourceOver, ImageRadialFill radial = {},
+               DrawColorSource color_source = DrawColorSource::Fixed) {
         if (!active())
             return;
-        if (!radial.valid() || !valid(blend) ||
+        if (!radial.valid() || !valid(blend) || !valid(color_source) ||
             static_cast<unsigned>(edges) > 15 || !tint.valid() || !destination.valid() ||
             !source.valid() || source.x < 0 || source.y < 0 ||
             source.x + source.width > data.width() || source.y + source.height > data.height() ||
@@ -213,14 +219,15 @@ class DisplayListRecorder {
         if (radial.amount == 0) return;
         include(destination);
         operations_.push(DrawOp::Image(rstd::move(data), destination, source, sampling, tint, edges,
-                                       clamp_source, blend, radial));
+                                       clamp_source, blend, radial, color_source));
     }
     void nine_patch(const ImageRegion &region, const NinePatchSpec &spec, Rect destination,
                     Color tint = {1, 1, 1, 1}, ImageSampling sampling = ImageSampling::Linear,
-                    ImageBlend blend = ImageBlend::SourceOver) {
+                    ImageBlend blend = ImageBlend::SourceOver,
+                    DrawColorSource color_source = DrawColorSource::Fixed) {
         if (!active())
             return;
-        if (!valid(blend)) {
+        if (!valid(blend) || !valid(color_source)) {
             reject(RecordingError::InvalidValue);
             return;
         }
@@ -231,7 +238,7 @@ class DisplayListRecorder {
         }
         for (const auto &piece : pieces.unwrap())
             image(ImageData(region.image), piece.destination, piece.source, sampling, tint,
-                  piece.edges, true, blend);
+                  piece.edges, true, blend, {}, color_source);
     }
     void external(ContentSource source, Rect destination, ImageFit fit = ImageFit::Contain,
                   ImageSampling sampling = ImageSampling::Linear,
