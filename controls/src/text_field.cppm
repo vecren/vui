@@ -17,9 +17,10 @@ struct TextFieldStyle {
     Color selection{.075, .2, .4, .5}, caret{1, 1, 1, 1}, composition{1, 1, 1, 1};
     Scalar caret_width{1},caret_blink_rate{};
     bool caret_with_selection{true};
+    TextEffects effects;
     auto valid() const -> bool {
         return format.valid() && format.wrap == TextWrap::None && text.valid() && placeholder.valid() &&
-            selection.valid() && caret.valid() && composition.valid() && finite(caret_width) && caret_width>0 &&
+            selection.valid() && caret.valid() && composition.valid() && effects.valid() && finite(caret_width) && caret_width>0 &&
             finite(caret_blink_rate) && caret_blink_rate>=0 && (caret_blink_rate==0 ||
                 (.5e9/caret_blink_rate>=1 && .5e9/caret_blink_rate<=Scalar(~Serial{} / 2)));
     }
@@ -43,6 +44,7 @@ class TextFieldState {
     Color selection_color_, caret_color_, composition_color_;
     Scalar caret_width_,caret_blink_rate_;
     bool caret_with_selection_;
+    TextAlignment alignment_;
     TextFieldOptions options_;
     Option<TextBoundaries> original_;
     UiId label_, placeholder_;
@@ -121,7 +123,7 @@ class TextFieldState {
     TextFieldState(TextEdit edit, TextFieldStyle appearance, UiId label, UiId placeholder,TextFieldOptions options={})
         : edit_(rstd::move(edit)), selection_color_(appearance.selection), caret_color_(appearance.caret),
           composition_color_(appearance.composition),caret_width_(appearance.caret_width),caret_blink_rate_(appearance.caret_blink_rate),
-          caret_with_selection_(appearance.caret_with_selection),options_(options),label_(label), placeholder_(placeholder), displayed_(edit_.state().unwrap()) {}
+          caret_with_selection_(appearance.caret_with_selection),alignment_(appearance.format.alignment),options_(options),label_(label), placeholder_(placeholder), displayed_(edit_.state().unwrap()) {}
     auto model() -> TextEdit & { return edit_; }
     auto last_error() const -> Option<TextFieldError> { return error_; }
     auto metrics() const -> TextFieldMetrics { return {caret_, offset_, placement_.is_some() ? placement_->layout.id() : 0, focused_,caret_visible()}; }
@@ -156,10 +158,10 @@ class TextFieldState {
         if (result.is_err()) return Err(TextFieldError{.ui = result.unwrap_err().ui, .state = result.unwrap_err().state});
         binding_ = Some(rstd::move(result).unwrap()); return Ok(empty{});
     }
-    auto measure(LayoutMeasureContext &context, LayoutConstraints) -> Result<Size, UiError> {
+    auto measure(LayoutMeasureContext &context, LayoutConstraints constraints) -> Result<Size, UiError> {
         Size desired;
         for (usize i{}; i < context.child_count(); ++i) {
-            auto result = context.measure_child(i, {});
+            auto result = context.measure_child(i,{alignment_==TextAlignment::Natural ? None<Scalar>() : constraints.max_width,None<Scalar>()});
             if (result.is_err()) return Err(result.unwrap_err());
             desired.width = rstd::cmp::max(desired.width, result->width);
             desired.height = rstd::cmp::max(desired.height, result->height);
@@ -177,7 +179,9 @@ class TextFieldState {
         auto available = rstd::cmp::max(Scalar(0), size.width - caret_width_);
         if (x < offset_) offset_ = x;
         if (x > offset_ + available) offset_ = x - available;
-        offset_ = rstd::cmp::max(Scalar(0), rstd::cmp::min(offset_, rstd::cmp::max(Scalar(0), desired.width - available)));
+        auto logical=placement_->layout.logical_bounds();auto lower=rstd::cmp::min(Scalar(0),logical.x+placement_->origin.x);
+        auto upper=rstd::cmp::max(lower,logical.x+logical.width+placement_->origin.x-available);
+        offset_=rstd::cmp::max(lower,rstd::cmp::min(offset_,upper));
         auto y = rstd::cmp::max(Scalar(0), (size.height - desired.height) / 2);
         auto padding = context.style().padding;
         origin_ = {padding - offset_ + placement_->origin.x, padding + y + placement_->origin.y};
@@ -311,6 +315,8 @@ class TextField {
         for (auto node : text_nodes) {
             auto result = ui.set_text_format(node, appearance.format);
             if (result.is_err()) return fail({.ui = Some(result.unwrap_err())});
+            result=ui.set_text_effects(node,appearance.effects);
+            if (result.is_err()) return fail({.ui=Some(result.unwrap_err())});
         }
         ui.set_text_color(label.unwrap(), appearance.text).unwrap(); ui.set_text_color(hint.unwrap(), appearance.placeholder).unwrap();
         ui.set_text(hint.unwrap(), placeholder).unwrap();
