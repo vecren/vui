@@ -15,20 +15,36 @@ struct TextFieldStyle {
     TextFormat format{.wrap = TextWrap::None};
     Color text{1, 1, 1, 1}, placeholder{.6, .6, .6, 1};
     Color selection{.075, .2, .4, .5}, caret{1, 1, 1, 1}, composition{1, 1, 1, 1};
+    Scalar caret_width{1},caret_blink_rate{};
+    bool caret_with_selection{true};
     auto valid() const -> bool {
         return format.valid() && format.wrap == TextWrap::None && text.valid() && placeholder.valid() &&
-            selection.valid() && caret.valid() && composition.valid();
+            selection.valid() && caret.valid() && composition.valid() && finite(caret_width) && caret_width>0 &&
+            finite(caret_blink_rate) && caret_blink_rate>=0 && (caret_blink_rate==0 ||
+                (.5e9/caret_blink_rate>=1 && .5e9/caret_blink_rate<=Scalar(~Serial{} / 2)));
     }
 };
+struct TextFieldOptions {bool select_all_on_focus{},restore_text_on_escape{},blur_on_submit{},blur_on_cancel{};};
 struct TextFieldMetrics {
     Rect caret;
     Scalar offset{};
     Serial layout{};
-    bool focused{};
+    bool focused{},caret_visible{};
 };
 class TextFieldState {
+    struct Blink {
+        UiSession &session;UiId id;
+        auto sample(MotionContext &context,FrameTiming) -> Result<MotionStatus,MotionError> {
+            auto field=session.document().state<TextFieldState>(id);
+            return field ? field->sample_blink(id,context) : Result<MotionStatus,MotionError>(Ok(MotionStatus::Finished));
+        }
+    };
     TextEdit edit_;
     Color selection_color_, caret_color_, composition_color_;
+    Scalar caret_width_,caret_blink_rate_;
+    bool caret_with_selection_;
+    TextFieldOptions options_;
+    Option<TextBoundaries> original_;
     UiId label_, placeholder_;
     TextEditState displayed_;
     Option<TextPlacement> placement_;
@@ -36,10 +52,42 @@ class TextFieldState {
     Rect caret_, selection_, underline_;
     Scalar offset_{};
     bool focused_{}, native_commit_{}, reset_requested_{};
+    bool caret_visible_{true};
+    UiSession *session_{};
+    UiId id_;
+    Option<Serial> blink_started_;
+    rstd::rc::Rc<Blink> blink_;
+    MotionRegistration motion_;
     Option<PointerKey> pointer_;
     Option<TextFieldError> error_;
     Signal<void(EventContext &, const TextEditState &)> submitted_, cancelled_;
     Option<StateBinding<TextEditState>> binding_;
+
+    auto caret_visible() const -> bool {
+        return focused_ && caret_visible_ && (caret_with_selection_ || displayed_.composing || displayed_.selection.anchor==displayed_.selection.cursor);
+    }
+    void reset_blink() {
+        if (!caret_visible_ && focused_ && session_) session_->document().invalidate_paint(id_).unwrap();
+        caret_visible_=true;blink_started_=session_ ? session_->document().animation_sample_time() : None<Serial>();
+        if (motion_.binding.alive()) session_->motion().request(motion_.id).unwrap();
+    }
+    void finish_focus(bool blur) {
+        if (!blur || session_->input().focused()!=Some(id_)) return;
+        auto result=session_->input().request_focus(None<UiId>());
+        if (result.is_err()) error_=Some(TextFieldError{.input=Some(result.unwrap_err())});
+    }
+    auto sample_blink(UiId id,MotionContext &context) -> Result<MotionStatus,MotionError> {
+        if (!focused_ || session_->input().focused()!=Some(id) || caret_blink_rate_==0 ||
+            (!caret_with_selection_ && !displayed_.composing && displayed_.selection.anchor!=displayed_.selection.cursor)) return Ok(MotionStatus::Idle);
+        auto now=context.now_ns();if (blink_started_.is_none() || now<*blink_started_) blink_started_=Some(Serial(now));
+        auto half=Serial(.5e9/caret_blink_rate_);auto elapsed=now-*blink_started_;auto visible=(elapsed/half)%2==0;
+        if (visible!=caret_visible_) {
+            caret_visible_=visible;if (session_->document().invalidate_paint(id).is_err()) return Err(MotionError::Unavailable);
+        }
+        auto wait=half-elapsed%half;
+        if (wait>~Serial{}-now) return Ok(MotionStatus::Idle);
+        context.request_tick(now+wait).unwrap();return Ok(MotionStatus::Running);
+    }
 
     void consume(EventContext &context) { context.prevent_default(); context.stop_propagation(); }
     auto accept(Result<bool, TextEditError> result) -> bool {
@@ -70,12 +118,13 @@ class TextFieldState {
     }
 
   public:
-    TextFieldState(TextEdit edit, TextFieldStyle appearance, UiId label, UiId placeholder)
+    TextFieldState(TextEdit edit, TextFieldStyle appearance, UiId label, UiId placeholder,TextFieldOptions options={})
         : edit_(rstd::move(edit)), selection_color_(appearance.selection), caret_color_(appearance.caret),
-          composition_color_(appearance.composition), label_(label), placeholder_(placeholder), displayed_(edit_.state().unwrap()) {}
+          composition_color_(appearance.composition),caret_width_(appearance.caret_width),caret_blink_rate_(appearance.caret_blink_rate),
+          caret_with_selection_(appearance.caret_with_selection),options_(options),label_(label), placeholder_(placeholder), displayed_(edit_.state().unwrap()) {}
     auto model() -> TextEdit & { return edit_; }
     auto last_error() const -> Option<TextFieldError> { return error_; }
-    auto metrics() const -> TextFieldMetrics { return {caret_, offset_, placement_.is_some() ? placement_->layout.id() : 0, focused_}; }
+    auto metrics() const -> TextFieldMetrics { return {caret_, offset_, placement_.is_some() ? placement_->layout.id() : 0, focused_,caret_visible()}; }
     template <class F> auto on_submitted(BindingRegistry &registry, F callback) -> Result<Binding, SignalError> {
         return submitted_.connect(registry, rstd::move(callback));
     }
@@ -83,6 +132,11 @@ class TextFieldState {
         return cancelled_.connect(registry, rstd::move(callback));
     }
     auto bind(UiSession &session, UiId id) -> Result<empty, TextFieldError> {
+        session_=&session;id_=id;
+        if (caret_blink_rate_>0) {
+            blink_=rstd::rc::make_rc<Blink>(session,id);auto bound=session.motion().bind(blink_.downgrade());
+            if (bound.is_err()) return Err(TextFieldError{.ui=Some(UiError::Limit)});motion_=rstd::move(bound).unwrap();
+        }
         auto router = &session.input();
         auto result = session.state_bindings().watch(edit_.value(), [id, router](StateUpdateContext &context, const TextEditState &value) -> Result<empty, UiError> {
             auto &ui = context.document(); auto field = ui.state<TextFieldState>(id);
@@ -92,7 +146,7 @@ class TextFieldState {
                 if (reset.is_err()) field->error_ = Some(TextFieldError{.input = Some(reset.unwrap_err())});
             }
             field->native_commit_ = field->reset_requested_ = false;
-            field->displayed_ = value;
+            field->displayed_ = value;field->reset_blink();
             auto written = ui.set_text(field->label_, value.display);
             if (written.is_err()) return written;
             auto visible = ui.set_visible(field->placeholder_, value.display.text()->is_empty());
@@ -120,14 +174,14 @@ class TextFieldState {
         if (caret.is_err()) return Err(UiError::TextLayoutFailed);
         auto desired = context.desired_child(usize()).unwrap();
         auto x = caret->bounds.x + placement_->origin.x;
-        auto available = rstd::cmp::max(Scalar(0), size.width - 1);
+        auto available = rstd::cmp::max(Scalar(0), size.width - caret_width_);
         if (x < offset_) offset_ = x;
         if (x > offset_ + available) offset_ = x - available;
         offset_ = rstd::cmp::max(Scalar(0), rstd::cmp::min(offset_, rstd::cmp::max(Scalar(0), desired.width - available)));
         auto y = rstd::cmp::max(Scalar(0), (size.height - desired.height) / 2);
         auto padding = context.style().padding;
         origin_ = {padding - offset_ + placement_->origin.x, padding + y + placement_->origin.y};
-        caret_ = {origin_.x + caret->bounds.x, origin_.y + caret->bounds.y, 1, caret->bounds.height};
+        caret_ = {origin_.x + caret->bounds.x, origin_.y + caret->bounds.y, caret_width_, caret->bounds.height};
         selection_ = displayed_.composing ? Rect{} : range_rect(displayed_.selection.range());
         underline_ = displayed_.composing ? range_rect(displayed_.composition) : Rect{};
         if (displayed_.composing && displayed_.preedit_selection.is_some() && displayed_.preedit_selection->end.is_some())
@@ -155,14 +209,18 @@ class TextFieldState {
         context.children();
         if (focused_ && underline_.width > 0)
             context.rect({underline_.x, underline_.y + underline_.height - 1, underline_.width, 1}, composition_color_);
-        if (focused_) context.rect(caret_, caret_color_);
+        if (caret_visible()) context.rect(caret_, caret_color_);
         return Ok(empty{});
     }
     void handle(EventContext &context, const RoutedEvent &event) {
         const auto &input = event.input;
         if (input.type == EventType::FocusGained || input.type == EventType::FocusLost) {
             focused_ = input.type == EventType::FocusGained;
-            if (!focused_) { accept(edit_.cancel_composition()); pointer_ = None(); }
+            if (focused_) {
+                original_=Some(edit_.state().unwrap().text);
+                if (options_.select_all_on_focus) accept(edit_.select_all());
+            } else { accept(edit_.cancel_composition()); pointer_ = None();original_=None(); }
+            reset_blink();
             context.document().invalidate_paint(event.current).unwrap(); return;
         }
         if (input.type == EventType::TextInputCancelled) { accept(edit_.cancel_composition()); return; }
@@ -175,9 +233,11 @@ class TextFieldState {
         PointerKey pointer{input.device, input.pointer};
         if (input.type == EventType::PointerDown && (input.pointer_kind == PointerKind::Touch || input.button == PointerButton::Primary)) {
             if (pointer_.is_some() || context.capture_pointer().is_err()) return;
+            auto select_all=options_.select_all_on_focus && !focused_;
             pointer_ = Some(pointer); context.focus();
-            if (auto at = hit(event.local); at.is_some() && accept(edit_.select({input.modifiers.shift ? value.selection.anchor : *at, *at})))
+            if (auto at = hit(event.local); !select_all && at.is_some() && accept(edit_.select({input.modifiers.shift ? value.selection.anchor : *at, *at})))
                 reset_native(context, value.composing);
+            reset_blink();
             consume(context); return;
         }
         if (input.type == EventType::PointerMove && pointer_ == Some(pointer)) {
@@ -217,19 +277,25 @@ class TextFieldState {
         else if (input.key == Key::Home || input.key == Key::End) changed = accept(edit_.move(input.key == Key::Home ? TextEditMove::Start : TextEditMove::End, input.modifiers.shift));
         else if (input.key == Key::Backspace) changed = accept(edit_.erase_backwards());
         else if (input.key == Key::Delete) changed = accept(edit_.erase_forwards());
-        else if (input.key == Key::Enter) { if (!value.composing && !input.repeat) submitted_.emit(context, value).unwrap(); }
+        else if (input.key == Key::Enter) {
+            if (!value.composing && !input.repeat) {submitted_.emit(context,value).unwrap();finish_focus(options_.blur_on_submit);}
+        }
         else if (input.key == Key::Escape) {
             if (value.composing) changed = accept(edit_.cancel_composition());
-            else if (!input.repeat) cancelled_.emit(context, value).unwrap();
+            else if (!input.repeat) {
+                if (options_.restore_text_on_escape && original_.is_some()) changed=accept(edit_.set_text(original_->text()));
+                cancelled_.emit(context, edit_.state().unwrap()).unwrap();
+                finish_focus(options_.blur_on_cancel);
+            }
         } else if (command || (input.key != Key::Unknown && input.key != Key::Space && (input.key < Key::A || input.key > Key::Z))) return;
-        if (changed) reset_native(context, value.composing);
+        if (changed) {reset_native(context,value.composing);reset_blink();}
         consume(context);
     }
 };
 class TextField {
   public:
     static auto create(UiSession &session, NodeStyle style, ref<str> text = ""_str,
-        TextFieldStyle appearance = {}, TextEditOptions options = {}, ref<str> placeholder = ""_str) -> Result<UiId, TextFieldError> {
+        TextFieldStyle appearance = {}, TextEditOptions options = {}, ref<str> placeholder = ""_str,TextFieldOptions behavior={}) -> Result<UiId, TextFieldError> {
         if (!appearance.valid() || !options.single_line) return Err(TextFieldError{.ui = Some(UiError::InvalidValue)});
         auto model = TextEdit::create(text, options);
         if (model.is_err()) return Err(TextFieldError{.edit = Some(model.unwrap_err())});
@@ -248,14 +314,14 @@ class TextField {
         }
         ui.set_text_color(label.unwrap(), appearance.text).unwrap(); ui.set_text_color(hint.unwrap(), appearance.placeholder).unwrap();
         ui.set_text(hint.unwrap(), placeholder).unwrap();
-        auto state = ui.attach_state(id, TextFieldState(rstd::move(model).unwrap(), appearance, label.unwrap(), hint.unwrap()));
+        auto state = ui.attach_state(id, TextFieldState(rstd::move(model).unwrap(), appearance, label.unwrap(), hint.unwrap(),behavior));
         if (state.is_err()) return fail({.ui = Some(state.unwrap_err())});
         auto layout = ui.attach_layout<TextFieldState>(id);
         if (layout.is_err()) return fail({.ui = Some(layout.unwrap_err())});
         auto paint = ui.attach_paint<TextFieldState>(id);
         if (paint.is_err()) return fail({.ui = Some(paint.unwrap_err())});
-        auto behavior = session.input().attach_behavior<TextFieldState>(id);
-        if (behavior.is_err()) return fail({.input = Some(behavior.unwrap_err())});
+        auto attached_behavior = session.input().attach_behavior<TextFieldState>(id);
+        if (attached_behavior.is_err()) return fail({.input = Some(attached_behavior.unwrap_err())});
         auto bound = ui.state<TextFieldState>(id)->bind(session, id);
         if (bound.is_err()) return fail(bound.unwrap_err());
         return Ok(id);
