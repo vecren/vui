@@ -10,6 +10,11 @@ struct ConnectionId {
     Serial owner{}, value{};
     friend auto operator==(const ConnectionId &, const ConnectionId &) -> bool = default;
 };
+struct InputAvailability {
+    bool mounted{}, visible{}, enabled{}, window_focused{}, pointer{};
+    Serial mount_generation{};
+    auto operator==(const InputAvailability &) const -> bool = default;
+};
 class EventRouter;
 class EventContext;
 struct Behavior {
@@ -126,13 +131,14 @@ class EventRouter {
     Serial owner_{new_session()}, next_handler_{1};
     Vec<Box<Handler>> handlers_;
     Vec<Box<BehaviorEntry>> behaviors_;
-    struct PointerObserver {
+    template<class T> struct AvailabilityObserver {
         UiId target;
         BindingGuard guard;
-        bool available{};
-        Box<rstd::dyn<rstd::FnMut<void(bool)>>> changed;
+        T available{};
+        Box<rstd::dyn<rstd::FnMut<void(const T &)>>> changed;
     };
-    Vec<PointerObserver> pointer_observers_;
+    Vec<AvailabilityObserver<bool>> pointer_observers_;
+    Vec<AvailabilityObserver<InputAvailability>> input_observers_;
     bool availability_dirty_{};
     struct NodeRoutes {
         Vec<usize> behaviors, handlers;
@@ -601,16 +607,20 @@ class EventRouter {
         scope_ = Some(document_.acquire_route().unwrap());
         failure_ = None();
     }
+    void dispatch_availability(auto &observers,auto read) {
+        for (auto &observer:observers) {
+            if (!observer.guard.alive()) continue;
+            auto available=read(observer.target);
+            if (available!=observer.available) {observer.available=available;observer.changed->operator()(available);}
+            if (!document_.valid(observer.target)) observer.guard.disconnect();
+        }
+        observers.retain([](const auto &observer){return observer.guard.alive();});
+    }
     auto end() -> Result<empty, InputError> {
         if (availability_dirty_) {
             availability_dirty_=false;
-            for (auto &observer:pointer_observers_) {
-                if (!observer.guard.alive()) continue;
-                auto available=pointer_available(observer.target);
-                if (available!=observer.available) {observer.available=available;observer.changed->operator()(available);}
-                if (!document_.valid(observer.target)) observer.guard.disconnect();
-            }
-            pointer_observers_.retain([](const auto &observer){return observer.guard.alive();});
+            dispatch_availability(pointer_observers_,[this](UiId id){return pointer_available(id);});
+            dispatch_availability(input_observers_,[this](UiId id){return input_availability(id);});
         }
         drain();
         refresh_text_input();
@@ -899,6 +909,29 @@ class EventRouter {
         }
         return false;
     }
+    auto input_availability(UiId id) -> InputAvailability {
+        auto mount=document_.mount_state(id);if (mount.is_err()) return {};
+        InputAvailability result{mount->mounted,true,true,window_focused_,pointer_available(id),mount->generation};
+        auto cursor=Some(id);
+        for (unsigned depth{};cursor.is_some() && depth<256;++depth) {
+            auto style=document_.resolved_style(*cursor);if (style.is_err()) return {};
+            result.visible&=style->visible;result.enabled&=style->enabled;
+            auto relation=document_.parent_relation(*cursor);if (relation.is_err()) return {};
+            if (relation->is_none()) return result;
+            cursor=Some(UiId((**relation).parent));
+        }
+        return {};
+    }
+    template <class F> auto on_input_availability_changed(UiId target,F callback) -> Result<Binding,InputError> {
+        if (closed_) return Err(InputError::Unavailable);
+        if (busy_ || document_.routing()) return Err(InputError::Reentrant);
+        if (!document_.valid(target)) return Err(InputError::InvalidId);
+        input_observers_.retain([](const auto &observer){return observer.guard.alive();});
+        if (input_observers_.len()>=usize(65536)) return Err(InputError::Limit);
+        auto binding=document_.bindings().make();
+        input_observers_.push({target,binding.guard(),input_availability(target),Box<rstd::dyn<rstd::FnMut<void(const InputAvailability &)>>>::make(rstd::move(callback))});
+        return Ok(rstd::move(binding));
+    }
     template <class F> auto on_pointer_availability_changed(UiId target,F callback) -> Result<Binding,InputError> {
         if (closed_) return Err(InputError::Unavailable);
         if (busy_ || document_.routing()) return Err(InputError::Reentrant);
@@ -906,7 +939,7 @@ class EventRouter {
         pointer_observers_.retain([](const auto &observer){return observer.guard.alive();});
         if (pointer_observers_.len()>=usize(65536)) return Err(InputError::Limit);
         auto binding=document_.bindings().make();
-        pointer_observers_.push({target,binding.guard(),pointer_available(target),Box<rstd::dyn<rstd::FnMut<void(bool)>>>::make(rstd::move(callback))});
+        pointer_observers_.push({target,binding.guard(),pointer_available(target),Box<rstd::dyn<rstd::FnMut<void(const bool &)>>>::make([callback=rstd::move(callback)](const bool &value) mutable {callback(value);})});
         return Ok(rstd::move(binding));
     }
     auto focus_candidates() const -> Vec<UiId> {
@@ -1345,6 +1378,8 @@ class EventRouter {
         closed_ = true;
         for (auto &observer:pointer_observers_) observer.guard.disconnect();
         pointer_observers_.clear();
+        for (auto &observer:input_observers_) observer.guard.disconnect();
+        input_observers_.clear();
         for (const auto &handler : handlers_)
             if (handler->owns_binding && handler->binding.is_some())
                 handler->binding->disconnect();

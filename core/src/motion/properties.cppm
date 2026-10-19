@@ -11,7 +11,9 @@ enum class PresentationProperty {
     Height,
     Background,
     Clip,
-    ViewportOffset
+    ViewportOffset,
+    ContentTint,
+    Count
 };
 enum class TakeoverPolicy { PreserveCurrent, RejectOccupied };
 enum class LeaseEndPolicy { CommitCurrent, RestoreBase };
@@ -52,6 +54,9 @@ class PresentationBatch {
     }
     void background(UiId id, Color value) {
         writes_.push({{id, PresentationProperty::Background}, AnimationValue::Tint(value)});
+    }
+    void content_tint(UiId id, Color value) {
+        writes_.push({{id, PresentationProperty::ContentTint}, AnimationValue::Tint(value)});
     }
     void clip(UiId id, vui::Clip value) {
         writes_.push({{id, PresentationProperty::Clip}, AnimationValue::Number(0), value});

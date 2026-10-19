@@ -517,8 +517,7 @@ auto resolve_items(OwnedFrame &frame, GlyphCache &cache, ImageCache &images, Ind
                     frame.externals.push(ExternalBinding{value.frame, native->native(), {}});
                 item.kind = DrawKind::External;
                 item.data.image_edges = 15;
-                for (auto &component : item.data.color)
-                    component = 1;
+                color(value.tint);
                 item.resource_index = index;
                 item.sampling = value.sampling;
                 item.clip = value.clip;
@@ -559,7 +558,7 @@ auto resolve_items(OwnedFrame &frame, GlyphCache &cache, ImageCache &images, Ind
                         if (!glyph.drawable) continue;
                         auto fill = pass == 2 ? value.colors.color(glyph.byte_start, paint.color) : paint.color;
                         if (!fill.a) continue;
-                        color(fill);
+                        color(fill.modulate(value.tint));
                         auto resolved = cache.resolve(value.layout.fonts()[usize(glyph.font)],
                                                       glyph.glyph, scale, max_extent, paint.outline * scale);
                         if (resolved.is_err()) return Err(resolved.unwrap_err());

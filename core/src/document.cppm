@@ -405,7 +405,7 @@ class UiDocument {
         Option<Box<ImageContent>> image;
         Option<Box<SceneContent>> scene;
         AnimatedStyle animated;
-        rstd::rc::Weak<PropertyLeaseState> property_owner[7];
+        rstd::rc::Weak<PropertyLeaseState> property_owner[static_cast<unsigned>(PresentationProperty::Count)];
         rstd::rc::Weak<UiValueWriterState> value_writer[3];
         Node(LayoutKind value, NodeStyle properties) : kind(value), style(properties) {}
     };
@@ -704,6 +704,11 @@ class UiDocument {
         case PresentationProperty::Background:
             result.value = AnimationValue::Tint(style.background);
             break;
+        case PresentationProperty::ContentTint:
+            result.value = AnimationValue::Tint(style.content_tint);
+            break;
+        case PresentationProperty::Count:
+            break;
         case PresentationProperty::Clip:
             result.clip = style.clip;
             break;
@@ -715,11 +720,13 @@ class UiDocument {
     }
     auto valid_property(const PropertyWrite &write, const Node &node) const -> bool {
         auto property = write.key.property;
-        if (property_index(property) >= 7)
+        if (property_index(property) >= static_cast<unsigned>(PresentationProperty::Count))
             return false;
         if (write.automatic_size)
             return property == PresentationProperty::Width ||
                    property == PresentationProperty::Height;
+        if (property == PresentationProperty::ContentTint)
+            return write.value.is_Tint() && write.value.as_Tint().value.valid();
         if (property == PresentationProperty::Clip)
             return write.clip.valid() && node.viewport.is_none();
         if (property == PresentationProperty::ViewportOffset)
@@ -747,6 +754,11 @@ class UiDocument {
         case PresentationProperty::Background:
             node.style.background = write.value.as_Tint().value;
             break;
+        case PresentationProperty::ContentTint:
+            node.style.content_tint = write.value.as_Tint().value;
+            break;
+        case PresentationProperty::Count:
+            break;
         case PresentationProperty::Clip:
             node.style.clip = write.clip;
             break;
@@ -763,7 +775,7 @@ class UiDocument {
             node.paint_dirty = true;
         if (before.transform != after.transform || before.opacity != after.opacity ||
             before.background != after.background || before.clip != after.clip ||
-            before.layout != after.layout || offset != next_offset)
+            before.layout != after.layout || before.content_tint != after.content_tint || offset != next_offset)
             changed(before.layout != after.layout, Some(UiId(write.key.target)));
     }
     auto animation_index(AnimationId id) const -> Option<usize> {
@@ -902,7 +914,7 @@ class UiDocument {
         node.subtree_arrange_dirty = true;
         if (node.mount_generation == ~Serial{})
             rstd::panic("vui mount generation exhausted");
-        for (unsigned property{}; property < 7; ++property)
+        for (unsigned property{}; property < static_cast<unsigned>(PresentationProperty::Count); ++property)
             revoke_property(node, static_cast<PresentationProperty>(property));
         ++node.mount_generation;
         for (auto child : node.children)
@@ -1489,7 +1501,7 @@ class UiDocument {
                              ? placement * style.transform
                              : placement * node.layout_mapping * style.transform;
         RenderProperties properties{transform,     content_bounds, clip,
-                                    style.opacity, style.visible,  node.layout_clip};
+                                    style.opacity, style.visible,  node.layout_clip, style.content_tint};
         if (!properties.valid())
             return Err(UiError::InvalidValue);
         UiVisual visual{
@@ -1983,7 +1995,7 @@ class UiDocument {
             auto node = resolve(keys[i].target);
             if (!node || !mounted(keys[i].target))
                 return Err(UiError::InvalidId);
-            if (property_index(keys[i].property) >= 7)
+            if (property_index(keys[i].property) >= static_cast<unsigned>(PresentationProperty::Count))
                 return Err(UiError::InvalidValue);
             for (usize j{}; j < i; ++j)
                 if (keys[j] == keys[i])
@@ -2833,6 +2845,22 @@ class UiDocument {
         node->style.opacity = value;
         if (before != effective_style(*node).opacity)
             changed(false, Some(id));
+        return Ok(empty{});
+    }
+    auto set_content_tint(UiId id, Color value) -> Result<empty, UiError> {
+        if (layout_active_ || painting_)
+            return Err(UiError::Routing);
+        auto node = resolve(id);
+        if (!node)
+            return Err(UiError::InvalidId);
+        if (property_occupied(*node, PresentationProperty::ContentTint))
+            return Err(UiError::PropertyOwned);
+        if (!value.valid())
+            return Err(UiError::InvalidValue);
+        if (node->style.content_tint != value) {
+            node->style.content_tint = value;
+            changed(false, Some(id));
+        }
         return Ok(empty{});
     }
     auto set_clip(UiId id, Clip value) -> Result<empty, UiError> {

@@ -55,8 +55,9 @@ struct NodeStyle {
     bool visible{true}, hit_test_visible{true}, enabled{true}, focusable{};
     bool hit_self{true};
     Option<Rect> text_input_area;
+    Color content_tint{1, 1, 1, 1};
     auto valid() const -> bool {
-        return layout.valid() && background.valid() && finite(radius) && radius >= 0 &&
+        return layout.valid() && background.valid() && content_tint.valid() && finite(radius) && radius >= 0 &&
                RenderProperties{transform, {}, clip, opacity, visible}.valid() &&
                (text_input_area.is_none() || text_input_area->valid());
     }

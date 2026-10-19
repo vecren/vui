@@ -28,13 +28,13 @@ class FrameDraw {
               (Rectangle, (Rect rect; Color color; Scalar radius; Transform transform; Index clip;
                            RenderId node;)),
               (Text, (TextLayout layout; Point origin; Color color; Transform transform; Index clip;
-                      RenderId node; TextEffects effects{}; TextColors colors{};)),
+                      RenderId node; TextEffects effects{}; TextColors colors{}; Color tint{1, 1, 1, 1};)),
               (Image, (ImageData data; Rect destination; Rect source; ImageSampling sampling;
                        Color tint; ImageEdges edges; bool clamp_source; Transform transform;
                        Index clip; RenderId node; ImageBlend blend{ImageBlend::SourceOver};
                        ImageRadialFill radial{};)),
               (External, (TextureFrame frame; Serial source_id; Rect destination; Rect source;
-                          ImageSampling sampling; Transform transform; Index clip; RenderId node;)),
+                          ImageSampling sampling; Transform transform; Index clip; RenderId node; Color tint{1, 1, 1, 1};)),
               (Composite, (Index source_pass; Scalar opacity; Index clip; RenderId node;)))
 };
 struct FramePass {
@@ -142,17 +142,17 @@ class FramePlanner {
             } else if (op.is_Rect()) {
                 const auto &value = op.as_Rect();
                 output_.passes[usize(target)].draws.push(FrameDraw::Rectangle(
-                    value.rect, value.color, value.radius, state.transform, state.clip, id));
+                    value.rect, value.color.modulate(node->properties.content_tint), value.radius, state.transform, state.clip, id));
             } else if (op.is_Text()) {
                 const auto &value = op.as_Text();
                 output_.passes[usize(target)].draws.push(
                     FrameDraw::Text(TextLayout(value.layout), value.origin, value.color,
-                                    state.transform, state.clip, id, value.effects, TextColors(value.colors)));
+                                    state.transform, state.clip, id, value.effects, TextColors(value.colors), node->properties.content_tint));
             } else if (op.is_Image()) {
                 const auto &value = op.as_Image();
                 output_.passes[usize(target)].draws.push(FrameDraw::Image(
                     ImageData(value.data), value.destination, value.source, value.sampling,
-                    value.tint, value.edges, value.clamp_source, state.transform, state.clip, id,
+                    value.tint.modulate(node->properties.content_tint), value.edges, value.clamp_source, state.transform, state.clip, id,
                     value.blend, value.radial));
             } else if (op.is_External()) {
                 const auto &value = op.as_External();
@@ -166,10 +166,10 @@ class FramePlanner {
                     auto placement = placed.unwrap();
                     output_.passes[usize(target)].draws.push(FrameDraw::External(
                         TextureFrame(*selected.frame), selected.source_id, placement.destination,
-                        placement.source, value.sampling, state.transform, state.clip, id));
+                        placement.source, value.sampling, state.transform, state.clip, id, node->properties.content_tint));
                 } else {
                     output_.passes[usize(target)].draws.push(FrameDraw::Rectangle(
-                        value.destination, value.placeholder, 0, state.transform, state.clip, id));
+                        value.destination, value.placeholder.modulate(node->properties.content_tint), 0, state.transform, state.clip, id));
                 }
             } else if (op.is_Children()) {
                 for (auto child : node->children.values()) {
