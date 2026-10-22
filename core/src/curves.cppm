@@ -4,11 +4,16 @@ using namespace rstd::prelude;
 export namespace vui {
 struct ScalarCurveKey { Scalar time, a, b, c, d; };
 struct ScalarCurveRange { Scalar minimum{},maximum{}; };
+enum class ScalarCurveArithmetic { Double,Float32Horner };
 struct ScalarCurve {
     Scalar start{}, stop{}, speed{1};
     slice<ScalarCurveKey> keys;
   private:
     static auto polynomial(ScalarCurveKey key,Scalar delta) -> Scalar { return ((key.a*delta+key.b)*delta+key.c)*delta+key.d; }
+    static auto rounded(Scalar value) -> Scalar {
+        // A stored float prevents contraction across separate rounding points.
+        volatile float result=float(value);return Scalar(result);
+    }
     template<class F> void segments(Scalar begin,Scalar end,F &&visit) const {
         if (keys.is_empty()) return;
         auto key=keys[usize()];usize next(1);
@@ -20,22 +25,27 @@ struct ScalarCurve {
         }
     }
   public:
-    auto valid() const -> bool {
-        if (!finite(start) || !finite(stop) || stop<start || !finite(speed) || speed<=0) return false;
+    auto valid(ScalarCurveArithmetic arithmetic=ScalarCurveArithmetic::Double) const -> bool {
+        if (unsigned(arithmetic)>unsigned(ScalarCurveArithmetic::Float32Horner) || !finite(start) || !finite(stop) || stop<start || !finite(speed) || speed<=0) return false;
         Option<Scalar> previous;
         for (auto key:keys) {
             if (!finite(key.time) || !finite(key.a) || !finite(key.b) || !finite(key.c) || !finite(key.d) ||
                 (previous.is_some() && key.time<=*previous)) return false;
+            if (arithmetic==ScalarCurveArithmetic::Float32Horner && (rounded(key.time)!=key.time || rounded(key.a)!=key.a || rounded(key.b)!=key.b || rounded(key.c)!=key.c || rounded(key.d)!=key.d)) return false;
             previous=Some(key.time);
         }
         return true;
     }
-    auto sample(Scalar elapsed) const -> Scalar {
+    auto sample(Scalar elapsed,ScalarCurveArithmetic arithmetic=ScalarCurveArithmetic::Double) const -> Scalar {
+        if (unsigned(arithmetic)>unsigned(ScalarCurveArithmetic::Float32Horner)) return __builtin_nan("");
         if (keys.is_empty()) return 0;
         auto time=__builtin_fmax(start,__builtin_fmin(stop,start+elapsed*speed));
         auto key=keys[usize()];
         for (auto candidate:keys) {if (candidate.time>time) break;key=candidate;}
-        return polynomial(key,time-key.time);
+        if (arithmetic==ScalarCurveArithmetic::Double) return polynomial(key,time-key.time);
+        if (!key.a && !key.b && !key.c) return key.d;
+        auto delta=rounded(time-key.time),value=rounded(key.a*delta);
+        value=rounded(value+key.b);value=rounded(value*delta);value=rounded(value+key.c);value=rounded(value*delta);return rounded(value+key.d);
     }
     auto integral(Scalar begin,Scalar end) const -> Result<Scalar,UiError> {
         if (!valid() || !finite(begin) || !finite(end) || end<begin) return Err(UiError::InvalidValue);

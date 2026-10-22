@@ -21,7 +21,11 @@ struct StateAnimationTransition {
 };
 struct StateAnimationCurve { Option<Scalar> constant;Vec<ScalarCurveKey> keys; };
 struct StateAnimationTrack { Index channel{};StateAnimationCurve curve; };
-struct StateAnimationClip { Scalar start{},stop{};Vec<StateAnimationTrack> tracks; };
+enum class StateAnimationClipSampling { Mathematical,NormalizedFloat32Ceil };
+struct StateAnimationClip {
+    Scalar start{},stop{};Vec<StateAnimationTrack> tracks;
+    ScalarCurveArithmetic arithmetic{};StateAnimationClipSampling sampling{};
+};
 struct StateAnimationState {
     StateAnimationClip clip;Scalar speed{1};bool loop{},write_defaults{true};
     Vec<StateAnimationTransition> transitions;
@@ -76,8 +80,13 @@ class StateAnimationProgram {
             p=edge ? (time.side==StateAnimationSampleSide::Before ? Scalar(1):Scalar(0)) : p-cycle;
         } else p=duration>0 && time.now==time.started+(1-time.offset)*duration ? Scalar(1):__builtin_fmax(0,__builtin_fmin(1,p));
         auto sample=clip.start+(clip.stop-clip.start)*p;
+        if (clip.sampling==StateAnimationClipSampling::NormalizedFloat32Ceil) {
+            auto normalized=float(p);
+            if (Scalar(normalized)<p) normalized=__builtin_bit_cast(float,__builtin_bit_cast(__UINT32_TYPE__,normalized)+static_cast<__UINT32_TYPE__>(1));
+            volatile float rounded=float(Scalar(normalized)*clip.stop);sample=Scalar(rounded);
+        }
         for (const auto &track:clip.tracks) {
-            auto value=track.curve.constant.is_some() ? *track.curve.constant : ScalarCurve{clip.start,clip.stop,1,track.curve.keys.as_slice()}.sample(sample-clip.start);
+            auto value=track.curve.constant.is_some() ? *track.curve.constant : ScalarCurve{clip.start,clip.stop,1,track.curve.keys.as_slice()}.sample(sample-clip.start,clip.arithmetic);
             if (!finite(value)) return Err(StateAnimationError::InvalidValue);values[usize(track.channel)]=value;
         }
         return Ok(rstd::move(values));
@@ -130,6 +139,9 @@ class StateAnimationProgram {
             const auto &clip=state.clip;
             if (!finite(clip.start) || !finite(clip.stop) || clip.start<0 || clip.stop<clip.start || !finite(state.speed) || state.speed<=0 ||
                 !finite((clip.stop-clip.start)/state.speed)) return Err(StateAnimationError::InvalidValue);
+            if (unsigned(clip.arithmetic)>unsigned(ScalarCurveArithmetic::Float32Horner) || unsigned(clip.sampling)>unsigned(StateAnimationClipSampling::NormalizedFloat32Ceil)) return Err(StateAnimationError::InvalidValue);
+            if (clip.sampling!=StateAnimationClipSampling::Mathematical && (Scalar(float(clip.start))!=clip.start || Scalar(float(clip.stop))!=clip.stop)) return Err(StateAnimationError::InvalidValue);
+            if (clip.sampling==StateAnimationClipSampling::NormalizedFloat32Ceil && (clip.start!=0 || clip.stop<=0)) return Err(StateAnimationError::InvalidValue);
             auto t=transitions(state.transitions.as_slice());if (t.is_err()) return Err(t.unwrap_err());
             if (clip.tracks.len()>value.defaults.len()) return Err(StateAnimationError::InvalidValue);
             Vec<Index> channels;
@@ -140,7 +152,8 @@ class StateAnimationProgram {
                 if (key_count>usize(1'048'576)) return Err(StateAnimationError::Limit);
                 if (track.curve.constant.is_some()) {
                     if (!finite(*track.curve.constant) || !track.curve.keys.is_empty()) return Err(StateAnimationError::InvalidValue);
-                } else if (track.curve.keys.is_empty() || !ScalarCurve{clip.start,clip.stop,1,track.curve.keys.as_slice()}.valid()) return Err(StateAnimationError::InvalidValue);
+                    if (clip.arithmetic==ScalarCurveArithmetic::Float32Horner && Scalar(float(*track.curve.constant))!=*track.curve.constant) return Err(StateAnimationError::InvalidValue);
+                } else if (track.curve.keys.is_empty() || !ScalarCurve{clip.start,clip.stop,1,track.curve.keys.as_slice()}.valid(clip.arithmetic)) return Err(StateAnimationError::InvalidValue);
             }
         }
         return Ok(StateAnimationProgram(rstd::move(value)));
