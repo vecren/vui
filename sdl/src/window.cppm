@@ -16,6 +16,7 @@ struct WakeStats {
     bool pending{}, closed{};
 };
 enum class WindowMode { Windowed, Fullscreen };
+enum class WindowPositionResult { Requested,Unsupported,Failed };
 struct DisplayInfo {
     Index index{};
     // Screen coordinates, in the same units as Window.resize.
@@ -49,6 +50,8 @@ class Window final : public gpu::SurfaceHost {
     auto set_minimum_size(Index width, Index height) -> Result<empty, gpu::Error>;
     auto minimum_size() const -> Option<Size>;
     auto logical_size() const -> Option<Size>;
+    auto position() const -> Option<Point>;
+    auto set_position(Point) -> WindowPositionResult;
     auto set_mode(WindowMode) -> Result<empty, gpu::Error>;
     auto mode() const -> Option<WindowMode>;
     auto refresh_rate() const -> Option<Index>;

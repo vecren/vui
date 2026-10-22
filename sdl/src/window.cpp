@@ -602,6 +602,26 @@ auto Window::logical_size() const -> Option<Size> {
     int width{},height{};SDL_GetWindowSize(impl_->window,&width,&height);
     return Some(Size{Scalar(width),Scalar(height)});
 }
+namespace {
+auto global_window_position() -> bool {
+    auto driver=SDL_GetCurrentVideoDriver();
+    return driver && (SDL_strcmp(driver,"x11")==0 || SDL_strcmp(driver,"windows")==0 || SDL_strcmp(driver,"cocoa")==0);
+}
+}
+auto Window::position() const -> Option<Point> {
+    if (!impl_->window || !global_window_position()) return None();
+    int x{},y{};SDL_GetWindowPosition(impl_->window,&x,&y);return Some(Point{Scalar(x),Scalar(y)});
+}
+auto Window::set_position(Point point) -> WindowPositionResult {
+    if (!impl_->window || !finite(point.x) || !finite(point.y) || point.x< -2147483648.0 || point.x>2147483647.0 ||
+        point.y< -2147483648.0 || point.y>2147483647.0 || __builtin_floor(point.x)!=point.x || __builtin_floor(point.y)!=point.y)
+        return WindowPositionResult::Failed;
+    if (!global_window_position()) return WindowPositionResult::Unsupported;
+    auto x=int(point.x),y=int(point.y);
+    if (SDL_WINDOWPOS_ISCENTERED(x) || SDL_WINDOWPOS_ISUNDEFINED(x) || SDL_WINDOWPOS_ISCENTERED(y) || SDL_WINDOWPOS_ISUNDEFINED(y))
+        return WindowPositionResult::Failed;
+    SDL_SetWindowPosition(impl_->window,x,y);return WindowPositionResult::Requested;
+}
 auto Window::mode() const -> Option<WindowMode> {
     if (!impl_->window) return None();
     return Some((SDL_GetWindowFlags(impl_->window) & SDL_WINDOW_FULLSCREEN)
