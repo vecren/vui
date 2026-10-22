@@ -585,6 +585,23 @@ auto Window::set_mode(WindowMode mode) -> Result<empty, gpu::Error> {
     (*impl_->wake)->request();
     return Ok(empty{});
 }
+auto Window::set_minimum_size(Index width,Index height) -> Result<empty,gpu::Error> {
+    if (!impl_->window || width>32768 || height>32768) return Err(gpu::Error{gpu::Stage::State});
+    SDL_SetWindowMinimumSize(impl_->window,int(width),int(height));
+    auto actual=minimum_size();
+    if (actual!=Some(Size{Scalar(width),Scalar(height)})) return Err(gpu::Error{gpu::Stage::Surface});
+    return Ok(empty{});
+}
+auto Window::minimum_size() const -> Option<Size> {
+    if (!impl_->window) return None();
+    int width{},height{};SDL_GetWindowMinimumSize(impl_->window,&width,&height);
+    return Some(Size{Scalar(width),Scalar(height)});
+}
+auto Window::logical_size() const -> Option<Size> {
+    if (!impl_->window) return None();
+    int width{},height{};SDL_GetWindowSize(impl_->window,&width,&height);
+    return Some(Size{Scalar(width),Scalar(height)});
+}
 auto Window::mode() const -> Option<WindowMode> {
     if (!impl_->window) return None();
     return Some((SDL_GetWindowFlags(impl_->window) & SDL_WINDOW_FULLSCREEN)

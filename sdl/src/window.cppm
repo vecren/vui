@@ -46,6 +46,9 @@ class Window final : public gpu::SurfaceHost {
     auto read_clipboard() -> Result<String, ClipboardError>;
     auto write_clipboard(ref<str>) -> Result<empty, ClipboardError>;
     auto resize(Index width, Index height) -> Result<empty, gpu::Error>;
+    auto set_minimum_size(Index width, Index height) -> Result<empty, gpu::Error>;
+    auto minimum_size() const -> Option<Size>;
+    auto logical_size() const -> Option<Size>;
     auto set_mode(WindowMode) -> Result<empty, gpu::Error>;
     auto mode() const -> Option<WindowMode>;
     auto refresh_rate() const -> Option<Index>;
