@@ -7,7 +7,7 @@ export namespace vui {
 enum class ContentColorSpace { LinearSrgb, Srgb };
 enum class ContentAlpha { Opaque, Premultiplied, Straight };
 enum class ContentOrigin { TopLeft, BottomLeft };
-enum class ContentFormat { Rgba8Unorm, Rgba8Srgb, Bgra8Unorm, Bgra8Srgb, Rgba16Float };
+enum class ContentFormat { Rgba8Unorm, Rgba8Srgb, Bgra8Unorm, Bgra8Srgb, Rgba16Float, R11G11B10Float };
 enum class ContentError { InvalidValue, WrongProducer, StaleFrame, Closed, Limit };
 struct TextureFrameInfo {
     Serial producer_session{}, frame_version{}, device_epoch{};
@@ -24,7 +24,8 @@ struct TextureFrameInfo {
                 alpha == ContentAlpha::Straight) &&
                (format == ContentFormat::Rgba8Unorm || format == ContentFormat::Rgba8Srgb ||
                 format == ContentFormat::Bgra8Unorm || format == ContentFormat::Bgra8Srgb ||
-                format == ContentFormat::Rgba16Float) &&
+                format == ContentFormat::Rgba16Float || format == ContentFormat::R11G11B10Float) &&
+               (format != ContentFormat::R11G11B10Float || alpha == ContentAlpha::Opaque) &&
                ((format != ContentFormat::Rgba8Srgb && format != ContentFormat::Bgra8Srgb) ||
                 color_space == ContentColorSpace::Srgb) &&
                (origin == ContentOrigin::TopLeft || origin == ContentOrigin::BottomLeft);

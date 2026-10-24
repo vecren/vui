@@ -46,6 +46,9 @@ class NativeTextureFrame {
         case vrento::TextureFormat::RGBA16F:
             info.format = ContentFormat::Rgba16Float;
             break;
+        case vrento::TextureFormat::R11G11B10F:
+            info.format = ContentFormat::R11G11B10Float;
+            break;
         default:
             return Err(ContentError::InvalidValue);
         }
