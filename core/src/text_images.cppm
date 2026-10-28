@@ -11,8 +11,7 @@ struct TextInlineImage {
     ImageSampling sampling{ImageSampling::Linear};
     ImageBlend blend{ImageBlend::SourceOver};
     auto valid() const -> bool {
-        return source.valid() && source.width > 0 && source.height > 0 && source.x >= 0 && source.y >= 0 &&
-            source.x + source.width <= image.width() && source.y + source.height <= image.height() && tint.valid() &&
+        return image.valid_source(source) && source.width > 0 && source.height > 0 && tint.valid() &&
             (sampling == ImageSampling::Nearest || sampling == ImageSampling::Linear) &&
             vui::valid(blend);
     }

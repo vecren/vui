@@ -210,8 +210,7 @@ class DisplayListRecorder {
             return;
         if (!radial.valid() || !valid(blend) || !valid(color_source) ||
             static_cast<unsigned>(edges) > 15 || !tint.valid() || !destination.valid() ||
-            !source.valid() || source.x < 0 || source.y < 0 ||
-            source.x + source.width > data.width() || source.y + source.height > data.height() ||
+            !data.valid_source(source) ||
             (sampling != ImageSampling::Nearest && sampling != ImageSampling::Linear)) {
             reject(RecordingError::InvalidValue);
             return;

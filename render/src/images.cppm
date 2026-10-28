@@ -27,7 +27,7 @@ struct ImageCache {
                 if (known) continue;
                 if (image.width() > max_extent || image.height() > max_extent)
                     return Err(Error{Stage::ImageCacheLimit});
-                bytes += image.pixels().len().to_primitive();
+                bytes += image.byte_size();
                 required.push(ImageData(image));
             }
         if (required.len() > usize(limits.max_entries) || bytes > limits.max_bytes)
@@ -37,7 +37,7 @@ struct ImageCache {
         for (const auto &image : required) {
             bool cached{};
             for (const auto &entry : entries) cached |= entry.data.id() == image.id();
-            if (!cached) { added_bytes += image.pixels().len().to_primitive(); ++added_entries; }
+            if (!cached) { added_bytes += image.byte_size(); ++added_entries; }
         }
         auto total_entries = stats.entries + added_entries;
         auto total_bytes = stats.cpu_bytes + added_bytes;
@@ -45,7 +45,7 @@ struct ImageCache {
         entries.retain([&](const ImageEntry &entry) {
             if (total_entries <= limits.max_entries && total_bytes <= limits.max_bytes) return true;
             for (const auto &image : required) if (image.id() == entry.data.id()) return true;
-            auto size = entry.data.pixels().len().to_primitive();
+            auto size = entry.data.byte_size();
             --total_entries; total_bytes -= size;
             --stats.entries; stats.cpu_bytes -= size;
             if (entry.gpu.is_some()) stats.gpu_bytes -= size;
@@ -67,7 +67,7 @@ struct ImageCache {
                 return Ok(static_cast<Index>(i.to_primitive()));
             }
         ++stats.misses;
-        auto bytes = data.pixels().len().to_primitive();
+        auto bytes = data.byte_size();
         if (entries.len() >= usize(limits.max_entries) || data.width() > max_extent ||
             data.height() > max_extent || bytes > limits.max_bytes ||
             stats.cpu_bytes > limits.max_bytes - bytes)

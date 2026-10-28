@@ -18,9 +18,7 @@ struct ImageRegion {
         return {rstd::move(image), source};
     }
     auto valid() const -> bool {
-        return source.valid() && source.x >= 0 && source.y >= 0 &&
-               source.x + source.width <= image.width() &&
-               source.y + source.height <= image.height();
+        return image.valid_source(source);
     }
 };
 struct NinePatchSpec {

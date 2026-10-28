@@ -31,12 +31,13 @@ struct PaintItem {
     Index clip{no_clip}, source_pass{}, resource_index{};
     ImageSampling sampling{ImageSampling::Linear};
     ImageBlend blend{ImageBlend::SourceOver};
+    VkSampler sampler{};
 };
 struct SampleBinding {
     DrawKind kind;
     Index cache_index;
     rstd::sync::Arc<SampledImage> gpu;
-    Option<tex::TextureUpload> upload;
+    Vec<tex::TextureUpload> uploads;
     rg::ResourceId texture;
 };
 struct ExternalBinding {
@@ -70,6 +71,7 @@ struct FrameGpu {
     Option<tex::SubmissionReceipt> receipt;
     bool recyclable{true};
     Vec<Target> targets;
+    Vec<tex::SamplerRef> image_samplers;
     FrameBuffer clips, instances, readback;
     VkDescriptorPool pool{};
     FrameGpu(vk::DeviceSession owner, rstd::sync::Arc<FrameResources> cache)
@@ -175,7 +177,7 @@ struct OwnedFrame {
           output(rstd::move(session)) {}
     void release_uploads() {
         for (auto &page : samples)
-            page.upload = None();
+            page.uploads.clear();
     }
     ~OwnedFrame() {
         const auto &d = device.handle().Dispatch();
@@ -233,6 +235,7 @@ auto UiExecutor::prepare(const rg::PassExecutionInfo &pass, const vk::GraphBindi
                      paint.sampling == ImageSampling::Linear)
                 ? context.glyph_sampler
                 : context.sampler;
+        if(paint.sampler)sampler=paint.sampler;
         if (draws.is_empty())
             ++frame.stats->pass_starts;
         else {
@@ -661,7 +664,7 @@ auto prepare_atlas(OwnedFrame &frame, GlyphCache &cache, vk::TextureContext &tex
             auto uploaded = make_upload(page.gpu->clone(), page.pixels.as_slice());
             if (uploaded.is_err())
                 return Err(uploaded.unwrap_err());
-            binding.upload = Some(rstd::move(uploaded).unwrap());
+            binding.uploads.push(rstd::move(uploaded).unwrap());
         }
         frame.samples.push(rstd::move(binding));
     }
@@ -679,20 +682,34 @@ auto prepare_images(OwnedFrame &frame, ImageCache &cache, vk::TextureContext &te
         auto &entry = cache.entries[i];
         if (entry.gpu.is_none()) {
             auto created =
-                make_sampled(textures, {entry.data.width(), entry.data.height()}, format);
+                make_sampled(textures, {entry.data.width(), entry.data.height()}, format,entry.data.mip_count());
             if (created.is_err())
                 return Err(created.unwrap_err());
-            entry.gpu = Some(rstd::move(created).unwrap());
-            cache.stats.gpu_bytes += entry.data.pixels().len().to_primitive();
+            auto image=rstd::move(created).unwrap();image->bytes=entry.data.byte_size();
+            if(entry.data.texture_options()!=ImageTextureOptions{}){
+                auto nearest=make_image_sampler(textures,entry.data,false);if(nearest.is_err())return Err(nearest.unwrap_err());
+                auto linear=make_image_sampler(textures,entry.data,true);if(linear.is_err())return Err(linear.unwrap_err());
+                image->nearest=Some(rstd::move(nearest).unwrap());image->linear=Some(rstd::move(linear).unwrap());
+            }
+            entry.gpu=Some(rstd::move(image));cache.stats.gpu_bytes+=entry.data.byte_size();
         }
         SampleBinding binding{
             DrawKind::Image, static_cast<Index>(i.to_primitive()), entry.gpu->clone(), {}, {}};
+        for(auto &items:frame.items)for(auto &item:items)
+            if(item.kind==DrawKind::Image && item.resource_index==i.to_primitive()){
+                const auto &sampler=item.sampling==ImageSampling::Linear?(*entry.gpu)->linear:(*entry.gpu)->nearest;
+                if(sampler.is_some()){
+                    auto native=vk::native_sampler(*sampler);if(native.is_err())return Err(Error::texture(Stage::Allocation,native.unwrap_err()));
+                    item.sampler=native.unwrap();frame.gpu->image_samplers.push(tex::SamplerRef(*sampler));
+                }
+            }
         if (!entry.resident) {
-            auto pixels = premultiply_srgb(entry.data.pixels());
-            auto uploaded = make_upload(entry.gpu->clone(), pixels.as_slice());
-            if (uploaded.is_err())
-                return Err(uploaded.unwrap_err());
-            binding.upload = Some(rstd::move(uploaded).unwrap());
+            for(Index mip{};mip<entry.data.mip_count();++mip){
+                auto pixels=premultiply_srgb(entry.data.mip_level(mip).unwrap().pixels);
+                auto uploaded=make_upload(entry.gpu->clone(),pixels.as_slice(),mip);
+                if(uploaded.is_err())return Err(uploaded.unwrap_err());
+                binding.uploads.push(rstd::move(uploaded).unwrap());
+            }
         }
         frame.samples.push(rstd::move(binding));
     }
@@ -885,7 +902,7 @@ struct Renderer::Impl {
             if (!entry.resident && entry.gpu && (*entry.gpu)->image.ready().valid()) {
                 entry.resident = true;
                 ++image_cache.stats.uploads;
-                image_cache.stats.uploaded_bytes += entry.data.pixels().len().to_primitive();
+                image_cache.stats.uploaded_bytes += entry.data.byte_size();
             }
     }
     rstd::sync::Arc<FrameResources> frame_resources{rstd::sync::Arc<FrameResources>::make()};
@@ -1528,8 +1545,11 @@ auto Renderer::prepare_impl(FramePlan plan, DrawOptions options,
             for (const auto &use : pass.uses)
                 if (use.resource == id)
                     return;
-            pass.uses.push({id, version, rg::GraphAccess::Read, rg::PassUsage::Sampled,
-                            rg::PassStages::Fragment});
+            rg::PassResourceUse use{id,version,rg::GraphAccess::Read,rg::PassUsage::Sampled,rg::PassStages::Fragment};
+            for(const auto &resource:graph.resources)if(resource.id==id){
+                use.range.mip_count=resource.mips;use.range.layer_count=resource.layers;
+            }
+            pass.uses.push(rstd::move(use));
         };
         for (const auto &page : frame.samples)
             for (const auto &item : frame.items[usize(index)])
@@ -1699,10 +1719,8 @@ auto Renderer::prepare_impl(FramePlan plan, DrawOptions options,
         frame.reset_queries(native.unwrap(), frame.queries, 0, 2);
         frame.write_timestamp(native.unwrap(), VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, frame.queries, 0);
     }
-    for (const auto &sample : frame.samples) {
-        if (!sample.upload)
-            continue;
-        auto uploaded = work.commands()->Upload(sample.upload->clone());
+    for (const auto &sample : frame.samples) for(const auto &upload:sample.uploads){
+        auto uploaded = work.commands()->Upload(upload.clone());
         if (uploaded.is_err())
             return Err(Error::texture(Stage::Record, uploaded.unwrap_err()));
     }
@@ -1883,16 +1901,16 @@ auto Renderer::submit_impl() -> Result<Serial, Error> {
         return Err(Error{result == VK_ERROR_DEVICE_LOST ? Stage::Lost : Stage::Submit, result});
     }
     for (const auto &page : frame.samples) {
-        if (page.upload.is_some() && page.kind == DrawKind::Glyph) {
+        if (!page.uploads.is_empty() && page.kind == DrawKind::Glyph) {
             self.glyph_cache.pages[usize(page.cache_index)].resident = true;
             ++self.glyph_cache.stats.uploads;
             self.glyph_cache.stats.uploaded_bytes +=
                 Serial(page.gpu->extent.width) * page.gpu->extent.height;
-        } else if (page.upload.is_some() && page.kind == DrawKind::Image) {
+        } else if (!page.uploads.is_empty() && page.kind == DrawKind::Image) {
             self.image_cache.entries[usize(page.cache_index)].resident = true;
             ++self.image_cache.stats.uploads;
             self.image_cache.stats.uploaded_bytes +=
-                Serial(page.gpu->extent.width) * page.gpu->extent.height * 4;
+                page.gpu->bytes;
         }
     }
     ++self.submission;
@@ -2238,8 +2256,8 @@ auto Renderer::image_cache_stats() const -> ImageCacheStats {
         for (const auto &binding : (**impl_->frame).samples) {
             if (binding.kind != DrawKind::Image)
                 continue;
-            auto bytes = Serial(binding.gpu->extent.width) * binding.gpu->extent.height * 4;
-            if (binding.upload.is_some())
+            auto bytes = binding.gpu->bytes;
+            if (!binding.uploads.is_empty())
                 stats.staging_bytes += bytes;
             bool cached{};
             for (const auto &entry : impl_->image_cache.entries)
@@ -2287,7 +2305,7 @@ auto Renderer::text_cache_stats() const -> TextCacheStats {
             if (binding.kind != DrawKind::Glyph)
                 continue;
             auto bytes = Serial(binding.gpu->extent.width) * binding.gpu->extent.height;
-            if (binding.upload.is_some())
+            if (!binding.uploads.is_empty())
                 stats.staging_bytes += bytes;
             bool cached{};
             for (const auto &page : impl_->glyph_cache.pages)
