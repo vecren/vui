@@ -2,18 +2,30 @@ export module vui:curves;
 import :types;
 using namespace rstd::prelude;
 export namespace vui {
-struct ScalarCurveKey { Scalar time, a, b, c, d; };
-struct ScalarCurveRange { Scalar minimum{},maximum{}; };
 enum class ScalarCurveArithmetic { Double,Float32Horner };
-struct ScalarCurve {
-    Scalar start{}, stop{}, speed{1};
-    slice<ScalarCurveKey> keys;
+struct ScalarCurveKey {
+    Scalar time, a, b, c, d;
   private:
-    static auto polynomial(ScalarCurveKey key,Scalar delta) -> Scalar { return ((key.a*delta+key.b)*delta+key.c)*delta+key.d; }
+    friend struct ScalarCurve;
     static auto rounded(Scalar value) -> Scalar {
         // A stored float prevents contraction across separate rounding points.
         volatile float result=float(value);return Scalar(result);
     }
+  public:
+    auto sample(Scalar delta,ScalarCurveArithmetic arithmetic=ScalarCurveArithmetic::Double) const -> Scalar {
+        if (unsigned(arithmetic)>unsigned(ScalarCurveArithmetic::Float32Horner)) return __builtin_nan("");
+        if (arithmetic==ScalarCurveArithmetic::Double) return ((a*delta+b)*delta+c)*delta+d;
+        delta=rounded(delta);auto value=rounded(a*delta);
+        value=rounded(value+b);value=rounded(value*delta);value=rounded(value+c);value=rounded(value*delta);return rounded(value+d);
+    }
+};
+struct ScalarCurveRange { Scalar minimum{},maximum{}; };
+struct ScalarCurve {
+    Scalar start{}, stop{}, speed{1};
+    slice<ScalarCurveKey> keys;
+  private:
+    static auto polynomial(ScalarCurveKey key,Scalar delta) -> Scalar { return key.sample(delta); }
+    static auto rounded(Scalar value) -> Scalar { return ScalarCurveKey::rounded(value); }
     template<class F> void segments(Scalar begin,Scalar end,F &&visit) const {
         if (keys.is_empty()) return;
         auto key=keys[usize()];usize next(1);
@@ -44,8 +56,7 @@ struct ScalarCurve {
         for (auto candidate:keys) {if (candidate.time>time) break;key=candidate;}
         if (arithmetic==ScalarCurveArithmetic::Double) return polynomial(key,time-key.time);
         if (!key.a && !key.b && !key.c) return key.d;
-        auto delta=rounded(time-key.time),value=rounded(key.a*delta);
-        value=rounded(value+key.b);value=rounded(value*delta);value=rounded(value+key.c);value=rounded(value*delta);return rounded(value+key.d);
+        return key.sample(time-key.time,arithmetic);
     }
     auto integral(Scalar begin,Scalar end) const -> Result<Scalar,UiError> {
         if (!valid() || !finite(begin) || !finite(end) || end<begin) return Err(UiError::InvalidValue);
