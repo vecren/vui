@@ -34,7 +34,8 @@ class FrameDraw {
                        Index clip; RenderId node; ImageBlend blend{ImageBlend::SourceOver};
                        ImageRadialFill radial{};)),
               (External, (TextureFrame frame; Serial source_id; Rect destination; Rect source;
-                          ImageSampling sampling; Transform transform; Index clip; RenderId node; Color tint{1, 1, 1, 1};)),
+                          ImageSampling sampling; Transform transform; Index clip; RenderId node; Color tint{1, 1, 1, 1};
+                          ImageBlend blend{ImageBlend::SourceOver};)),
               (Composite, (Index source_pass; Scalar opacity; Index clip; RenderId node;)))
 };
 struct FramePass {
@@ -166,7 +167,7 @@ class FramePlanner {
                     auto placement = placed.unwrap();
                     output_.passes[usize(target)].draws.push(FrameDraw::External(
                         TextureFrame(*selected.frame), selected.source_id, placement.destination,
-                        placement.source, value.sampling, state.transform, state.clip, id, node->properties.content_tint));
+                        placement.source, value.sampling, state.transform, state.clip, id, node->properties.content_tint, value.blend));
                 } else {
                     output_.passes[usize(target)].draws.push(FrameDraw::Rectangle(
                         value.destination, value.placeholder.modulate(node->properties.content_tint), 0, state.transform, state.clip, id));

@@ -48,8 +48,9 @@ class PaintContext {
     }
     void external(ContentSource source, Rect destination, ImageFit fit = ImageFit::Contain,
                   ImageSampling sampling = ImageSampling::Linear,
-                  Color placeholder = {0.15, 0.15, 0.15, 1}) {
-        recorder_.external(rstd::move(source), destination, fit, sampling, placeholder);
+                  Color placeholder = {0.15, 0.15, 0.15, 1},
+                  ImageBlend blend = ImageBlend::SourceOver) {
+        recorder_.external(rstd::move(source), destination, fit, sampling, placeholder, blend);
     }
     void children() { recorder_.children(); }
     void request_repaint() { repaint_ = true; }

@@ -23,7 +23,8 @@ class DrawOp {
                        ImageBlend blend{ImageBlend::SourceOver}; ImageRadialFill radial{};
                        DrawColorSource color_source{DrawColorSource::Fixed};)),
               (External, (ContentSource source; Rect destination; ImageFit fit;
-                          ImageSampling sampling; Color placeholder;)),
+                          ImageSampling sampling; Color placeholder;
+                          ImageBlend blend{ImageBlend::SourceOver};)),
               (Children))
 };
 
@@ -241,10 +242,11 @@ class DisplayListRecorder {
     }
     void external(ContentSource source, Rect destination, ImageFit fit = ImageFit::Contain,
                   ImageSampling sampling = ImageSampling::Linear,
-                  Color placeholder = {0.15, 0.15, 0.15, 1}) {
+                  Color placeholder = {0.15, 0.15, 0.15, 1},
+                  ImageBlend blend = ImageBlend::SourceOver) {
         if (!active())
             return;
-        if (!source.valid() || !destination.valid() || !placeholder.valid() ||
+        if (!source.valid() || !destination.valid() || !placeholder.valid() || !valid(blend) ||
             (fit != ImageFit::Fill && fit != ImageFit::Contain && fit != ImageFit::Cover) ||
             (sampling != ImageSampling::Nearest && sampling != ImageSampling::Linear)) {
             reject(RecordingError::InvalidValue);
@@ -252,7 +254,7 @@ class DisplayListRecorder {
         }
         include(destination);
         operations_.push(
-            DrawOp::External(rstd::move(source), destination, fit, sampling, placeholder));
+            DrawOp::External(rstd::move(source), destination, fit, sampling, placeholder, blend));
     }
     void children() {
         if (!active())

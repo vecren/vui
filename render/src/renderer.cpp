@@ -519,6 +519,7 @@ auto resolve_items(OwnedFrame &frame, GlyphCache &cache, ImageCache &images, Ind
                 if (usize(index) == frame.externals.len())
                     frame.externals.push(ExternalBinding{value.frame, native->native(), {}});
                 item.kind = DrawKind::External;
+                item.blend = value.blend;
                 item.data.image_edges = 15;
                 color(value.tint);
                 item.resource_index = index;
