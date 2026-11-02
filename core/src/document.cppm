@@ -97,6 +97,31 @@ auto between_transform(const Snapshot &snapshot, UiId from, UiId to) -> Result<T
     auto inverse = target.unwrap().inverse();
     if (inverse.is_none())
         return Err(UiError::InvalidValue);
+    auto ancestors = [&](UiId id) {
+        Vec<UiId> result;
+        for (auto cursor = Some(id); cursor.is_some();) {
+            result.push(UiId(*cursor));
+            cursor = snapshot.get(*cursor)->parent;
+        }
+        return result;
+    };
+    auto source_path = ancestors(from), target_path = ancestors(to);
+    auto source_end = source_path.len(), target_end = target_path.len();
+    while (source_end != usize() && target_end != usize() &&
+           source_path[source_end - usize(1)] == target_path[target_end - usize(1)]) {
+        --source_end;
+        --target_end;
+    }
+    if (source_end != source_path.len()) {
+        Transform local_source, local_target;
+        for (usize i{}; i < source_end; ++i)
+            local_source = snapshot.get(source_path[i])->properties.transform * local_source;
+        for (usize i{}; i < target_end; ++i)
+            local_target = snapshot.get(target_path[i])->properties.transform * local_target;
+        auto local_inverse = local_target.inverse();
+        if (local_inverse.is_some())
+            return Ok(*local_inverse * local_source);
+    }
     return Ok(*inverse * source.unwrap());
 }
 template <class Snapshot>
