@@ -327,6 +327,7 @@ class UiDocument {
         TextAlignment alignment{TextAlignment::Natural};
         Scalar line_spacing{};
         Scalar character_spacing{};
+        TextSpacing spacing;
         bool bold{}, italic{}, dirty{true};
         Color color{0, 0, 0, 1};
         TextColors colors;
@@ -1226,6 +1227,7 @@ class UiDocument {
                 TextRequest request{text.value.as_str(), text.family.as_str(), text.language.as_str(),
                     text.size, wrap_width, text.direction, text.wrap, text.bold, text.italic, text.alignment, text.line_spacing};
                 request.character_spacing = text.character_spacing;
+                request.spacing = text.spacing;
                 if (text.boundaries.present()) request.boundaries = &text.boundaries;
                 else if (text.layout.is_some() && text.layout->text() == text.value.as_str())
                     request.boundaries = &text.layout->boundaries();
@@ -1236,7 +1238,9 @@ class UiDocument {
                     text.error = Some(result.unwrap_err());
                     return Some(UiError::TextLayoutFailed);
                 }
-                if (result->character_spacing() != text.character_spacing) {
+                auto resolved_spacing = text.spacing.resolve(text.size, text.character_spacing);
+                if (result->character_spacing() != text.character_spacing || result->spacing() != text.spacing ||
+                    resolved_spacing.is_err() || result->resolved_character_spacing() != resolved_spacing.unwrap()) {
                     text.error = Some(TextError::Unsupported);
                     return Some(UiError::TextLayoutFailed);
                 }
@@ -2556,7 +2560,7 @@ class UiDocument {
         if (text.family.as_str() != format.family || text.language.as_str() != format.language ||
             text.size != format.size || text.direction != format.direction ||
             text.wrap != format.wrap || text.bold != format.bold || text.italic != format.italic ||
-            text.alignment != format.alignment || text.line_spacing != format.line_spacing || text.character_spacing != format.character_spacing) {
+            text.alignment != format.alignment || text.line_spacing != format.line_spacing || text.character_spacing != format.character_spacing || text.spacing != format.spacing) {
             text.family = String::make(format.family);
             text.language = String::make(format.language);
             text.size = format.size;
@@ -2567,6 +2571,7 @@ class UiDocument {
             text.alignment = format.alignment;
             text.line_spacing = format.line_spacing;
             text.character_spacing = format.character_spacing;
+            text.spacing = format.spacing;
             text.dirty = true;
             changed(true, Some(id));
         }
