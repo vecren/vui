@@ -119,6 +119,9 @@ class PresentationLease {
     auto current() const -> slice<PropertyWrite> {
         return state_ ? state_.get()->current.as_slice() : slice<PropertyWrite>{};
     }
+    auto originals() const -> slice<PropertyWrite> {
+        return state_ ? state_.get()->originals.as_slice() : slice<PropertyWrite>{};
+    }
     void revoke() {
         if (state_)
             state_.get()->active = false;

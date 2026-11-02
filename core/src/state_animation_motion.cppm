@@ -13,13 +13,18 @@ template<class Projection> class StateAnimationMotion {
     bool active_{},dirty_{},sampling_{};Option<StateAnimationMotionError> error_;
     Serial interval_{16'666'667};
     auto now() const -> Serial {return ui_.animation_sample_time().unwrap_or(Serial(0));}
+    void committed(slice<PropertyWrite> writes) {
+        if constexpr(requires {projection_.committed(ui_,writes);})projection_.committed(ui_,writes);
+    }
     auto restore() -> Result<empty,UiError> {
         active_=false;
         if (lease_.active()) {
             auto result=ui_.release_presentation(lease_,LeaseEndPolicy::RestoreBase);if (result.is_err()) return result;
+            committed(lease_.originals());
         } else if (dirty_) {
             PresentationBatch batch;for (auto value:originals_) if (ui_.valid(value.key.target)) batch.append(PropertyWrite(value));
             auto result=ui_.set_presentation(batch);if (result.is_err()) return result;
+            committed(batch.writes());
         }
         dirty_=false;return Ok(empty{});
     }
@@ -57,7 +62,7 @@ template<class Projection> class StateAnimationMotion {
         PresentationBatch batch;auto projected=projection_.project(player_.values(),batch);
         if (projected.is_err()) return fail({Some(projected.unwrap_err()),{}, {}});
         auto written=ui_.write_presentation(lease_,batch,Some(motion_.binding.guard()));
-        if (written.is_err()) return fail({Some(written.unwrap_err()),{}, {}});dirty_=true;return Ok(empty{});
+        if (written.is_err()) return fail({Some(written.unwrap_err()),{}, {}});dirty_=true;committed(batch.writes());return Ok(empty{});
     }
     auto dispatch_events() -> Result<empty,StateAnimationMotionError> {
         unsigned count{};
