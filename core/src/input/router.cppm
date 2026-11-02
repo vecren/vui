@@ -119,7 +119,7 @@ class EventRouter {
         SampleTime sample_time;
         NativeCaptureResult native_capture{NativeCaptureResult::Unsupported};
     };
-    enum class CommandType { Capture, Release, Focus, RestartText };
+    enum class CommandType { Capture, Release, Focus, RestartText, CancelSubtree };
     struct Command {
         CommandType type;
         Index pointer{};
@@ -565,7 +565,14 @@ class EventRouter {
         }
         for (usize i{}; i < commands_.len(); ++i) {
             auto command = commands_[i];
-            if (command.type == CommandType::Focus) {
+            if (command.type == CommandType::CancelSubtree) {
+                for(auto &pointer:pointers_){
+                    bool affected=(pointer.capture && input_descendant(*update_,*command.target,*pointer.capture)) || (pointer.sequence_target && input_descendant(*update_,*command.target,*pointer.sequence_target));
+                    for(auto owner:arena_.owners({pointer.device,pointer.id}))affected|=input_descendant(*update_,*command.target,owner);
+                    if(affected)cancel(pointer,CancelReason::Explicit);
+                }
+                if(focus_ && input_descendant(*update_,*command.target,*focus_))change_focus({},CancelReason::Explicit);
+            } else if (command.type == CommandType::Focus) {
                 change_focus(command.target);
             } else if (command.type == CommandType::RestartText) {
                 if (command.target == text_client_) {
@@ -647,13 +654,14 @@ class EventRouter {
                                   : Result<empty, InputError>(Ok(empty{}));
     }
     auto command(Command value) -> Result<empty, InputError> {
-        if (!busy_ && !document_.can_route())
+        if (!busy_ && !document_.can_route() && value.type!=CommandType::CancelSubtree)
             return Err(InputError::Reentrant);
         if (closed_)
             return Err(InputError::Unavailable);
-        if (!update_.is_some() || !controls_ || !window_focused_)
+        if (!update_.is_some() || (value.type!=CommandType::CancelSubtree && (!controls_ || !window_focused_)))
             return Err(InputError::Unavailable);
-        if (value.target.is_some() &&
+        if(value.type==CommandType::CancelSubtree && (!value.target || !update_->get(*value.target)))return Err(InputError::InvalidId);
+        if (value.type!=CommandType::CancelSubtree && value.target.is_some() &&
             !eligible(*update_, *value.target,
                       value.type == CommandType::Capture || value.type == CommandType::Release,
                       true))
@@ -669,7 +677,7 @@ class EventRouter {
             return Err(InputError::Limit);
         }
         commands_.push(rstd::move(value));
-        if (!busy_) {
+        if (!busy_ && document_.can_route()) {
             begin();
             return end();
         }
@@ -1002,6 +1010,12 @@ class EventRouter {
     auto work() const -> InputWork { return work_; }
     auto contacts() const -> slice<PointerContact> { return contacts_.as_slice(); }
     auto focused() const -> Option<UiId> { return focus_; }
+    auto cancel_subtree(UiId root) -> Result<empty,InputError> {
+        if(closed_)return Err(InputError::Unavailable);
+        if(!document_.valid(root))return Err(InputError::InvalidId);
+        if(!update_ || !update_->get(root))return Ok(empty{});
+        return command({CommandType::CancelSubtree,0,Some(root)});
+    }
     auto focus_revision() const -> Serial { return focus_revision_; }
     auto captured(Index id, DeviceId device = 0) const -> Option<UiId> {
         for (const auto &state : pointers_)
@@ -1030,7 +1044,7 @@ class EventRouter {
     auto focus_request_result(FocusRequestId id) const -> Option<FocusRequestEvent> {
         return scopes_.focus_result(id);
     }
-    auto pending_sync() const -> bool { return scopes_.pending(); }
+    auto pending_sync() const -> bool { return scopes_.pending() || !commands_.is_empty(); }
     auto request_focus(Option<UiId> target) -> Result<empty, InputError> {
         return command({CommandType::Focus, 0, target});
     }
