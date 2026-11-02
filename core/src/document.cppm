@@ -498,6 +498,14 @@ class UiDocument {
         changed(true, Some(id));
         return true;
     }
+    auto write_character_spacing(UiId id, Node &node, Scalar value) -> bool {
+        if ((*node.text)->character_spacing == value)
+            return false;
+        (*node.text)->character_spacing = value;
+        (*node.text)->dirty = true;
+        changed(true, Some(id));
+        return true;
+    }
     auto write_text_color(UiId id, Node &node, Color value) -> bool {
         if ((*node.text)->color == value)
             return false;
@@ -719,6 +727,9 @@ class UiDocument {
         case PresentationProperty::PaintColor:
             result.value = AnimationValue::Tint(style.paint_color);
             break;
+        case PresentationProperty::CharacterSpacing:
+            result.value = AnimationValue::Number(node.text.is_some() ? (*node.text)->character_spacing : Scalar(0));
+            break;
         case PresentationProperty::TextColor:
             result.value = AnimationValue::Tint(node.text.is_some() ? (*node.text)->color : Color{});
             break;
@@ -745,6 +756,8 @@ class UiDocument {
                    property == PresentationProperty::Height;
         if (property == PresentationProperty::ContentTint || property == PresentationProperty::PaintColor)
             return write.value.is_Tint() && write.value.as_Tint().value.valid();
+        if (property == PresentationProperty::CharacterSpacing)
+            return node.text.is_some() && write.value.is_Number() && finite(write.value.as_Number().value);
         if (property == PresentationProperty::TextColor)
             return node.text.is_some() && write.value.is_Tint() && write.value.as_Tint().value.valid();
         if (property == PresentationProperty::Visible)
@@ -782,6 +795,9 @@ class UiDocument {
         case PresentationProperty::PaintColor:
             node.style.paint_color = write.value.as_Tint().value;
             break;
+        case PresentationProperty::CharacterSpacing:
+            write_character_spacing(write.key.target, node, write.value.as_Number().value);
+            return;
         case PresentationProperty::TextColor:
             write_text_color(write.key.target, node, write.value.as_Tint().value);
             return;
@@ -2035,7 +2051,7 @@ class UiDocument {
                 return Err(UiError::InvalidId);
             if (property_index(keys[i].property) >= static_cast<unsigned>(PresentationProperty::Count))
                 return Err(UiError::InvalidValue);
-            if (keys[i].property == PresentationProperty::TextColor && node->text.is_none())
+            if ((keys[i].property == PresentationProperty::TextColor || keys[i].property == PresentationProperty::CharacterSpacing) && node->text.is_none())
                 return Err(UiError::InvalidValue);
             if (keys[i].property == PresentationProperty::Visible && value_occupied(*node, UiValueProperty::Visible))
                 return Err(UiError::PropertyOwned);
@@ -2534,6 +2550,8 @@ class UiDocument {
             return Err(UiError::InvalidId);
         if (node->text.is_none() || !format.valid())
             return Err(UiError::InvalidValue);
+        if (property_occupied(*node, PresentationProperty::CharacterSpacing))
+            return Err(UiError::PropertyOwned);
         auto &text = **node->text;
         if (text.family.as_str() != format.family || text.language.as_str() != format.language ||
             text.size != format.size || text.direction != format.direction ||
@@ -2580,6 +2598,19 @@ class UiDocument {
             node->paint_dirty = true;
             changed(false);
         }
+        return Ok(empty{});
+    }
+    auto set_text_character_spacing(UiId id, Scalar value) -> Result<empty, UiError> {
+        if (layout_active_ || painting_)
+            return Err(UiError::Routing);
+        auto node = resolve(id);
+        if (!node)
+            return Err(UiError::InvalidId);
+        if (node->text.is_none() || !finite(value))
+            return Err(UiError::InvalidValue);
+        if (property_occupied(*node, PresentationProperty::CharacterSpacing))
+            return Err(UiError::PropertyOwned);
+        write_character_spacing(id, *node, value);
         return Ok(empty{});
     }
     auto set_text_color(UiId id, Color color) -> Result<empty, UiError> {

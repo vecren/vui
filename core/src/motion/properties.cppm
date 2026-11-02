@@ -16,6 +16,7 @@ enum class PresentationProperty {
     PaintColor,
     TextColor,
     Visible,
+    CharacterSpacing,
     Count
 };
 enum class TakeoverPolicy { PreserveCurrent, RejectOccupied };
@@ -67,6 +68,9 @@ class PresentationBatch {
     }
     void text_color(UiId id, Color value) {
         writes_.push({{id, PresentationProperty::TextColor}, AnimationValue::Tint(value)});
+    }
+    void character_spacing(UiId id, Scalar value) {
+        writes_.push({{id, PresentationProperty::CharacterSpacing}, AnimationValue::Number(value)});
     }
     void visible(UiId id, bool value) {
         writes_.push({{id, PresentationProperty::Visible}, AnimationValue::Number(value ? 1 : 0)});
