@@ -14,6 +14,8 @@ enum class PresentationProperty {
     ViewportOffset,
     ContentTint,
     PaintColor,
+    TextColor,
+    Visible,
     Count
 };
 enum class TakeoverPolicy { PreserveCurrent, RejectOccupied };
@@ -62,6 +64,12 @@ class PresentationBatch {
     }
     void paint_color(UiId id, Color value) {
         writes_.push({{id, PresentationProperty::PaintColor}, AnimationValue::Tint(value)});
+    }
+    void text_color(UiId id, Color value) {
+        writes_.push({{id, PresentationProperty::TextColor}, AnimationValue::Tint(value)});
+    }
+    void visible(UiId id, bool value) {
+        writes_.push({{id, PresentationProperty::Visible}, AnimationValue::Number(value ? 1 : 0)});
     }
     void clip(UiId id, vui::Clip value) {
         writes_.push({{id, PresentationProperty::Clip}, AnimationValue::Number(0), value});

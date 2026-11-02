@@ -497,6 +497,14 @@ class UiDocument {
         changed(true, Some(id));
         return true;
     }
+    auto write_text_color(UiId id, Node &node, Color value) -> bool {
+        if ((*node.text)->color == value)
+            return false;
+        (*node.text)->color = value;
+        node.paint_dirty = true;
+        changed(false, Some(id));
+        return true;
+    }
     auto write_visible(UiId id, Node &node, bool value) -> bool {
         if (node.style.visible == value)
             return false;
@@ -710,6 +718,12 @@ class UiDocument {
         case PresentationProperty::PaintColor:
             result.value = AnimationValue::Tint(style.paint_color);
             break;
+        case PresentationProperty::TextColor:
+            result.value = AnimationValue::Tint(node.text.is_some() ? (*node.text)->color : Color{});
+            break;
+        case PresentationProperty::Visible:
+            result.value = AnimationValue::Number(style.visible ? 1 : 0);
+            break;
         case PresentationProperty::Count:
             break;
         case PresentationProperty::Clip:
@@ -730,6 +744,10 @@ class UiDocument {
                    property == PresentationProperty::Height;
         if (property == PresentationProperty::ContentTint || property == PresentationProperty::PaintColor)
             return write.value.is_Tint() && write.value.as_Tint().value.valid();
+        if (property == PresentationProperty::TextColor)
+            return node.text.is_some() && write.value.is_Tint() && write.value.as_Tint().value.valid();
+        if (property == PresentationProperty::Visible)
+            return write.value.is_Number() && (write.value.as_Number().value == 0 || write.value.as_Number().value == 1);
         if (property == PresentationProperty::Clip)
             return write.clip.valid() && node.viewport.is_none();
         if (property == PresentationProperty::ViewportOffset)
@@ -763,6 +781,12 @@ class UiDocument {
         case PresentationProperty::PaintColor:
             node.style.paint_color = write.value.as_Tint().value;
             break;
+        case PresentationProperty::TextColor:
+            write_text_color(write.key.target, node, write.value.as_Tint().value);
+            return;
+        case PresentationProperty::Visible:
+            write_visible(write.key.target, node, write.value.as_Number().value == 1);
+            return;
         case PresentationProperty::Count:
             break;
         case PresentationProperty::Clip:
@@ -1931,6 +1955,8 @@ class UiDocument {
         if (target.document() != session_ || !target.status().valid)
             return Err(UiError::InvalidId);
         auto node = resolve(target.node());
+        if (target.state_->property == UiValueProperty::Visible && property_occupied(*node, PresentationProperty::Visible))
+            return Err(UiError::PropertyOwned);
         if (value_occupied(*node, target.state_->property))
             return Err(UiError::PropertyOwned);
         auto writer = rstd::rc::make_rc<UiValueWriterState>(target.state_);
@@ -2003,6 +2029,10 @@ class UiDocument {
                 return Err(UiError::InvalidId);
             if (property_index(keys[i].property) >= static_cast<unsigned>(PresentationProperty::Count))
                 return Err(UiError::InvalidValue);
+            if (keys[i].property == PresentationProperty::TextColor && node->text.is_none())
+                return Err(UiError::InvalidValue);
+            if (keys[i].property == PresentationProperty::Visible && value_occupied(*node, UiValueProperty::Visible))
+                return Err(UiError::PropertyOwned);
             for (usize j{}; j < i; ++j)
                 if (keys[j] == keys[i])
                     return Err(UiError::InvalidValue);
@@ -2101,6 +2131,7 @@ class UiDocument {
             if (!node) return Err(UiError::InvalidId);
             if (!valid_property(write,*node)) return Err(UiError::InvalidValue);
             if (property_occupied(*node,write.key.property)) return Err(UiError::PropertyOwned);
+            if (write.key.property==PresentationProperty::Visible && value_occupied(*node,UiValueProperty::Visible)) return Err(UiError::PropertyOwned);
             for (usize j{};j<i;++j) if (batch.writes()[j].key==write.key) return Err(UiError::InvalidValue);
         }
         for (const auto &write:batch.writes()) apply_property(*resolve(write.key.target),write);
@@ -2552,11 +2583,9 @@ class UiDocument {
             return Err(UiError::InvalidId);
         if (node->text.is_none() || !color.valid())
             return Err(UiError::InvalidValue);
-        if ((*node->text)->color != color) {
-            (*node->text)->color = color;
-            node->paint_dirty = true;
-            changed(false);
-        }
+        if (property_occupied(*node, PresentationProperty::TextColor))
+            return Err(UiError::PropertyOwned);
+        write_text_color(id, *node, color);
         return Ok(empty{});
     }
     auto set_text_colors(UiId id, TextColors colors) -> Result<empty, UiError> {
@@ -2920,7 +2949,7 @@ class UiDocument {
         auto node = resolve(id);
         if (!node)
             return Err(UiError::InvalidId);
-        if (value_occupied(*node, UiValueProperty::Visible))
+        if (value_occupied(*node, UiValueProperty::Visible) || property_occupied(*node, PresentationProperty::Visible))
             return Err(UiError::PropertyOwned);
         write_visible(id, *node, value);
         return Ok(empty{});
