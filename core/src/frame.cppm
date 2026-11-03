@@ -41,7 +41,7 @@ class FrameDraw {
 struct FramePass {
     Vec<FrameDraw> draws;
 };
-enum class FrameError { InvalidSurface, InvalidTransform, MissingNode, Limit, InvalidContent };
+enum class FrameError { InvalidSurface, InvalidTransform, MissingNode, Limit, InvalidContent, Busy };
 struct ContentSelection {
     Serial source_id{}, source_revision{};
     Option<TextureFrame> frame;

@@ -294,6 +294,10 @@ class FrameLoop {
         auto id = *pending_;
         auto plan = session_.plan_frame();
         if (plan.is_err()) {
+            if (plan.unwrap_err() == FrameError::Busy) {
+                waiting_ = true;
+                return Ok(empty{});
+            }
             events_.push({id, FrameEventType::Failed, {}, 0, {}, {}, Some(plan.unwrap_err())});
             pending_ = None();
             return Ok(empty{});

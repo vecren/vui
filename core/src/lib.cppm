@@ -7,6 +7,7 @@ export import :display_list;
 export import :composition;
 export import :endpoint;
 export import :frame;
+export import :frame_content;
 export import :binding;
 export import :signal;
 export import :state;

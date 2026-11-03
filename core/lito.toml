@@ -21,6 +21,7 @@ sources = [
     "src/document.cppm",
     "src/endpoint.cppm",
     "src/frame.cppm",
+    "src/frame_content.cppm",
     "src/image.cppm",
     "src/image/nine_patch.cppm",
     "src/input/hit_test.cppm",

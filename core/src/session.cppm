@@ -3,6 +3,7 @@ import :events;
 import :motion.drivers;
 import :visual;
 import :frame;
+import :frame_content;
 import :state.bindings;
 using namespace rstd::prelude;
 
@@ -87,6 +88,7 @@ class InputTimings {
 class UiSession {
     UiDocument document_;
     MotionRuntime motion_{document_};
+    FrameContentRuntime frame_content_{document_};
     EventRouter input_{document_};
     UiStateBindings state_bindings_{document_};
     Serial render_session_{new_session()};
@@ -96,7 +98,7 @@ class UiSession {
     Option<SurfaceInfo> surface_;
     Vec<MutationResult> mutations_;
     Serial last_time_{}, published_ui_{}, frame_id_{}, revealed_focus_{};
-    bool advancing_{}, closing_{}, closed_{};
+    bool advancing_{}, planning_{}, closing_{}, closed_{};
     AdvanceTimings *active_timings_{};
     Option<AdvanceTimings> last_timings_;
     InputTimings::Data *active_inputs_{};
@@ -342,13 +344,14 @@ class UiSession {
     auto document() -> UiDocument & { return document_; }
     auto input() -> EventRouter & { return input_; }
     auto motion() -> MotionRuntime & { return motion_; }
+    auto frame_content() -> FrameContentRuntime & { return frame_content_; }
     auto state_bindings() -> UiStateBindings & { return state_bindings_; }
-    auto next_tick() const -> Option<Serial> { return motion_.next_tick(); }
+    auto next_tick() const -> Option<Serial> { return frame_content_.active() ? None<Serial>() : motion_.next_tick(); }
     auto render_scene() const -> const RenderScene & { return endpoint_.scene(); }
     auto set_frame_waker(Option<FrameWaker> waker) -> Result<empty, SessionError> {
         if (closed_ || closing_)
             return Err(SessionError{SessionStage::Closed});
-        if (advancing_ || !document_.can_route())
+        if (advancing_ || planning_ || !document_.can_route())
             return Err(SessionError{SessionStage::Reentrant});
         if (waker.is_some() && !waker->valid())
             waker = None();
@@ -393,7 +396,7 @@ class UiSession {
                  DiagnosticsOptions options = {}) -> Result<AdvanceResult, SessionError> {
         if (closed_ || closing_)
             return Err(SessionError{SessionStage::Closed});
-        if (advancing_ || !document_.can_route())
+        if (advancing_ || planning_ || !document_.can_route())
             return Err(SessionError{SessionStage::Reentrant});
         AdvanceTimings sample;
         sample.requested = timing;
@@ -524,18 +527,30 @@ class UiSession {
         bool surface_changed = surface_.is_none() || surface_->generation != surface.generation ||
                                surface_->logical_size != surface.logical_size ||
                                surface_->scale != surface.scale;
+        auto published = publish_update();
+        if (published.is_err()) return failure(published.unwrap_err());
+        surface_ = Some(surface);
+        bool content_changed = observe_content();
+        return Ok(AdvanceResult{update_->revision(), visual_.applied_revision(), stats,
+                                changed || surface_changed || content_changed || frame_content_.active(), processed,
+                                document_.animations_active() || motion_.active() || frame_content_.active(),
+                                state_bindings_.pending()});
+    }
+
+    auto publish_update() -> Result<empty, SessionError> {
+        bool changed = published_ui_ != update_->revision();
         if (changed) {
             auto transaction = visual_.build(*update_, {active_timings_ != nullptr});
             if (active_timings_)
                 active_timings_->build.add(visual_.last_build_timings()->build);
             if (transaction.is_err())
-                return failure(
+                return Err(
                     SessionError{SessionStage::Publish, {}, {}, Some(transaction.unwrap_err())});
             auto pending = Some(transaction.unwrap());
             auto enqueued = endpoint_.try_enqueue(pending);
             if (enqueued != EnqueueResult::Accepted) {
                 visual_.acknowledge(ApplyEvent::Cancelled(pending->header())).unwrap();
-                return failure(SessionError{SessionStage::Backpressure});
+                return Err(SessionError{SessionStage::Backpressure});
             }
             endpoint_.apply_pending({active_timings_ != nullptr});
             if (active_timings_)
@@ -546,44 +561,64 @@ class UiSession {
                     active_inputs_->batch.applied = Some(rstd::time::Instant::now());
                 auto acknowledged = visual_.acknowledge(event);
                 if (acknowledged.is_err())
-                    return failure(SessionError{
+                    return Err(SessionError{
                         SessionStage::Publish, {}, {}, Some(acknowledged.unwrap_err())});
                 if (event.is_Rejected())
-                    return failure(SessionError{SessionStage::Apply,
+                    return Err(SessionError{SessionStage::Apply,
                                                 {},
                                                 {},
                                                 {},
                                                 Some(ApplyError(event.as_Rejected().error))});
                 if (event.is_Cancelled())
-                    return failure(SessionError{SessionStage::Closed});
+                    return Err(SessionError{SessionStage::Closed});
             }
             published_ui_ = update_->revision();
         }
-        surface_ = Some(surface);
-        bool content_changed = observe_content();
-        return Ok(AdvanceResult{update_->revision(), visual_.applied_revision(), stats,
-                                changed || surface_changed || content_changed, processed,
-                                document_.animations_active() || motion_.active(),
-                                state_bindings_.pending()});
+        return Ok(empty{});
     }
 
   public:
     auto plan_frame() -> Result<FramePlan, FrameError> {
         if (closed_ || closing_ || surface_.is_none())
             return Err(FrameError::InvalidSurface);
+        if (advancing_ || planning_ || !document_.can_route()) return Err(FrameError::InvalidContent);
         if (frame_id_ == ~Serial{})
             return Err(FrameError::Limit);
+        planning_ = true;
+        struct Guard {bool &value; ~Guard() {value = false;}} guard{planning_};
+        auto time = update_->animation_sample_time();
+        if (!time) return Err(FrameError::InvalidContent);
+        auto refresh = [&]() -> Result<const UiUpdate *, FrameError> {
+            if (document_.revision() != update_->revision() || document_.pending_mutations() != usize()) {
+                UpdateStats stats;
+                auto settled = settle(surface_->logical_size, *time, stats);
+                if (settled.is_err()) return Err(FrameError::InvalidContent);
+            }
+            return Ok(&*update_);
+        };
+        auto initial = refresh();
+        if (initial.is_err()) return Err(initial.unwrap_err());
+        auto layout = update_->layout_revision();
+        auto prepared = frame_content_.prepare(refresh, *surface_);
+        if (prepared.is_err()) return Err(prepared.unwrap_err());
+        auto refreshed = refresh();
+        if (refreshed.is_err()) return Err(refreshed.unwrap_err());
+        if (layout != update_->layout_revision()) return Err(FrameError::InvalidContent);
+        auto published = publish_update();
+        if (published.is_err()) return Err(FrameError::InvalidContent);
+        observe_content();
         FramePlanner planner;
         return planner.build(endpoint_.scene(), *surface_, ++frame_id_);
     }
     auto close() -> Result<empty, SessionError> {
         if (closed_)
             return Ok(empty{});
-        if (advancing_ || !document_.can_route())
+        if (advancing_ || planning_ || !document_.can_route())
             return Err(SessionError{SessionStage::Reentrant});
         closing_ = true;
         state_bindings_.close();
         motion_.close();
+        frame_content_.close();
         auto animations = document_.close_animations();
         if (animations.is_err()) {
             SessionError error{SessionStage::Animation};
