@@ -157,6 +157,7 @@ class UiUpdate {
         UpdateStats stats;
         Serial layout_revision{};
         Option<UpdateTimings> timings;
+        Option<Serial> animation_time;
     };
     rstd::sync::Arc<Data> data_;
     explicit UiUpdate(Data data) : data_(rstd::sync::Arc<Data>::make(rstd::move(data))) {}
@@ -178,6 +179,7 @@ class UiUpdate {
     auto stats() const -> UpdateStats { return data_->stats; }
     auto timings() const -> Option<UpdateTimings> { return data_->timings; }
     auto layout_revision() const -> Serial { return data_->layout_revision; }
+    auto animation_sample_time() const -> Option<Serial> { return data_->animation_time; }
     auto layout_rect(UiId id) const -> Result<Rect, UiError> {
         auto node = get(id);
         if (!node)
@@ -3333,7 +3335,7 @@ class UiDocument {
         }
         paint_diagnostics_ = {};
         sweep_bindings();
-        UiUpdate::Data output{session_, revision_, root_, {}, {}, {}, layout_revision_, {}};
+        UiUpdate::Data output{session_, revision_, root_, {}, {}, {}, layout_revision_, {}, animation_time_};
         output.indices.reserve(slots_.len());
         for (usize i{}; i < slots_.len(); ++i)
             output.indices.push(~Index{});
