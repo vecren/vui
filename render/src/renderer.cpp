@@ -388,8 +388,7 @@ struct UiPassFactory {
                     vk::GraphExecutionStage::Prepare,
                     description.id,
                     {},
-                    vk::GraphExecutionCause::Resource(
-                        vrento::resource::ResourceErrorSnapshot(prepared.unwrap_err()))});
+                    vk::GraphExecutionCause::Resource(prepared.unwrap_err())});
             if (prepared->status == vk::PipelineReadiness::Pending)
                 return Ok(vrento::PendingPreparation{});
             if (prepared->error)
@@ -397,8 +396,7 @@ struct UiPassFactory {
                     vk::GraphExecutionStage::Prepare,
                     description.id,
                     {},
-                    vk::GraphExecutionCause::Resource(
-                        vrento::resource::ResourceErrorSnapshot(prepared->error.take().unwrap()))});
+                    vk::GraphExecutionCause::Resource(prepared->error.take().unwrap())});
             if (!prepared->pipeline)
                 return Err(
                     vk::GraphExecutionError{vk::GraphExecutionStage::Prepare, description.id});
@@ -507,7 +505,7 @@ auto resolve_items(OwnedFrame &frame, GlyphCache &cache, ImageCache &images, Ind
                     value.sampling == ImageSampling::Linear);
                 if (prepared.is_err()) {
                     Error error{Stage::ExternalContent};
-                    error.content = Some(prepared.unwrap_err());
+                    error.content = Some(tex::ErrorSnapshot::capture(prepared.unwrap_err()));
                     return Err(error);
                 }
                 Index index = static_cast<Index>(frame.externals.len().to_primitive());

@@ -35,16 +35,16 @@ struct Error {
     Stage stage;
     VkResult result{VK_SUCCESS};
     Option<TextError> text{};
-    Option<vrento::texture::Error> content{};
-    Option<vrento::vulkan::GraphExecutionError> graph_error{};
-    vrento::vulkan::BackendErrorSnapshot backend;
+    Option<vrento::texture::ErrorSnapshot> content{};
+    Option<vrento::vulkan::GraphExecutionErrorSnapshot> graph_error{};
+    Option<vrento::ErrorDiagnostic> backend;
     Error(Stage value, VkResult native = VK_SUCCESS, Option<TextError> text_error = {},
-          Option<vrento::texture::Error> texture_error = {})
+          Option<vrento::texture::ErrorSnapshot> texture_error = {})
         : stage(value), result(native), text(rstd::move(text_error)),
           content(rstd::move(texture_error)) {}
     Error(const Error &other)
         : stage(other.stage), result(other.result), text(other.text.clone()),
-          content(other.content.clone()), graph_error(other.graph_error.clone()), backend(other.backend) {}
+          content(other.content.clone()), graph_error(other.graph_error.clone()), backend(other.backend.clone()) {}
     Error(Error &&) = default;
     auto operator=(Error &&) -> Error & = default;
     auto operator=(const Error &other) -> Error & {
@@ -61,12 +61,15 @@ struct Error {
         case vrento::vulkan::DeviceSessionStage::Device: stage = Stage::Device; break;
         case vrento::vulkan::DeviceSessionStage::Lost: stage = Stage::Lost; break;
         }
-        Error result{stage, cause.result}; result.backend = rstd::move(cause.cause); return result;
+        Error result{stage, cause.result};
+        if (cause.cause) result.backend = Some(vrento::ErrorDiagnostic::capture(*cause.cause));
+        return result;
     }
     static auto graph(vrento::vulkan::GraphExecutionError cause) -> Error {
         Error result{Stage::Graph, cause.native_result()};
-        result.content = cause.texture_error();
-        result.graph_error = Some(rstd::move(cause));
+        auto texture = cause.texture_error();
+        if (texture) result.content = Some(vrento::texture::ErrorSnapshot::capture(**texture));
+        result.graph_error = Some(vrento::vulkan::GraphExecutionErrorSnapshot::capture(cause));
         return result;
     }
     static auto graph(vrento::fg::Error cause) -> Error {
@@ -79,13 +82,12 @@ struct Error {
             vrento::vulkan::GraphExecutionStage::Prepare,
             {},
             {},
-            vrento::vulkan::GraphExecutionCause::Resource(
-                vrento::resource::ResourceErrorSnapshot(rstd::move(cause)))});
+            vrento::vulkan::GraphExecutionCause::Resource(rstd::move(cause))});
         result.stage = stage;
         return result;
     }
     static auto texture(Stage stage, vrento::texture::Error cause) -> Error {
-        return {stage, VkResult(cause.native), {}, Some(rstd::move(cause))};
+        return {stage, VkResult(cause.native), {}, Some(vrento::texture::ErrorSnapshot::capture(cause))};
     }
 };
 struct Completion {
