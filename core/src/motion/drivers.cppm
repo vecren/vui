@@ -72,6 +72,10 @@ class MotionRuntime {
     Vec<Entry> entries_;
     Vec<MotionEvent> events_;
     bool busy_{}, closed_{};
+    static auto eligible(const Entry &entry, Serial time) -> bool {
+        return entry.guard.alive() && entry.sampled != Some(time) &&
+               (entry.deadline.is_none() || time >= *entry.deadline);
+    }
 
   public:
     explicit MotionRuntime(UiDocument &document) : document_(document) {}
@@ -145,7 +149,7 @@ class MotionRuntime {
                 events_.push({entry.id, MotionEndReason::Cancelled, time});
                 continue;
             }
-            if (entry.sampled == Some(time) || (entry.deadline.is_some() && time < *entry.deadline))
+            if (!eligible(entry, time))
                 continue;
             MotionContext context(document_, time, entry.guard);
             auto result = entry.driver->sample(context, timing);
@@ -175,6 +179,12 @@ class MotionRuntime {
         if (error.is_some())
             return Err(*error);
         return Ok(empty{});
+    }
+    auto pending(Serial time) const -> bool {
+        for (const auto &entry : entries_)
+            if (eligible(entry, time))
+                return true;
+        return false;
     }
     auto active() const -> bool {
         for (const auto &entry : entries_)
