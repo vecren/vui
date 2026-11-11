@@ -13,6 +13,7 @@ struct ScrollbarOptions {
     ScrollbarPageStep page_step{ScrollbarPageStep::Viewport};
     bool repeat_track{};
     Scalar track_quantum{};
+    bool reverse_scroll{};
     auto valid() const -> bool {
         Scalar insets[]{handle_insets.left,handle_insets.top,handle_insets.right,handle_insets.bottom};for (auto value:insets) if (!finite(value) || value<0 || value>1048576) return false;
         return (axis==ScrollbarAxis::Horizontal || axis==ScrollbarAxis::Vertical) && finite(minimum_handle) && minimum_handle>=0 && minimum_handle<=1048576 && finite(line_step) && line_step>0 && line_step<=1 &&
@@ -72,7 +73,7 @@ class ScrollbarState {
         auto next=value_;next.position=value;set(ui,id,next).unwrap();
         if (scroll_.valid()) {
             auto metrics=ScrollView::metrics(ui,scroll_);
-            if (metrics.is_ok()) {auto offset=metrics->offset;if (vertical()) offset.y=value*metrics->maximum.y;else offset.x=value*metrics->maximum.x;ScrollView::set_offset(ui,scroll_,offset).unwrap();}
+            if (metrics.is_ok()) {auto offset=metrics->offset;auto position=options_.reverse_scroll ? 1-value : value;if (vertical()) offset.y=position*metrics->maximum.y;else offset.x=position*metrics->maximum.x;ScrollView::set_offset(ui,scroll_,offset).unwrap();}
             else unbind_scroll();
         }
         changed_.emit(value).unwrap();
@@ -123,7 +124,8 @@ class ScrollbarState {
         auto offset=vertical() ? metrics.offset.y : metrics.offset.x;auto maximum=vertical() ? metrics.maximum.y : metrics.maximum.x;
         auto viewport=vertical() ? metrics.viewport.height : metrics.viewport.width;auto extent=vertical() ? metrics.extent.height : metrics.extent.width;
         auto excess=offset<0 ? -offset : offset>maximum ? offset-maximum : Scalar(0);
-        return set(ui,id,{maximum>0 ? bounded(offset/maximum) : Scalar(0),extent>0 ? bounded((viewport-excess)/extent) : Scalar(1)});
+        auto position=maximum>0 ? bounded(offset/maximum) : Scalar(0);if (maximum>0 && options_.reverse_scroll) position=1-position;
+        return set(ui,id,{position,extent>0 ? bounded((viewport-excess)/extent) : Scalar(1)});
     }
     auto bind_scroll(UiDocument &ui,UiId id,UiId scroll) -> Result<empty,UiError> {
         if (ScrollView::content(ui,scroll).is_err()) return Err(UiError::InvalidId);

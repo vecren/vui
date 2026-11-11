@@ -21,10 +21,12 @@ struct StateAnimationTransition {
 };
 struct StateAnimationCurve { Option<Scalar> constant;Vec<ScalarCurveKey> keys; };
 struct StateAnimationTrack { Index channel{};StateAnimationCurve curve; };
+struct StateAnimationMarker {Scalar time{};Index id{};};
 enum class StateAnimationClipSampling { Mathematical,NormalizedFloat32Ceil };
 struct StateAnimationClip {
     Scalar start{},stop{};Vec<StateAnimationTrack> tracks;
     ScalarCurveArithmetic arithmetic{};StateAnimationClipSampling sampling{};
+    Vec<StateAnimationMarker> markers;
 };
 struct StateAnimationState {
     StateAnimationClip clip;Scalar speed{1};bool loop{},write_defaults{true};
@@ -115,7 +117,7 @@ class StateAnimationProgram {
         if (value.states.len()>usize(1024) || value.defaults.len()>usize(4096) || value.parameters.len()>usize(256)) return Err(StateAnimationError::Limit);
         for (auto v:value.defaults) if (!finite(v)) return Err(StateAnimationError::InvalidValue);
         for (auto p:value.parameters) if (!parameter_value(p.kind,p.initial)) return Err(StateAnimationError::InvalidParameter);
-        usize transition_count{},key_count{};
+        usize transition_count{},key_count{},marker_count{};
         auto transitions=[&](slice<StateAnimationTransition> entries) -> Result<empty,StateAnimationError> {
             transition_count+=entries.len();if (transition_count>usize(4096)) return Err(StateAnimationError::Limit);
             for (const auto &t:entries) {
@@ -142,6 +144,8 @@ class StateAnimationProgram {
             if (unsigned(clip.arithmetic)>unsigned(ScalarCurveArithmetic::Float32Horner) || unsigned(clip.sampling)>unsigned(StateAnimationClipSampling::NormalizedFloat32Ceil)) return Err(StateAnimationError::InvalidValue);
             if (clip.sampling!=StateAnimationClipSampling::Mathematical && (Scalar(float(clip.start))!=clip.start || Scalar(float(clip.stop))!=clip.stop)) return Err(StateAnimationError::InvalidValue);
             if (clip.sampling==StateAnimationClipSampling::NormalizedFloat32Ceil && (clip.start!=0 || clip.stop<=0)) return Err(StateAnimationError::InvalidValue);
+            marker_count+=clip.markers.len();if(marker_count>usize(4096))return Err(StateAnimationError::Limit);
+            auto previous=clip.start;for(auto marker:clip.markers){if(!finite(marker.time) || marker.time<previous || marker.time>clip.stop)return Err(StateAnimationError::InvalidValue);previous=marker.time;}
             auto t=transitions(state.transitions.as_slice());if (t.is_err()) return Err(t.unwrap_err());
             if (clip.tracks.len()>value.defaults.len()) return Err(StateAnimationError::InvalidValue);
             Vec<Index> channels;
@@ -159,13 +163,13 @@ class StateAnimationProgram {
         return Ok(StateAnimationProgram(rstd::move(value)));
     }
 };
-enum class StateAnimationEventKind { Entered, TransitionFinished, Completed, Interrupted, Exited, Stopped };
-struct StateAnimationEvent {StateAnimationEventKind kind;Serial owner{},run{},time_ns{};Index state{};};
+enum class StateAnimationEventKind { Entered, TransitionFinished, Completed, Interrupted, Exited, Stopped, Marker };
+struct StateAnimationEvent {StateAnimationEventKind kind;Serial owner{},run{},time_ns{};Index state{},marker{},marker_index{};};
 struct StateAnimationStatus {
     bool running{};Index state{};Serial run{};Option<Index> target;Option<Serial> target_run;
 };
 class StateAnimationPlayer {
-    struct Cursor {Index state{};Serial run{},started{};Scalar offset{};Vec<Scalar> inherited;bool completed{};Option<Serial> evaluated;};
+    struct Cursor {Index state{};Serial run{},started{};Scalar offset{};Vec<Scalar> inherited;bool completed{};Option<Serial> evaluated,marker_seen;};
     struct Origin {bool any{};Index state{},index{};};
     struct Blend {
         Cursor next;Origin origin;Scalar duration{};Serial started{};
@@ -179,7 +183,7 @@ class StateAnimationPlayer {
     struct Snapshot {};
     StateAnimationPlayer(StateAnimationProgram program,Snapshot):program_(rstd::move(program)) {}
     static auto copy_cursor(const Cursor &value) -> Cursor {
-        return {value.state,value.run,value.started,value.offset,Vec<Scalar>::from(value.inherited.as_slice()),value.completed,value.evaluated};
+        return {value.state,value.run,value.started,value.offset,Vec<Scalar>::from(value.inherited.as_slice()),value.completed,value.evaluated,value.marker_seen};
     }
     auto copy() const -> StateAnimationPlayer {
         StateAnimationPlayer result(StateAnimationProgram(program_),Snapshot{});
@@ -200,6 +204,54 @@ class StateAnimationPlayer {
     auto emit(StateAnimationEventKind kind,const Cursor &cursor,Serial time) -> Result<empty,StateAnimationError> {
         if (events_.len()>=usize(4096)) return Err(StateAnimationError::Limit);
         events_.push({kind,owner_,cursor.run,time,cursor.state});return Ok(empty{});
+    }
+    auto marker_fraction(const Cursor &cursor,StateAnimationMarker marker) const -> Scalar {
+        const auto &clip=state(cursor).clip;
+        return clip.stop>clip.start ? (marker.time-clip.start)/(clip.stop-clip.start):Scalar(0);
+    }
+    auto marker_time(const Cursor &cursor,Scalar point) const -> Result<Option<Serial>,StateAnimationError> {
+        auto delta=(point-cursor.offset)*period(cursor)*1e9;
+        if (!finite(point) || !finite(delta) || delta>=Scalar(~Serial{}-cursor.started)) return Err(StateAnimationError::Limit);
+        return delta<0 ? Ok(None<Serial>()) : Ok(Some(cursor.started+Serial(__builtin_ceil(delta))));
+    }
+    auto markers(Cursor &cursor,Serial time) -> Result<empty,StateAnimationError> {
+        const auto &s=state(cursor);auto duration=period(cursor);const auto &clip=s.clip;
+        for(usize index{};index<clip.markers.len();++index){auto marker=clip.markers[index];
+            auto fraction=marker_fraction(cursor,marker);
+            auto from=cursor.marker_seen.is_some() ? position(cursor,*cursor.marker_seen):cursor.offset;
+            auto cycle=s.loop && duration>0 ? __builtin_fmax(0,__builtin_floor(from-fraction)):Scalar(0);
+            for(;;){
+                auto deadline=marker_time(cursor,cycle+fraction);if(deadline.is_err())return Err(deadline.unwrap_err());
+                if(deadline->is_some()){
+                    auto when=**deadline;if(when>time)break;
+                    if(cursor.marker_seen.is_none() || when>*cursor.marker_seen){
+                        if(events_.len()>=usize(4096))return Err(StateAnimationError::Limit);
+                        events_.push({StateAnimationEventKind::Marker,owner_,cursor.run,when,cursor.state,marker.id,Index(index.to_primitive())});
+                    }
+                }
+                if(!s.loop || duration==0)break;
+                if(cycle+1<=cycle)return Err(StateAnimationError::Limit);cycle+=1;
+            }
+        }
+        cursor.marker_seen=Some(time);return Ok(empty{});
+    }
+    auto collect_markers(Serial time) -> Result<empty,StateAnimationError> {
+        auto first=events_.len();auto source_end=time;
+        if(blend_.is_some()){
+            auto ns=__builtin_ceil(blend_->duration*1e9);
+            if(!finite(ns) || ns>=Scalar(~Serial{}-blend_->started))return Err(StateAnimationError::Limit);
+            auto end=blend_->started+Serial(ns);if(end<source_end)source_end=end;
+        }
+        if(!(blend_.is_some() && blend_->frozen)){auto result=markers(current_,source_end);if(result.is_err())return result;}
+        if(blend_.is_some()){auto result=markers(blend_->next,time);if(result.is_err())return result;}
+        auto before=[&](const StateAnimationEvent &a,const StateAnimationEvent &b){
+            if(a.time_ns!=b.time_ns)return a.time_ns<b.time_ns;
+            if(a.run!=b.run)return false;
+            const auto &clip=definition().states[usize(a.state)].clip;
+            return clip.stop>clip.start && clip.markers[usize(a.marker_index)].time==clip.stop && clip.markers[usize(b.marker_index)].time==clip.start;
+        };
+        for(auto i=first;i<events_.len();++i)for(auto j=i;j>first && before(events_[j],events_[j-usize(1)]);--j){auto item=events_[j];events_[j]=events_[j-usize(1)];events_[j-usize(1)]=item;}
+        return Ok(empty{});
     }
     auto cursor(Index index,Serial time,Scalar offset) -> Result<Cursor,StateAnimationError> {
         if (next_run_==~Serial{}) return Err(StateAnimationError::Limit);
@@ -303,6 +355,7 @@ class StateAnimationPlayer {
             auto entered=emit(StateAnimationEventKind::Entered,current_,time);if (entered.is_err()) return entered;
         }
         auto rendered=render(time);if (rendered.is_err()) return rendered;
+        auto marked=collect_markers(time);if(marked.is_err())return marked;
         if (blend_.is_some() && Scalar(time-blend_->started)/1e9>=blend_->duration) {
             auto exited=emit(StateAnimationEventKind::Exited,current_,time);if (exited.is_err()) return exited;
             current_=rstd::move(blend_->next);blend_=None();
@@ -312,6 +365,7 @@ class StateAnimationPlayer {
         if (selected.is_some()) {
             auto started=begin(*selected,time);if (started.is_err()) return started;
             rendered=render(time);if (rendered.is_err()) return rendered;
+            marked=collect_markers(time);if(marked.is_err())return marked;
         }
         auto completed=complete(current_,time);if (completed.is_err()) return completed;
         if (blend_.is_some()) {completed=complete(blend_->next,time);if (completed.is_err()) return completed;}
@@ -335,6 +389,7 @@ class StateAnimationPlayer {
     StateAnimationPlayer(StateAnimationPlayer &&)=default;
     auto operator=(StateAnimationPlayer &&) -> StateAnimationPlayer & =default;
     auto values() const -> slice<Scalar> {return values_.as_slice();}
+    auto owner() const -> Serial {return owner_;}
     auto status() const -> StateAnimationStatus {
         return {mode_==Mode::Running,current_.state,current_.run,blend_.is_some() ? Some(Index(blend_->next.state)):None<Index>(),blend_.is_some() ? Some(Serial(blend_->next.run)):None<Serial>()};
     }
@@ -360,9 +415,10 @@ class StateAnimationPlayer {
         if (usize(index)>=definition().states.len()) return Err(StateAnimationError::InvalidState);
         if (!finite(offset) || offset<0) return Err(StateAnimationError::InvalidValue);
         auto work=copy();if (work.sampled_.is_some() && time<*work.sampled_) return Err(StateAnimationError::Timing);
-        if (work.mode_==Mode::Running) {auto rendered=work.render(time);if (rendered.is_err()) return Err(rendered.unwrap_err());auto interrupted=work.emit(StateAnimationEventKind::Interrupted,work.blend_.is_some() ? work.blend_->next:work.current_,time);if (interrupted.is_err()) return Err(interrupted.unwrap_err());}
+        if (work.mode_==Mode::Running) {auto rendered=work.render(time);if (rendered.is_err()) return Err(rendered.unwrap_err());auto marked=work.collect_markers(time);if(marked.is_err())return Err(marked.unwrap_err());auto interrupted=work.emit(StateAnimationEventKind::Interrupted,work.blend_.is_some() ? work.blend_->next:work.current_,time);if (interrupted.is_err()) return Err(interrupted.unwrap_err());}
         auto value=work.cursor(index,time,offset);if (value.is_err()) return Err(value.unwrap_err());work.current_=rstd::move(value).unwrap();work.blend_=None();work.mode_=Mode::Running;
         auto entered=work.emit(StateAnimationEventKind::Entered,work.current_,time);if (entered.is_err()) return Err(entered.unwrap_err());
+        auto marked=work.collect_markers(time);if(marked.is_err())return Err(marked.unwrap_err());
         auto rendered=work.render(time);if (rendered.is_err()) return Err(rendered.unwrap_err());auto completed=work.complete(work.current_,time);if (completed.is_err()) return Err(completed.unwrap_err());
         work.sampled_=Some(time);auto run=work.current_.run;*this=rstd::move(work);return Ok(run);
     }
@@ -370,6 +426,7 @@ class StateAnimationPlayer {
         if (sampled_.is_some() && time<*sampled_) return Err(StateAnimationError::Timing);
         if (mode_!=Mode::Running) {mode_=Mode::Stopped;sampled_=Some(time);return Ok(empty{});}
         auto work=copy();auto rendered=work.render(time);if (rendered.is_err()) return rendered;
+        auto marked=work.collect_markers(time);if(marked.is_err())return marked;
         auto stopped=work.emit(StateAnimationEventKind::Stopped,work.blend_.is_some() ? work.blend_->next:work.current_,time);if (stopped.is_err()) return stopped;
         if (work.blend_.is_some()) work.current_=rstd::move(work.blend_->next);
         work.blend_=None();work.mode_=Mode::Stopped;work.sampled_=Some(time);*this=rstd::move(work);return Ok(empty{});
@@ -385,10 +442,23 @@ class StateAnimationPlayer {
     auto next_tick(Serial interval) const -> Result<Option<Serial>,StateAnimationError> {
         if (!interval) return Err(StateAnimationError::InvalidValue);
         if (mode_!=Mode::Running || sampled_.is_none()) return Ok(None<Serial>());
-        auto now=*sampled_;Option<Scalar> seconds;
+        auto now=*sampled_;Option<Scalar> seconds;Option<Serial> marker_tick;
         auto add=[&](Scalar value) {if (finite(value) && value>0 && (seconds.is_none() || value<*seconds)) seconds=Some(value);};
-        auto inspect=[&](const Cursor &cursor) {
+        auto inspect=[&](const Cursor &cursor,bool sample_markers) -> Result<empty,StateAnimationError> {
             auto p=position(cursor,now),duration=period(cursor);const auto &s=state(cursor);
+            if(sample_markers && duration>0)for(auto marker:s.clip.markers){
+                auto fraction=marker_fraction(cursor,marker);
+                auto cycle=s.loop ? __builtin_fmax(0,__builtin_floor(p-fraction)):Scalar(0);
+                for(;;){
+                    auto deadline=marker_time(cursor,cycle+fraction);if(deadline.is_err())return Err(deadline.unwrap_err());
+                    if(deadline->is_some() && **deadline>now){
+                        if(marker_tick.is_none() || **deadline<*marker_tick)marker_tick=Some(**deadline);
+                        break;
+                    }
+                    if(!s.loop)break;
+                    if(cycle+1<=cycle)return Err(StateAnimationError::Limit);cycle+=1;
+                }
+            }
             if (!s.loop && !cursor.completed && duration>0) add((1-p)*duration);
             auto exits=[&](slice<StateAnimationTransition> entries) {
                 for (const auto &t:entries) if (t.has_exit_time && duration>0) {
@@ -399,20 +469,25 @@ class StateAnimationPlayer {
                 }
             };
             exits(definition().transitions.as_slice());exits(s.transitions.as_slice());
+            return Ok(empty{});
         };
-        bool moving=!(blend_.is_some() && blend_->frozen) && dynamic(current_);inspect(current_);
+        bool source_active=!(blend_.is_some() && blend_->frozen);
+        bool moving=source_active && dynamic(current_);auto inspected=inspect(current_,source_active);if(inspected.is_err())return Err(inspected.unwrap_err());
         if (blend_.is_some()) {
-            add(blend_->duration-Scalar(now-blend_->started)/1e9);moving|=dynamic(blend_->next);inspect(blend_->next);
+            add(blend_->duration-Scalar(now-blend_->started)/1e9);moving|=dynamic(blend_->next);inspected=inspect(blend_->next,true);if(inspected.is_err())return Err(inspected.unwrap_err());
             auto destination=values_at(blend_->next,now);if (destination.is_err()) return Err(destination.unwrap_err());
             for (usize i{};i<values_.len();++i) moving|=values_[i]!=(*destination)[i];
         }
         if (moving) add(Scalar(interval)/1e9);
         if (choose(now).is_some()) add(Scalar(interval)/1e9);
-        if (seconds.is_none()) return Ok(None<Serial>());
+        if (seconds.is_none()) return Ok(marker_tick);
         auto ns=__builtin_ceil(*seconds*1e9);
-        if (!finite(ns) || ns>=Scalar(~Serial{}-now)) return Err(StateAnimationError::Limit);
+        if (!finite(ns) || ns>=Scalar(~Serial{}-now)) {
+            if(marker_tick.is_some())return Ok(marker_tick);
+            return Err(StateAnimationError::Limit);
+        }
         auto delta=Serial(ns);if (!delta) delta=1;
-        return Ok(Some(now+delta));
+        auto tick=now+delta;return Ok(Some(marker_tick.is_some() && *marker_tick<tick ? *marker_tick:tick));
     }
 };
 } // namespace vui

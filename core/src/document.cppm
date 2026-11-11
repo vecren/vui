@@ -355,6 +355,12 @@ class UiDocument {
         Scalar line_spacing{};
         Scalar character_spacing{};
         TextSpacing spacing;
+        Index max_lines{};
+        TextOverflow overflow{TextOverflow::Clip};
+        Option<TextAutoSize> auto_size;
+        Option<FontSource> source;
+        TextLineBreaks line_breaks;
+        TextWhitespace whitespace{TextWhitespace::Preserve};
         bool bold{}, italic{}, dirty{true};
         Color color{0, 0, 0, 1};
         TextColors colors;
@@ -363,6 +369,7 @@ class UiDocument {
         TextFontSpans font_spans;
         TextEffects effects;
         Option<Scalar> width;
+        Option<Scalar> height;
         Option<TextLayout> layout;
         Option<TextError> error;
         TextBoundaries boundaries;
@@ -519,7 +526,7 @@ class UiDocument {
         auto &text = **node.text;
         if (text.value.as_str() == value.as_str() && (!boundaries.present() || boundaries == text.boundaries))
             return false;
-        if (text.value.as_str() != value.as_str()) { text.colors = {}; text.decorations = {}; text.inline_images = {}; text.font_spans = {}; }
+        if (text.value.as_str() != value.as_str()) { text.colors = {}; text.decorations = {}; text.inline_images = {}; text.font_spans = {};text.line_breaks={}; }
         text.value = rstd::move(value);
         text.boundaries = rstd::move(boundaries);
         text.dirty = true;
@@ -1246,15 +1253,20 @@ class UiDocument {
                 return Some(UiError::TextServiceMissing);
             auto &text = **node.text;
             auto wrap_width =
-                text.wrap == TextWrap::None && text.alignment == TextAlignment::Natural
+                text.auto_size.is_none() && text.wrap == TextWrap::None && text.alignment == TextAlignment::Natural
                     ? None<Scalar>()
                     : inner.max_width;
-            if (text.dirty || text.layout.is_none() || text.width != wrap_width) {
+            auto fit_height=text.auto_size.is_some()?inner.max_height:None<Scalar>();
+            if (text.dirty || text.layout.is_none() || text.width != wrap_width || text.height!=fit_height) {
                 ++stats_.text_layouts;
                 TextRequest request{text.value.as_str(), text.family.as_str(), text.language.as_str(),
                     text.size, wrap_width, text.direction, text.wrap, text.bold, text.italic, text.alignment, text.line_spacing};
                 request.character_spacing = text.character_spacing;
                 request.spacing = text.spacing;
+                request.max_lines=text.max_lines;request.overflow=text.overflow;
+                request.height=fit_height;request.auto_size=text.auto_size;
+                request.source=text.source;
+                request.line_breaks=text.line_breaks;request.whitespace=text.whitespace;
                 if (text.boundaries.present()) request.boundaries = &text.boundaries;
                 else if (text.layout.is_some() && text.layout->text() == text.value.as_str())
                     request.boundaries = &text.layout->boundaries();
@@ -1265,18 +1277,21 @@ class UiDocument {
                     text.error = Some(result.unwrap_err());
                     return Some(UiError::TextLayoutFailed);
                 }
-                auto resolved_spacing = text.spacing.resolve(text.size, text.character_spacing);
+                auto size=result->font_size();
+                if (result->inline_objects() != text.inline_images.objects() || result->font_spans() != text.font_spans || result->line_breaks()!=text.line_breaks ||
+                    (text.auto_size.is_some() && (size.is_none() || *size<text.auto_size->minimum || *size>text.auto_size->maximum))) {
+                    text.error = Some(TextError::Unsupported);
+                    return Some(UiError::TextLayoutFailed);
+                }
+                auto resolved_spacing = text.spacing.resolve(size.unwrap_or(text.size), text.character_spacing);
                 if (result->character_spacing() != text.character_spacing || result->spacing() != text.spacing ||
                     resolved_spacing.is_err() || result->resolved_character_spacing() != resolved_spacing.unwrap()) {
                     text.error = Some(TextError::Unsupported);
                     return Some(UiError::TextLayoutFailed);
                 }
                 text.layout = Some(rstd::move(result).unwrap());
-                if (text.layout->inline_objects() != text.inline_images.objects() || text.layout->font_spans() != text.font_spans) {
-                    text.error = Some(TextError::Unsupported);
-                    return Some(UiError::TextLayoutFailed);
-                }
                 text.width = wrap_width;
+                text.height = fit_height;
                 text.error = None();
                 text.dirty = false;
                 node.paint_dirty = true;
@@ -2579,7 +2594,7 @@ class UiDocument {
         auto node = resolve(id);
         if (!node)
             return Err(UiError::InvalidId);
-        if (node->text.is_none() || !format.valid())
+        if (node->text.is_none() || !format.valid() || !format.line_breaks.matches((**node->text).value.as_str()))
             return Err(UiError::InvalidValue);
         if (property_occupied(*node, PresentationProperty::CharacterSpacing))
             return Err(UiError::PropertyOwned);
@@ -2587,7 +2602,8 @@ class UiDocument {
         if (text.family.as_str() != format.family || text.language.as_str() != format.language ||
             text.size != format.size || text.direction != format.direction ||
             text.wrap != format.wrap || text.bold != format.bold || text.italic != format.italic ||
-            text.alignment != format.alignment || text.line_spacing != format.line_spacing || text.character_spacing != format.character_spacing || text.spacing != format.spacing) {
+            text.alignment != format.alignment || text.line_spacing != format.line_spacing || text.character_spacing != format.character_spacing || text.spacing != format.spacing ||
+            text.max_lines != format.max_lines || text.overflow != format.overflow || text.auto_size!=format.auto_size || text.source!=format.source || text.line_breaks!=format.line_breaks || text.whitespace!=format.whitespace) {
             text.family = String::make(format.family);
             text.language = String::make(format.language);
             text.size = format.size;
@@ -2599,6 +2615,11 @@ class UiDocument {
             text.line_spacing = format.line_spacing;
             text.character_spacing = format.character_spacing;
             text.spacing = format.spacing;
+            text.max_lines = format.max_lines;
+            text.overflow = format.overflow;
+            text.auto_size = format.auto_size;
+            text.source = format.source;
+            text.line_breaks=format.line_breaks;text.whitespace=format.whitespace;
             text.dirty = true;
             changed(true, Some(id));
         }

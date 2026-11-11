@@ -64,14 +64,14 @@ template<class Projection> class StateAnimationMotion {
         auto written=ui_.write_presentation(lease_,batch,Some(motion_.binding.guard()));
         if (written.is_err()) return fail({Some(written.unwrap_err()),{}, {}});dirty_=true;committed(batch.writes());return Ok(empty{});
     }
-    auto dispatch_events() -> Result<empty,StateAnimationMotionError> {
+    auto dispatch_events(bool discard_markers=false) -> Result<empty,StateAnimationMotionError> {
         unsigned count{};
         for (;;) {
             auto pending=player_.poll_events();if (pending.is_empty()) return Ok(empty{});
-            for (const auto &event:pending) if (++count>4096 || events_.emit(event).is_err()) return fail({Some(UiError::Limit),{}, {}});
+            for (const auto &event:pending) if ((!discard_markers || event.kind!=StateAnimationEventKind::Marker) && (++count>4096 || events_.emit(event).is_err())) return fail({Some(UiError::Limit),{}, {}});
         }
     }
-    void availability_changed() {auto result=synchronize();if (result.is_ok() && !active_) dispatch_events();wake();}
+    void availability_changed() {auto result=synchronize();if (result.is_ok() && !active_) dispatch_events(true);wake();}
   public:
     StateAnimationMotion(UiSession &session,UiId root,StateAnimationProgram program,Vec<PropertyKey> keys,Projection projection)
         :session_(session),ui_(session.document()),lifetime_(ui_.lifetime()),root_(root),projection_(rstd::move(projection)),

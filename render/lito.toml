@@ -9,7 +9,7 @@ module = "vui.render"
 archive = "vui-render"
 
 [dependencies]
-lito-spirv = { path = "../../../litocpp/extra/lito-spirv" }
+lito-spirv = { version = "0.1.0" }
 vui = { workspace = true, pub = true }
 vrento = { workspace = true, pub = true }
 rstd-nostd = { workspace = true, usage = "link" }
