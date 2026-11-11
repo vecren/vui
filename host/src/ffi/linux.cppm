@@ -10,6 +10,8 @@ namespace vui_linux_constants {
 inline constexpr auto input = POLLIN;
 inline constexpr auto output = POLLOUT;
 inline constexpr auto error = POLLERR | POLLHUP | POLLNVAL;
+inline constexpr auto invalid = POLLNVAL;
+inline constexpr auto disconnected = POLLERR | POLLHUP;
 inline constexpr auto interrupted = EINTR;
 inline constexpr auto again = EAGAIN;
 inline constexpr auto event_flags = EFD_CLOEXEC | EFD_NONBLOCK;
@@ -40,6 +42,8 @@ using ::munmap;
 using ::vui_linux_constants::input;
 using ::vui_linux_constants::output;
 using ::vui_linux_constants::error;
+using ::vui_linux_constants::invalid;
+using ::vui_linux_constants::disconnected;
 using ::vui_linux_constants::interrupted;
 using ::vui_linux_constants::again;
 using ::vui_linux_constants::event_flags;

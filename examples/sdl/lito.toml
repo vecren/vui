@@ -1,0 +1,16 @@
+[package]
+name = "vui-examples-sdl"
+version.workspace = true
+license.workspace = true
+
+[lib]
+name = "vui-examples-sdl"
+module = "vui.examples.sdl"
+archive = "vui-examples-sdl"
+path = "lib.cppm"
+source-root = "."
+
+[dependencies]
+vui-examples = { workspace = true, pub = true }
+vui-sdl = { workspace = true, pub = true }
+rstd-nostd = { workspace = true, usage = "link" }

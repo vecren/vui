@@ -8,7 +8,7 @@ inline constexpr auto tab = XKB_KEY_Tab, enter = XKB_KEY_Return, kp_enter = XKB_
     space = XKB_KEY_space, escape = XKB_KEY_Escape, left = XKB_KEY_Left, right = XKB_KEY_Right,
     up = XKB_KEY_Up, down = XKB_KEY_Down, home = XKB_KEY_Home, end = XKB_KEY_End,
     page_up = XKB_KEY_Page_Up, page_down = XKB_KEY_Page_Down, backspace = XKB_KEY_BackSpace,
-    del = XKB_KEY_Delete, iso_tab = XKB_KEY_ISO_Left_Tab;
+    del = XKB_KEY_Delete, iso_tab = XKB_KEY_ISO_Left_Tab, dead_acute = XKB_KEY_dead_acute;
 inline constexpr auto shift = XKB_MOD_NAME_SHIFT, control = XKB_MOD_NAME_CTRL,
     alt = XKB_MOD_NAME_ALT, meta = XKB_MOD_NAME_LOGO;
 }
@@ -50,6 +50,7 @@ using ::XKB_COMPOSE_COMPOSED;
 using ::XKB_COMPOSE_CANCELLED;
 using ::vui_xkb_constants::tab;
 using ::vui_xkb_constants::iso_tab;
+using ::vui_xkb_constants::dead_acute;
 using ::vui_xkb_constants::enter;
 using ::vui_xkb_constants::kp_enter;
 using ::vui_xkb_constants::space;

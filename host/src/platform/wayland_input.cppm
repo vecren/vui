@@ -3,6 +3,7 @@ import :ffi.wayland;
 import :ffi.linux;
 import :ffi.xkb;
 import :platform.keys;
+import :platform.keyboard_text;
 import :platform.wayland_text;
 import vui.render;
 
@@ -21,10 +22,11 @@ class WaylandInput {
     xkb::xkb_context *key_context_{};
     xkb::xkb_keymap *keymap_{};
     xkb::xkb_state *key_state_{};
-    xkb::xkb_compose_state *compose_{};
+    KeyboardCompose compose_;
     wl::wl_surface *surface_{};
     rstd::uint32_t seat_name_{};
     bool failed_{}, pointer_focused_{}, keyboard_focused_{};
+    rstd::uint32_t pointer_buttons_{};
     Modifiers modifiers_{};
     rstd::int32_t repeat_rate_{4}, repeat_delay_{500};
     rstd::uint32_t repeat_key_{};
@@ -101,6 +103,7 @@ class WaylandInput {
         InputEvent event; event.type = EventType::DeviceLost; event.device = pointer_device_;
         emit(rstd::move(event));
         pointer_focused_ = false;
+        pointer_buttons_ = 0;
         if (wl::wl_pointer_get_version(pointer_) >= wl::pointer_release_version) wl::wl_pointer_release(pointer_);
         else wl::wl_pointer_destroy(pointer_);
         pointer_ = nullptr;
@@ -126,11 +129,11 @@ class WaylandInput {
         if (wl::wl_keyboard_get_version(keyboard_) >= wl::keyboard_release_version) wl::wl_keyboard_release(keyboard_);
         else wl::wl_keyboard_destroy(keyboard_);
         keyboard_ = nullptr;
-        if (compose_) xkb::xkb_compose_state_unref(compose_);
+        compose_.clear();
         if (key_state_) xkb::xkb_state_unref(key_state_);
         if (keymap_) xkb::xkb_keymap_unref(keymap_);
         if (key_context_) xkb::xkb_context_unref(key_context_);
-        compose_ = nullptr; key_state_ = nullptr; keymap_ = nullptr; key_context_ = nullptr;
+        key_state_ = nullptr; keymap_ = nullptr; key_context_ = nullptr;
     }
     static void capabilities(void *data, wl::wl_seat *seat, rstd::uint32_t caps) {
         auto &self = *static_cast<WaylandInput *>(data);
@@ -161,6 +164,12 @@ class WaylandInput {
         auto &self = *static_cast<WaylandInput *>(data);
         if (!self.pointer_focused_ || surface != self.surface_) return;
         self.flush_axis();
+        if (self.pointer_buttons_) {
+            InputEvent cancel; cancel.type = EventType::PointerCancel; cancel.device = self.pointer_device_;
+            cancel.position = self.position_; cancel.cancel_reason = CancelReason::Native;
+            self.emit(rstd::move(cancel));
+            self.pointer_buttons_ = 0;
+        }
         InputEvent event; event.type = EventType::WindowPointerLeave; event.device = self.pointer_device_; event.position = self.position_;
         self.emit(rstd::move(event));
         self.pointer_focused_ = false;
@@ -180,6 +189,9 @@ class WaylandInput {
                      : button == ffi::linux::button_middle ? PointerButton::Middle : button == ffi::linux::button_back ? PointerButton::Back
                      : button == ffi::linux::button_forward ? PointerButton::Forward : PointerButton::None;
         if (event.button == PointerButton::None) return;
+        auto mask = 1u << (unsigned(event.button) - 1);
+        if (state == wl::WL_POINTER_BUTTON_STATE_PRESSED) self.pointer_buttons_ |= mask;
+        else self.pointer_buttons_ &= ~mask;
         event.type = state == wl::WL_POINTER_BUTTON_STATE_PRESSED ? EventType::PointerDown : EventType::PointerUp;
         event.device = self.pointer_device_; event.position = self.position_;
         self.emit(rstd::move(event));
@@ -244,51 +256,26 @@ class WaylandInput {
     static void touch_cancel(void *data, wl::wl_touch *) { static_cast<WaylandInput *>(data)->cancel_contacts(); }
     static void touch_shape(void *, wl::wl_touch *, rstd::int32_t, wl::wl_fixed_t, wl::wl_fixed_t) {}
     static void touch_orientation(void *, wl::wl_touch *, rstd::int32_t, wl::wl_fixed_t) {}
-    void reset_compose() { if (compose_) xkb::xkb_compose_state_reset(compose_); }
-    void create_compose() {
-        if (compose_) xkb::xkb_compose_state_unref(compose_);
-        compose_ = nullptr;
-        if (!key_context_) return;
-        String locale = String::make("C"_str);
-        auto all = rstd::env::var("LC_ALL"_str);
-        auto ctype = rstd::env::var("LC_CTYPE"_str);
-        auto lang = rstd::env::var("LANG"_str);
-        if (all.is_ok() && !all->as_str()->is_empty()) locale = rstd::move(all).unwrap();
-        else if (ctype.is_ok() && !ctype->as_str()->is_empty()) locale = rstd::move(ctype).unwrap();
-        else if (lang.is_ok() && !lang->as_str()->is_empty()) locale = rstd::move(lang).unwrap();
-        locale.push(U'\0');
-        auto table = xkb::xkb_compose_table_new_from_locale(key_context_,
-            reinterpret_cast<const char *>(locale.as_str()->as_bytes().as_ptr().as_raw_ptr()),
-            xkb::XKB_COMPOSE_COMPILE_NO_FLAGS);
-        if (!table) return;
-        compose_ = xkb::xkb_compose_state_new(table, xkb::XKB_COMPOSE_STATE_NO_FLAGS);
-        xkb::xkb_compose_table_unref(table);
-    }
+    void reset_compose() { compose_.reset(); }
+    void create_compose() { compose_.configure(key_context_); }
     auto keyboard_text(rstd::uint32_t code, bool feed_compose, bool &composed) -> TextInput {
         composed = false;
         if (!keyboard_focused_ || !key_state_ || text_.session().is_none()) return {};
-        if (text_.composing()) { reset_compose(); return {}; }
+        if (text_.composing() || modifiers_.control || modifiers_.alt || modifiers_.meta) { reset_compose(); return {}; }
         auto symbol = xkb::xkb_state_key_get_one_sym(key_state_, code + 8);
-        if (feed_compose && compose_ && xkb::xkb_compose_state_feed(compose_, symbol) == xkb::XKB_COMPOSE_FEED_ACCEPTED) {
-            auto status = xkb::xkb_compose_state_get_status(compose_);
-            if (status == xkb::XKB_COMPOSE_COMPOSING || status == xkb::XKB_COMPOSE_CANCELLED) return {};
-            composed = status == xkb::XKB_COMPOSE_COMPOSED;
+        if (feed_compose) {
+            auto status = compose_.feed(symbol);
+            if (status == ComposeResult::Pending) return {};
+            composed = status == ComposeResult::Composed;
         }
         char bytes[4096]{};
-        int size = composed ? xkb::xkb_compose_state_get_utf8(compose_, bytes, sizeof(bytes))
+        int size = composed ? compose_.utf8(bytes, sizeof(bytes))
                             : xkb::xkb_state_key_get_utf8(key_state_, code + 8, bytes, sizeof(bytes));
         if (size <= 0 || size >= int(sizeof(bytes))) return {};
-        auto decoded = rstd::str_::from_utf8(slice<u8>::from_raw_parts(
-            reinterpret_cast<const rstd::byte *>(bytes), usize(size)));
-        if (decoded.is_err()) { ++dropped_; return {}; }
-        auto chars = decoded.unwrap()->chars();
-        for (auto cp = chars.next(); cp.is_some(); cp = chars.next()) {
-            auto value = cp->to_primitive();
-            if (value < 32 || (value >= 127 && value < 160)) return {};
-        }
-        auto result = TextInput::create(decoded.unwrap());
-        if (result.is_err()) { ++dropped_; return {}; }
-        return rstd::move(result).unwrap();
+        bool invalid{};
+        auto result = keyboard_text_from_utf8(bytes, size, invalid);
+        if (invalid) ++dropped_;
+        return result;
     }
     void emit_keyboard_text(const TextInput &text, Option<Serial> session) {
         if (!text.present() || session.is_none() || modifiers_.control || modifiers_.alt || modifiers_.meta) return;
@@ -424,6 +411,11 @@ class WaylandInput {
         return result;
     }
     auto text_input_available() const -> bool { return text_.available(); }
+    auto capture(bool enabled) const -> NativeCaptureResult {
+        if (!enabled) return NativeCaptureResult::Succeeded;
+        return pointer_ && pointer_focused_ && pointer_buttons_ ? NativeCaptureResult::Succeeded
+                                                                  : NativeCaptureResult::Unsupported;
+    }
     auto has_input() const -> bool { return !input_.is_empty() || dropped_ != 0; }
     auto take_input() -> Vec<InputEvent> { return rstd::exchange(input_, Vec<InputEvent>{}); }
     auto take_dropped_input() -> Serial { return rstd::exchange(dropped_, Serial{}); }

@@ -1,12 +1,13 @@
 export module vui.examples.interaction;
 import vui.examples;
+import vui.examples.sdl;
 import vui.examples.interaction.view;
 
 int main(int argc, char **argv) {
     unsigned limit{};
     if (!examples::frame_limit(argc, argv, limit))
         return 2;
-    examples::Application app;
+    examples::sdl::Application app;
     if (!app.open("vui interaction", 640, 520))
         return 1;
     auto panel = interaction_example::Panel::make(app.session);

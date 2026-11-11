@@ -1,5 +1,5 @@
 export module vui.examples:application;
-import vui.sdl;
+import vui.host;
 import rstd;
 
 export namespace examples {
@@ -24,15 +24,18 @@ auto frame_limit(int argc, char **argv, unsigned &limit) -> bool {
     rstd::io::eprintln("usage: {} [frame-count; 0 means interactive]", program);
     return false;
 }
-class Application {
-    sdl::Application application_;
+template <class Backend> class BasicApplication {
+    Backend application_;
     Option<rstd::path::PathBuf> capture_path_;
 
     auto report(gpu::Error error) -> int {
-        auto detail =
-            rstd::ffi::CStr::from_ptr(window.error()).to_str().unwrap_or("unknown error"_str);
-        rstd::io::eprintln("renderer stage={} vk={} SDL={}", unsigned(error.stage),
-                           int(error.result), detail);
+        if constexpr (requires { window.error(); }) {
+            auto detail = rstd::ffi::CStr::from_ptr(window.error()).to_str().unwrap_or("unknown error"_str);
+            rstd::io::eprintln("renderer stage={} vk={} SDL={}", unsigned(error.stage),
+                               int(error.result), detail);
+        } else {
+            rstd::io::eprintln("renderer stage={} vk={}", unsigned(error.stage), int(error.result));
+        }
         return 1;
     }
 
@@ -60,7 +63,7 @@ class Application {
     }
 
   public:
-    sdl::Window &window{application_.window()};
+    decltype(application_.window()) window{application_.window()};
     gpu::Renderer &renderer{application_.renderer()};
     UiSession &session{application_.session()};
 
@@ -127,4 +130,5 @@ class Application {
         return run(limit, [](const SurfaceInfo &) {}, [](const AdvanceResult &) {}, [] {});
     }
 };
+using Application = BasicApplication<host::Application>;
 } // namespace examples

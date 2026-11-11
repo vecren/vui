@@ -1,5 +1,5 @@
 export module vui.examples;
-export import vui.sdl;
+export import vui.host;
 export import vectext;
 export import :style;
 export import :application;

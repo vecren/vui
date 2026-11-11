@@ -1,6 +1,7 @@
 module vui.host;
 import :platform.wayland_window;
 import :platform.x11_window;
+import :platform.x11;
 import :ffi.vulkan;
 import :ffi.linux;
 import :ffi.wayland;
@@ -68,6 +69,8 @@ struct Window::Impl {
     Option<rstd::sync::Arc<detail::WaylandWindow>> wayland;
     Option<rstd::sync::Arc<detail::X11Window>> x11;
     Option<rstd::sync::Arc<WakeState>> wake;
+    Vec<ffi::linux::pollfd> pollfds;
+    Vec<detail::X11InternalConnection> x11_internal;
     Serial observed_revision{};
 };
 
@@ -117,7 +120,10 @@ auto Window::open(const char *title, Index width, Index height, WindowBackend ba
 void Window::close() {
     if (impl_->wake.is_some()) (*impl_->wake)->close();
     impl_->wake = None();
-    if (impl_->x11.is_some()) (void)(*impl_->x11)->capture(false);
+    if (impl_->x11.is_some()) {
+        (void)(*impl_->x11)->capture(false);
+        (void)(*impl_->x11)->set_text_input(None());
+    }
     if (impl_->wayland.is_some()) (void)(*impl_->wayland)->input().set_text_input(None());
     impl_->wayland = None();
     impl_->x11 = None();
@@ -150,12 +156,12 @@ auto Window::wake_stats() const -> WakeStats {
 auto Window::capture(PointerKind kind, bool enabled) -> NativeCaptureResult {
     if (kind != PointerKind::Mouse) return NativeCaptureResult::Unsupported;
     if (impl_->x11.is_some()) return (*impl_->x11)->capture(enabled);
-    if (impl_->wayland.is_some()) return NativeCaptureResult::Unsupported;
+    if (impl_->wayland.is_some()) return (*impl_->wayland)->input().capture(enabled);
     return NativeCaptureResult::Failed;
 }
 auto Window::set_text_input(Option<TextInputState> state) -> NativeTextInputResult {
     if (impl_->wayland.is_some()) return (*impl_->wayland)->input().set_text_input(rstd::move(state));
-    if (impl_->x11.is_some()) return state.is_some() ? NativeTextInputResult::Unsupported : NativeTextInputResult::Succeeded;
+    if (impl_->x11.is_some()) return (*impl_->x11)->set_text_input(rstd::move(state));
     return state.is_some() ? NativeTextInputResult::Failed : NativeTextInputResult::Succeeded;
 }
 auto Window::wait(Index milliseconds) -> Result<WindowEvents, gpu::Error> {
@@ -165,8 +171,11 @@ auto Window::wait(Index milliseconds) -> Result<WindowEvents, gpu::Error> {
     bool prepared{};
     Index timeout_ms = milliseconds;
     ffi::wayland::wl_display *wayland{};
-    ffi::linux::pollfd fds[2]{};
-    fds[1] = {wake->fd, ffi::linux::input, 0};
+    auto &fds = impl_->pollfds;
+    fds.clear();
+    fds.push(ffi::linux::pollfd{});
+    fds.push(ffi::linux::pollfd{wake->fd, ffi::linux::input, 0});
+    impl_->x11_internal.clear();
     if (impl_->wayland.is_some()) {
         auto native = impl_->wayland->as_ptr().as_raw_ptr();
         wayland = native->display();
@@ -180,13 +189,13 @@ auto Window::wait(Index milliseconds) -> Result<WindowEvents, gpu::Error> {
         redraw = redraw || native->input().has_input();
         timeout_ms = native->input().repeat_wait(timeout_ms);
         prepared = true;
-        fds[0] = {ffi::wayland::wl_display_get_fd(wayland), ffi::linux::input, 0};
+        fds[usize(0)] = {ffi::wayland::wl_display_get_fd(wayland), ffi::linux::input, 0};
         if (ffi::wayland::wl_display_flush(wayland) < 0) {
             if (ffi::linux::error_number() != ffi::linux::again) {
                 ffi::wayland::wl_display_cancel_read(wayland);
                 return Err(gpu::Error{gpu::Stage::Surface});
             }
-            fds[0].events |= ffi::linux::output;
+            fds[usize(0)].events |= ffi::linux::output;
         }
     } else if (impl_->x11.is_some()) {
         auto native = impl_->x11->as_ptr().as_raw_ptr();
@@ -194,8 +203,11 @@ auto Window::wait(Index milliseconds) -> Result<WindowEvents, gpu::Error> {
         redraw = redraw || ffi::x11::XPending(display) > 0;
         if (native->dispatch().is_err()) return Err(gpu::Error{gpu::Stage::Surface});
         redraw = redraw || native->has_input();
-        fds[0] = {ffi::x11::XConnectionNumber(display), ffi::linux::input, 0};
+        fds[usize(0)] = {ffi::x11::XConnectionNumber(display), ffi::linux::input, 0};
         ffi::x11::XFlush(display);
+        native->copy_internal_connections(impl_->x11_internal);
+        for (auto item : impl_->x11_internal)
+            fds.push(ffi::linux::pollfd{item.fd, ffi::linux::input, 0});
     } else return Err(gpu::Error{gpu::Stage::State});
 
     auto started = rstd::time::Instant::now();
@@ -204,16 +216,16 @@ auto Window::wait(Index milliseconds) -> Result<WindowEvents, gpu::Error> {
         auto elapsed = started.elapsed().as_millis().to_primitive();
         auto remaining = elapsed >= timeout_ms ? 0 : timeout_ms - elapsed;
         int timeout = redraw ? 0 : int(remaining > 2147483647 ? 2147483647 : remaining);
-        result = ffi::linux::poll(fds, 2, timeout);
+        result = ffi::linux::poll(fds.as_mut_slice().as_raw_ptr(), fds.len().to_primitive(), timeout);
         if (result >= 0 || ffi::linux::error_number() != ffi::linux::interrupted) break;
     }
-    if (result < 0 || (fds[0].revents & ffi::linux::error) ||
-        (fds[1].revents & ffi::linux::error)) {
+    if (result < 0 || (fds[usize(0)].revents & ffi::linux::error) ||
+        (fds[usize(1)].revents & ffi::linux::error)) {
         if (prepared) ffi::wayland::wl_display_cancel_read(wayland);
         return Err(gpu::Error{gpu::Stage::Surface});
     }
     if (prepared) {
-        if (fds[0].revents & ffi::linux::input) {
+        if (fds[usize(0)].revents & ffi::linux::input) {
             if (ffi::wayland::wl_display_read_events(wayland) < 0)
                 return Err(gpu::Error{gpu::Stage::Surface});
             auto dispatched = ffi::wayland::wl_display_dispatch_pending(wayland);
@@ -222,6 +234,18 @@ auto Window::wait(Index milliseconds) -> Result<WindowEvents, gpu::Error> {
         } else ffi::wayland::wl_display_cancel_read(wayland);
     } else {
         auto native = impl_->x11->as_ptr().as_raw_ptr();
+        for (usize i{}; i < impl_->x11_internal.len(); i += usize(1)) {
+            auto entry = impl_->x11_internal[i];
+            auto ready = fds[i + usize(2)].revents;
+            if (!ready || !native->internal_connection_current(entry)) continue;
+            if (ready & ffi::linux::invalid) return Err(gpu::Error{gpu::Stage::Surface});
+            if (ready & (ffi::linux::input | ffi::linux::disconnected)) {
+                native->process_internal_connection(entry);
+                redraw = true;
+                if ((ready & ffi::linux::disconnected) && native->internal_connection_current(entry))
+                    return Err(gpu::Error{gpu::Stage::Surface});
+            }
+        }
         if (native->dispatch().is_err()) return Err(gpu::Error{gpu::Stage::Surface});
     }
     redraw = wake->take() || redraw;

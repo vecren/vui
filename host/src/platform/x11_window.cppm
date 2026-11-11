@@ -2,6 +2,7 @@ module vui.host:platform.x11_window;
 import :platform.x11;
 import :ffi.x11;
 import :platform.keys;
+import :platform.x11_text;
 import vui.render;
 
 namespace vui::host::detail {
@@ -10,7 +11,12 @@ using namespace rstd::prelude;
 enum class X11WindowError { State, InvalidSize, Connection, Window, Protocol };
 
 class X11Window {
+    friend struct X11TextTest;
+    friend struct X11ConnectionTest;
     X11Connection connection_;
+    X11Text text_{this,
+        [](void *data, InputEvent event) { static_cast<X11Window *>(data)->emit(rstd::move(event)); },
+        [](void *data) { ++static_cast<X11Window *>(data)->dropped_input_; }};
     ffi::x11::Window window_{};
     ffi::x11::Atom protocols_{}, delete_window_{};
     rstd::uint32_t width_{}, height_{};
@@ -70,11 +76,13 @@ class X11Window {
         int supported{};
         detectable_repeat_ = ffi::x11::XkbSetDetectableAutoRepeat(native, 1, &supported) && supported;
         ffi::x11::XStoreName(native, window_, title);
-        ffi::x11::XSelectInput(native, window_, ffi::x11::structure_notify_mask |
+        auto event_mask = ffi::x11::structure_notify_mask |
             ffi::x11::pointer_motion_mask | ffi::x11::button_press_mask |
             ffi::x11::button_release_mask | ffi::x11::focus_change_mask |
             ffi::x11::enter_window_mask | ffi::x11::leave_window_mask |
-            ffi::x11::key_press_mask | ffi::x11::key_release_mask);
+            ffi::x11::key_press_mask | ffi::x11::key_release_mask;
+        ffi::x11::XSelectInput(native, window_, event_mask);
+        text_.open(native, window_, event_mask);
         ffi::x11::XMapWindow(native, window_);
         ffi::x11::XFlush(native);
         return Ok(empty{});
@@ -107,6 +115,16 @@ class X11Window {
         }
         return NativeCaptureResult::Succeeded;
     }
+    auto set_text_input(Option<TextInputState> state) -> NativeTextInputResult {
+        if (!window_) return state.is_some() ? NativeTextInputResult::Failed : NativeTextInputResult::Succeeded;
+        if (state.is_some() && !state->valid()) return NativeTextInputResult::Failed;
+        auto next = state.is_some() ? Some(Serial(state->request.session)) : None<Serial>();
+        if (text_.session() != next) {
+            if (dispatch().is_err() || !window_)
+                return state.is_some() ? NativeTextInputResult::Failed : NativeTextInputResult::Succeeded;
+        }
+        return text_.set_state(rstd::move(state));
+    }
     auto dispatch() -> Result<empty, X11WindowError> {
         if (!window_)
             return Err(X11WindowError::State);
@@ -114,6 +132,11 @@ class X11Window {
         while (ffi::x11::XPending(display) > 0) {
             ffi::x11::XEvent event{};
             ffi::x11::XNextEvent(display, &event);
+            auto code = (event.type == ffi::x11::key_press || event.type == ffi::x11::key_release)
+                            ? event.xkey.keycode : 0;
+            auto filtered = text_.filter(event);
+            if (event.type == ffi::x11::key_press || event.type == ffi::x11::key_release)
+                event.xkey.keycode = code;
             if (event.xany.window != window_)
                 continue;
             if (event.type == ffi::x11::configure_notify && event.xconfigure.width > 0 &&
@@ -131,18 +154,36 @@ class X11Window {
                 close_requested_ = true;
             } else if (event.type == ffi::x11::destroy_notify) {
                 (void)capture(false);
+                text_.close();
                 window_ = 0;
                 close_requested_ = true;
             } else if (event.type == ffi::x11::unmap_notify) {
                 pointer_grabbed_ = false;
+                text_.focus(false);
                 InputEvent input; input.type = EventType::WindowFocusLost;
                 emit(rstd::move(input));
             } else if (event.type == ffi::x11::focus_in || event.type == ffi::x11::focus_out) {
                 if (event.xfocus.mode == ffi::x11::notify_grab ||
                     event.xfocus.mode == ffi::x11::notify_ungrab) continue;
+                if (event.type == ffi::x11::focus_out && event.xfocus.detail == ffi::x11::notify_pointer) {
+                    auto queued = ffi::x11::XEventsQueued(display, ffi::x11::queued_after_reading);
+                    if (!queued) {
+                        ffi::x11::XSync(display, 0);
+                        queued = ffi::x11::XEventsQueued(display, ffi::x11::queued_after_reading);
+                    }
+                    if (queued) {
+                        ffi::x11::XEvent next{};
+                        ffi::x11::XPeekEvent(display, &next);
+                        if (next.type == ffi::x11::focus_in && next.xfocus.window == window_ &&
+                            next.xfocus.detail == ffi::x11::notify_nonlinear &&
+                            next.xfocus.mode == event.xfocus.mode && next.xfocus.serial == event.xfocus.serial)
+                            continue;
+                    }
+                }
                 InputEvent input;
                 input.type = event.type == ffi::x11::focus_in ? EventType::WindowFocusGained
                                                                : EventType::WindowFocusLost;
+                text_.focus(event.type == ffi::x11::focus_in);
                 if (event.type == ffi::x11::focus_out) {
                     (void)capture(false);
                     for (auto &key : pressed_) key = false;
@@ -168,6 +209,19 @@ class X11Window {
                 input.repeat = event.type == ffi::x11::key_press && pressed_[code];
                 pressed_[code] = event.type == ffi::x11::key_press;
                 emit(rstd::move(input));
+                if (event.type == ffi::x11::key_press && !filtered) {
+                    bool invalid{};
+                    auto mods = modifiers(event.xkey.state);
+                    auto text = text_.lookup(event.xkey, rstd::uint32_t(symbol),
+                                             mods.control || mods.alt || mods.meta, invalid);
+                    if (invalid) ++dropped_input_;
+                    auto session = text_.session();
+                    if (text.present() && session.is_some() && !mods.control && !mods.alt && !mods.meta) {
+                        InputEvent typed; typed.type = EventType::TextInput; typed.text = rstd::move(text);
+                        typed.text_session = *session; typed.modifiers = mods;
+                        emit(rstd::move(typed));
+                    }
+                }
             } else if (event.type == ffi::x11::motion_notify ||
                        event.type == ffi::x11::enter_notify || event.type == ffi::x11::leave_notify) {
                 InputEvent input;
@@ -213,6 +267,7 @@ class X11Window {
     }
     void close() {
         if (window_) (void)capture(false);
+        text_.close();
         if (window_)
             ffi::x11::XDestroyWindow(connection_.display(), window_);
         window_ = 0;
@@ -223,6 +278,9 @@ class X11Window {
         for (auto &key : pressed_) key = false;
     }
     auto display() const -> ffi::x11::Display * { return connection_.display(); }
+    void copy_internal_connections(Vec<X11InternalConnection> &result) const { connection_.copy_internal(result); }
+    auto internal_connection_current(X11InternalConnection item) const -> bool { return connection_.current(item); }
+    void process_internal_connection(X11InternalConnection item) { connection_.process(item); }
     auto window() const -> ffi::x11::Window { return window_; }
     auto close_requested() const -> bool { return close_requested_; }
     auto width() const -> rstd::uint32_t { return width_; }

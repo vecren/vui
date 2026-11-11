@@ -82,7 +82,7 @@ int main(int argc, char **argv) {
     session.input()
         .on(tile, EventType::PointerMove,
             [&](auto &context, const auto &event) {
-                if (session.input().captured(event.input.pointer) != Some(tile))
+                if (session.input().captured(event.input.pointer, event.input.device) != Some(tile))
                     return;
                 position = {event.input.position.x - grab.x, event.input.position.y - grab.y};
                 context.document()
