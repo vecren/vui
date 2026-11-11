@@ -25,6 +25,7 @@ class WaylandWindow {
         self.height_ = self.pending_height_;
         self.configured_ = true;
         ++self.revision_;
+        self.connection_.input().set_generation(self.revision_ + 1);
     }
     static void resize(void *data, ffi::xdg_shell::xdg_toplevel *, rstd::int32_t width,
                        rstd::int32_t height, ffi::wayland::wl_array *) {
@@ -71,6 +72,8 @@ class WaylandWindow {
         surface_ = ffi::wayland::wl_compositor_create_surface(connection_.compositor());
         if (!surface_)
             return fail(WaylandWindowError::Surface);
+        connection_.input().set_surface(surface_);
+        connection_.input().set_generation(1);
         xdg_ = ffi::xdg_shell::xdg_wm_base_get_xdg_surface(connection_.shell(), surface_);
         if (!xdg_)
             return fail(WaylandWindowError::Surface);
@@ -88,11 +91,12 @@ class WaylandWindow {
     auto roundtrip() -> Result<empty, WaylandWindowError> {
         if (!surface_)
             return Err(WaylandWindowError::State);
-        if (ffi::wayland::wl_display_roundtrip(connection_.display()) < 0)
+        if (ffi::wayland::wl_display_roundtrip(connection_.display()) < 0 || connection_.input().failed())
             return Err(WaylandWindowError::Protocol);
         return Ok(empty{});
     }
     void close() {
+        connection_.input().close();
         if (toplevel_)
             ffi::xdg_shell::xdg_toplevel_destroy(toplevel_);
         if (xdg_)
@@ -112,5 +116,6 @@ class WaylandWindow {
     auto width() const -> rstd::uint32_t { return width_; }
     auto height() const -> rstd::uint32_t { return height_; }
     auto revision() const -> rstd::uint64_t { return revision_; }
+    auto input() -> WaylandInput & { return connection_.input(); }
 };
 } // namespace vui::host::detail

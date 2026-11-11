@@ -1,5 +1,6 @@
 export module vui:input.protocol;
 import :diagnostics;
+import :text;
 using namespace rstd::prelude;
 using namespace rstd::literals;
 
@@ -23,7 +24,10 @@ enum class EventType {
     DeviceLost,
     TextInput,
     TextEditing,
-    TextInputCancelled
+    TextInputCancelled,
+    WindowPointerEnter,
+    WindowPointerLeave,
+    TextTransaction
 };
 enum class InputDelivery { EverySample, LatestWithHistory };
 enum class RoutePhase { Capture, Target, Bubble };
@@ -110,11 +114,107 @@ class TextInput {
     auto text() const -> ref<str> { return data_.is_some() ? (*data_)->text.as_str() : ""_str; }
     auto selection() const -> Option<TextInputSelection> { return data_.is_some() ? (*data_)->selection : None<TextInputSelection>(); }
 };
+struct TextPreeditCursor {
+    Index anchor{}, cursor{};
+    bool visible{true};
+    bool has_range{};
+    auto operator==(const TextPreeditCursor &) const -> bool = default;
+};
+struct TextSurroundingRevision {
+    Serial text{};
+    Index anchor{}, cursor{};
+    auto operator==(const TextSurroundingRevision &) const -> bool = default;
+};
+struct TextInputTransaction {
+    TextInput commit;
+    TextInput preedit;
+    Option<TextPreeditCursor> preedit_cursor;
+    Index delete_before{}, delete_after{};
+    Option<TextSurroundingRevision> expected_surrounding;
+    auto valid() const -> bool {
+        if ((expected_surrounding.is_some() && expected_surrounding->text == 0) ||
+            (commit.present() && commit.selection().is_some()) ||
+            (preedit.present() && preedit.selection().is_some()) ||
+            (preedit_cursor.is_some() && !preedit.present())) return false;
+        if (preedit_cursor.is_some() && preedit_cursor->visible) {
+            auto text = preedit.text();
+            if (usize(preedit_cursor->anchor) > text->len() ||
+                usize(preedit_cursor->cursor) > text->len() ||
+                !text->is_char_boundary(usize(preedit_cursor->anchor)) ||
+                !text->is_char_boundary(usize(preedit_cursor->cursor))) return false;
+        }
+        return true;
+    }
+};
+class TextTransaction {
+    Option<rstd::sync::Arc<TextInputTransaction>> data_;
+    explicit TextTransaction(TextInputTransaction transaction)
+        : data_(Some(rstd::sync::Arc<TextInputTransaction>::make(rstd::move(transaction)))) {}
+  public:
+    TextTransaction() = default;
+    TextTransaction(const TextTransaction &other)
+        : data_(other.data_.is_some() ? Some(other.data_->clone()) : None<rstd::sync::Arc<TextInputTransaction>>()) {}
+    auto operator=(const TextTransaction &other) -> TextTransaction & {
+        if (this != &other) data_ = other.data_.is_some() ? Some(other.data_->clone()) : None<rstd::sync::Arc<TextInputTransaction>>();
+        return *this;
+    }
+    TextTransaction(TextTransaction &&) = default;
+    auto operator=(TextTransaction &&) -> TextTransaction & = default;
+    static auto create(TextInputTransaction transaction) -> Result<TextTransaction, InputError> {
+        if (!transaction.valid()) return Err(InputError::InvalidEvent);
+        return Ok(TextTransaction(rstd::move(transaction)));
+    }
+    auto get() const -> const TextInputTransaction * {
+        return data_.is_some() ? data_->as_ptr().as_raw_ptr() : nullptr;
+    }
+};
+enum class TextChangeCause { InputMethod, Other };
+struct TextSurroundingRange {
+    TextBoundaries text;
+    Index start{}, end{}, anchor{}, cursor{};
+    auto view() const -> ref<str> { return text.text()->get(usize(start), usize(end)).unwrap(); }
+};
+struct TextSurrounding {
+    TextBoundaries text;
+    Index anchor{}, cursor{};
+    auto present() const -> bool { return text.present(); }
+    auto valid() const -> bool {
+        if (!present()) return anchor == 0 && cursor == 0;
+        auto content = text.text();
+        return content->len() <= usize(~Index{}) && usize(anchor) <= content->len() &&
+            usize(cursor) <= content->len() && content->is_char_boundary(usize(anchor)) &&
+            content->is_char_boundary(usize(cursor));
+    }
+    auto window(Index max_bytes) const -> Option<TextSurroundingRange> {
+        if (!present() || !valid()) return None();
+        auto content = text.text();
+        Index length = Index(content->len().to_primitive());
+        auto low = rstd::cmp::min(anchor, cursor), high = rstd::cmp::max(anchor, cursor);
+        if (high - low > max_bytes) return None();
+        auto room = max_bytes - (high - low);
+        auto left = rstd::cmp::min(low, room / 2);
+        auto right = rstd::cmp::min(length - high, room - left);
+        left += rstd::cmp::min(low - left, room - left - right);
+        auto start = low - left, end = high + right;
+        while (start < low && !content->is_char_boundary(usize(start))) ++start;
+        while (end > high && !content->is_char_boundary(usize(end))) --end;
+        return Some(TextSurroundingRange{TextBoundaries(text), start, end, anchor - start, cursor - start});
+    }
+    auto operator==(const TextSurrounding &) const -> bool = default;
+};
 struct TextInputRequest {
     Serial session{};
     Rect area;
     auto valid() const -> bool { return session != 0 && area.valid(); }
     auto operator==(const TextInputRequest &) const -> bool = default;
+};
+struct TextInputState {
+    TextInputRequest request;
+    TextSurrounding surrounding;
+    TextChangeCause change_cause{TextChangeCause::Other};
+    auto valid() const -> bool { return request.valid() && surrounding.valid() &&
+        unsigned(change_cause) <= unsigned(TextChangeCause::Other); }
+    auto operator==(const TextInputState &) const -> bool = default;
 };
 enum class ScrollPhase { Unknown, Begin, Update, End };
 struct PointerSample {
@@ -155,6 +255,7 @@ struct InputEvent {
     Option<Scalar> twist;
     TextInput text;
     Serial text_session{};
+    TextTransaction transaction;
 };
 struct RoutedEvent {
     InputEvent input;

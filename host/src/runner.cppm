@@ -9,6 +9,7 @@ struct HostEvents {
     VkExtent2D extent{};
     bool redraw{}, close_requested{};
     Serial dropped_input{};
+    Option<gpu::Error> error;
 };
 struct HostDriver {
     template <class Self, class Delegate = void> struct Api {
@@ -53,7 +54,7 @@ template <class B, class A, class F, class C> struct CallbackHooks {
 template <class B, class A, class F, class C> auto callback_hooks(B b, A a, F f, C c) {
     return CallbackHooks<B, A, F, C>{rstd::move(b), rstd::move(a), rstd::move(f), rstd::move(c)};
 }
-enum class RunStage { State, Session, Frame, Callback, Shutdown };
+enum class RunStage { State, Session, Frame, Callback, Shutdown, Host };
 struct RunError {
     RunStage stage;
     Option<SessionError> session;
@@ -117,6 +118,8 @@ class Runner {
             if ((request_close_ || request_redraw_) && !closing)
                 timeout = 0;
             auto events = platform.wait(timeout);
+            if (events.error.is_some())
+                return fail({RunStage::Host, {}, rstd::move(events.error)});
             dirty = dirty || rstd::exchange(request_redraw_, false);
             stats_.dropped_input +=
                 rstd::min(events.dropped_input, ~Serial{} - stats_.dropped_input);

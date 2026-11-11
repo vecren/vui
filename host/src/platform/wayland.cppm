@@ -1,6 +1,7 @@
 module vui.host:platform.wayland;
 import :ffi.wayland;
 import :ffi.xdg_shell;
+import :platform.wayland_input;
 import rstd;
 
 namespace vui::host::detail {
@@ -15,6 +16,7 @@ class WaylandConnection {
     ffi::wayland::wl_compositor *compositor_{};
     ffi::xdg_shell::xdg_wm_base *shell_{};
     bool listener_failed_{};
+    WaylandInput input_;
 
     static void ping(void *, ffi::xdg_shell::xdg_wm_base *shell, rstd::uint32_t serial) {
         ffi::xdg_shell::xdg_wm_base_pong(shell, serial);
@@ -39,8 +41,12 @@ class WaylandConnection {
                                    self.shell_, &self.shell_listener_, &self) != 0)
                 self.listener_failed_ = true;
         }
+        if (*text == "wl_seat"_str) self.input_.bind(registry, name, version);
+        if (*text == "zwp_text_input_manager_v3"_str) self.input_.bind_text(registry, name, version);
     }
-    static void removed(void *, ffi::wayland::wl_registry *, rstd::uint32_t) {}
+    static void removed(void *data, ffi::wayland::wl_registry *, rstd::uint32_t name) {
+        static_cast<WaylandConnection *>(data)->input_.remove(name);
+    }
     ffi::wayland::wl_registry_listener registry_listener_{global, removed};
     ffi::xdg_shell::xdg_wm_base_listener shell_listener_{ping};
 
@@ -66,15 +72,16 @@ class WaylandConnection {
         if (!registry_ ||
             ffi::wayland::wl_registry_add_listener(registry_, &registry_listener_, this) != 0)
             return fail(WaylandConnectionError::Registry);
-        if (ffi::wayland::wl_display_roundtrip(display_) < 0 || listener_failed_)
+        if (ffi::wayland::wl_display_roundtrip(display_) < 0 || listener_failed_ || input_.failed())
             return fail(WaylandConnectionError::Protocol);
         if (!compositor_ || !shell_)
             return fail(WaylandConnectionError::MissingGlobals);
-        if (ffi::wayland::wl_display_roundtrip(display_) < 0)
+        if (ffi::wayland::wl_display_roundtrip(display_) < 0 || input_.failed())
             return fail(WaylandConnectionError::Protocol);
         return Ok(empty{});
     }
     void close() {
+        input_.close();
         if (shell_)
             ffi::xdg_shell::xdg_wm_base_destroy(shell_);
         if (compositor_)
@@ -91,5 +98,6 @@ class WaylandConnection {
     auto display() const -> ffi::wayland::wl_display * { return display_; }
     auto compositor() const -> ffi::wayland::wl_compositor * { return compositor_; }
     auto shell() const -> ffi::xdg_shell::xdg_wm_base * { return shell_; }
+    auto input() -> WaylandInput & { return input_; }
 };
 } // namespace vui::host::detail

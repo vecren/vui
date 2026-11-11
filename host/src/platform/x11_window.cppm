@@ -1,7 +1,8 @@
 module vui.host:platform.x11_window;
 import :platform.x11;
 import :ffi.x11;
-import rstd;
+import :platform.keys;
+import vui.render;
 
 namespace vui::host::detail {
 using namespace rstd::prelude;
@@ -15,6 +16,22 @@ class X11Window {
     rstd::uint32_t width_{}, height_{};
     rstd::uint64_t revision_{};
     bool close_requested_{};
+    bool detectable_repeat_{}, pointer_grabbed_{}, pressed_[256]{};
+    Vec<InputEvent> input_;
+    Serial dropped_input_{}, sample_clock_{new_session()};
+
+    void emit(InputEvent input) {
+        if (input_.len() >= usize(4096)) { ++dropped_input_; return; }
+        auto now = rstd::time::Instant::now().duration_since_epoch().as_nanos().to_primitive();
+        input.sample_time = {sample_clock_, now > ~Serial{} ? ~Serial{} : Serial(now), 1,
+                             TimeOrigin::Received};
+        input.coordinate_generation = revision_ + 1;
+        input_.push(rstd::move(input));
+    }
+    static auto modifiers(unsigned state) -> Modifiers {
+        return {bool(state & ffi::x11::shift_mask), bool(state & ffi::x11::control_mask),
+                bool(state & ffi::x11::alt_mask), bool(state & ffi::x11::meta_mask)};
+    }
 
     auto fail(X11WindowError error) -> Result<empty, X11WindowError> {
         close();
@@ -50,8 +67,14 @@ class X11Window {
         height_ = height;
         revision_ = 0;
         close_requested_ = false;
+        int supported{};
+        detectable_repeat_ = ffi::x11::XkbSetDetectableAutoRepeat(native, 1, &supported) && supported;
         ffi::x11::XStoreName(native, window_, title);
-        ffi::x11::XSelectInput(native, window_, ffi::x11::structure_notify_mask);
+        ffi::x11::XSelectInput(native, window_, ffi::x11::structure_notify_mask |
+            ffi::x11::pointer_motion_mask | ffi::x11::button_press_mask |
+            ffi::x11::button_release_mask | ffi::x11::focus_change_mask |
+            ffi::x11::enter_window_mask | ffi::x11::leave_window_mask |
+            ffi::x11::key_press_mask | ffi::x11::key_release_mask);
         ffi::x11::XMapWindow(native, window_);
         ffi::x11::XFlush(native);
         return Ok(empty{});
@@ -65,11 +88,29 @@ class X11Window {
         ffi::x11::XFlush(connection_.display());
         return Ok(empty{});
     }
-    auto synchronize() -> Result<empty, X11WindowError> {
+    auto capture(bool enabled) -> NativeCaptureResult {
+        if (!window_) return NativeCaptureResult::Failed;
+        if (enabled == pointer_grabbed_) return NativeCaptureResult::Succeeded;
+        auto display = connection_.display();
+        if (enabled) {
+            auto result = ffi::x11::XGrabPointer(display, window_, 1,
+                ffi::x11::button_press_mask | ffi::x11::button_release_mask |
+                ffi::x11::pointer_motion_mask | ffi::x11::enter_window_mask |
+                ffi::x11::leave_window_mask, ffi::x11::grab_mode_async,
+                ffi::x11::grab_mode_async, 0, 0, ffi::x11::current_time);
+            if (result != ffi::x11::grab_success) return NativeCaptureResult::Failed;
+            pointer_grabbed_ = true;
+        } else {
+            ffi::x11::XUngrabPointer(display, ffi::x11::current_time);
+            ffi::x11::XFlush(display);
+            pointer_grabbed_ = false;
+        }
+        return NativeCaptureResult::Succeeded;
+    }
+    auto dispatch() -> Result<empty, X11WindowError> {
         if (!window_)
             return Err(X11WindowError::State);
         auto display = connection_.display();
-        ffi::x11::XSync(display, 0);
         while (ffi::x11::XPending(display) > 0) {
             ffi::x11::XEvent event{};
             ffi::x11::XNextEvent(display, &event);
@@ -89,18 +130,97 @@ class X11Window {
                        static_cast<ffi::x11::Atom>(event.xclient.data.l[0]) == delete_window_) {
                 close_requested_ = true;
             } else if (event.type == ffi::x11::destroy_notify) {
+                (void)capture(false);
                 window_ = 0;
                 close_requested_ = true;
+            } else if (event.type == ffi::x11::unmap_notify) {
+                pointer_grabbed_ = false;
+                InputEvent input; input.type = EventType::WindowFocusLost;
+                emit(rstd::move(input));
+            } else if (event.type == ffi::x11::focus_in || event.type == ffi::x11::focus_out) {
+                if (event.xfocus.mode == ffi::x11::notify_grab ||
+                    event.xfocus.mode == ffi::x11::notify_ungrab) continue;
+                InputEvent input;
+                input.type = event.type == ffi::x11::focus_in ? EventType::WindowFocusGained
+                                                               : EventType::WindowFocusLost;
+                if (event.type == ffi::x11::focus_out) {
+                    (void)capture(false);
+                    for (auto &key : pressed_) key = false;
+                }
+                emit(rstd::move(input));
+            } else if (event.type == ffi::x11::key_press || event.type == ffi::x11::key_release) {
+                auto code = event.xkey.keycode;
+                if (code >= 256) continue;
+                if (event.type == ffi::x11::key_release && !detectable_repeat_ &&
+                    ffi::x11::XEventsQueued(display, ffi::x11::queued_after_reading)) {
+                    ffi::x11::XEvent next{};
+                    ffi::x11::XPeekEvent(display, &next);
+                    if (next.type == ffi::x11::key_press && next.xkey.window == window_ &&
+                        next.xkey.keycode == code && next.xkey.time - event.xkey.time < 20) continue;
+                }
+                unsigned consumed{};
+                unsigned long symbol{};
+                ffi::x11::XkbLookupKeySym(display, code, event.xkey.state, &consumed, &symbol);
+                InputEvent input;
+                input.type = event.type == ffi::x11::key_press ? EventType::KeyDown : EventType::KeyUp;
+                input.key = key_from_symbol(symbol);
+                input.modifiers = modifiers(event.xkey.state);
+                input.repeat = event.type == ffi::x11::key_press && pressed_[code];
+                pressed_[code] = event.type == ffi::x11::key_press;
+                emit(rstd::move(input));
+            } else if (event.type == ffi::x11::motion_notify ||
+                       event.type == ffi::x11::enter_notify || event.type == ffi::x11::leave_notify) {
+                InputEvent input;
+                input.type = event.type == ffi::x11::motion_notify ? EventType::PointerMove
+                             : event.type == ffi::x11::enter_notify ? EventType::WindowPointerEnter
+                                                                    : EventType::WindowPointerLeave;
+                if (event.type == ffi::x11::motion_notify) {
+                    input.position = {Scalar(event.xmotion.x), Scalar(event.xmotion.y)};
+                    input.modifiers = modifiers(event.xmotion.state);
+                } else {
+                    input.position = {Scalar(event.xcrossing.x), Scalar(event.xcrossing.y)};
+                    input.modifiers = modifiers(event.xcrossing.state);
+                }
+                emit(rstd::move(input));
+            } else if (event.type == ffi::x11::button_press || event.type == ffi::x11::button_release) {
+                InputEvent input;
+                auto button = event.xbutton.button;
+                input.position = {Scalar(event.xbutton.x), Scalar(event.xbutton.y)};
+                input.modifiers = modifiers(event.xbutton.state);
+                if (button >= 4 && button <= 7) {
+                    if (event.type == ffi::x11::button_release) continue;
+                    input.type = EventType::Wheel;
+                    input.scroll_unit = ScrollUnit::Lines;
+                    input.scroll_delta = button == 4 ? Point{0, -1} : button == 5 ? Point{0, 1}
+                                         : button == 6 ? Point{-1, 0} : Point{1, 0};
+                } else {
+                    input.button = button == 1 ? PointerButton::Primary : button == 2 ? PointerButton::Middle
+                                   : button == 3 ? PointerButton::Secondary : button == 8 ? PointerButton::Back
+                                   : button == 9 ? PointerButton::Forward : PointerButton::None;
+                    if (input.button == PointerButton::None) continue;
+                    input.type = event.type == ffi::x11::button_press ? EventType::PointerDown : EventType::PointerUp;
+                }
+                emit(rstd::move(input));
             }
         }
         return Ok(empty{});
     }
+    auto synchronize() -> Result<empty, X11WindowError> {
+        if (!window_)
+            return Err(X11WindowError::State);
+        ffi::x11::XSync(connection_.display(), 0);
+        return dispatch();
+    }
     void close() {
+        if (window_) (void)capture(false);
         if (window_)
             ffi::x11::XDestroyWindow(connection_.display(), window_);
         window_ = 0;
         connection_.close();
         close_requested_ = false;
+        input_.clear();
+        dropped_input_ = 0;
+        for (auto &key : pressed_) key = false;
     }
     auto display() const -> ffi::x11::Display * { return connection_.display(); }
     auto window() const -> ffi::x11::Window { return window_; }
@@ -108,5 +228,8 @@ class X11Window {
     auto width() const -> rstd::uint32_t { return width_; }
     auto height() const -> rstd::uint32_t { return height_; }
     auto revision() const -> rstd::uint64_t { return revision_; }
+    auto has_input() const -> bool { return !input_.is_empty() || dropped_input_ != 0; }
+    auto take_input() -> Vec<InputEvent> { return rstd::exchange(input_, Vec<InputEvent>{}); }
+    auto take_dropped_input() -> Serial { return rstd::exchange(dropped_input_, Serial{}); }
 };
 } // namespace vui::host::detail

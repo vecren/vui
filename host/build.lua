@@ -16,4 +16,19 @@ lito.run({
   inputs = { xml },
   outputs = { "include/xdg-shell-protocol.inc" },
 })
+local text_xml = "protocol/text-input-unstable-v3.xml"
+lito.run({
+  tool = scanner,
+  cwd = ".",
+  args = { "client-header", "@INPUT:1@", "@OUTPUT:1@" },
+  inputs = { text_xml },
+  outputs = { "include/text-input-v3-client-protocol.h" },
+})
+lito.run({
+  tool = scanner,
+  cwd = ".",
+  args = { "private-code", "@INPUT:1@", "@OUTPUT:1@" },
+  inputs = { text_xml },
+  outputs = { "include/text-input-v3-protocol.inc" },
+})
 lito.target_add_generated_include(target, "include")

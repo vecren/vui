@@ -66,7 +66,9 @@ class TextFieldState {
     Option<StateBinding<TextEditState>> binding_;
 
     auto caret_visible() const -> bool {
-        return focused_ && caret_visible_ && (caret_with_selection_ || displayed_.composing || displayed_.selection.anchor==displayed_.selection.cursor);
+        return focused_ && caret_visible_ &&
+            (!displayed_.composing || displayed_.preedit_cursor.is_none() || displayed_.preedit_cursor->visible) &&
+            (caret_with_selection_ || displayed_.composing || displayed_.selection.anchor==displayed_.selection.cursor);
     }
     void reset_blink() {
         if (!caret_visible_ && focused_ && session_) session_->document().invalidate_paint(id_).unwrap();
@@ -147,6 +149,10 @@ class TextFieldState {
                 auto reset = router->restart_text_input(id);
                 if (reset.is_err()) field->error_ = Some(TextFieldError{.input = Some(reset.unwrap_err())});
             }
+            auto surrounding = router->set_text_input_surrounding(id,
+                {TextBoundaries(value.text), value.selection.anchor, value.selection.cursor},
+                field->native_commit_ ? TextChangeCause::InputMethod : TextChangeCause::Other);
+            if (surrounding.is_err()) field->error_ = Some(TextFieldError{.input = Some(surrounding.unwrap_err())});
             field->native_commit_ = field->reset_requested_ = false;
             field->displayed_ = value;field->reset_blink();
             auto written = ui.set_text(field->label_, value.display);
@@ -234,6 +240,12 @@ class TextFieldState {
         const auto &value = snapshot.unwrap();
         if (input.type == EventType::TextInput) { native_commit_ = accept(edit_.insert(input.text.text())); consume(context); return; }
         if (input.type == EventType::TextEditing) { accept(edit_.preedit(input.text)); consume(context); return; }
+        if (input.type == EventType::TextTransaction) {
+            auto result = edit_.apply_input_transaction(*input.transaction.get());
+            if (result.is_err()) error_ = Some(TextFieldError{.edit = Some(result.unwrap_err())});
+            else { native_commit_ |= result.unwrap(); error_ = None(); }
+            consume(context); return;
+        }
         PointerKey pointer{input.device, input.pointer};
         if (input.type == EventType::PointerDown && (input.pointer_kind == PointerKind::Touch || input.button == PointerButton::Primary)) {
             if (pointer_.is_some() || context.capture_pointer().is_err()) return;

@@ -118,6 +118,7 @@ class EventRouter {
         bool contact{}, claimed{}, relinquished{};
         SampleTime sample_time;
         NativeCaptureResult native_capture{NativeCaptureResult::Unsupported};
+        bool inside_window{true};
     };
     enum class CommandType { Capture, Release, Focus, RestartText, CancelSubtree };
     struct Command {
@@ -206,9 +207,13 @@ class EventRouter {
     Option<Box<rstd::dyn<rstd::FnMut<void(EventRouter &, const InputEvent &)>>>> navigation_;
     Option<Box<rstd::dyn<rstd::FnMut<NativeCaptureResult(PointerKind, bool)>>>> native_capture_;
     Option<Box<rstd::dyn<rstd::FnMut<NativeTextInputResult(Option<TextInputRequest>)>>>> native_text_input_;
+    Option<Box<rstd::dyn<rstd::FnMut<NativeTextInputResult(Option<TextInputState>)>>>> native_text_state_;
     Option<TextInputRequest> text_request_;
     Option<UiId> text_client_;
     NativeTextInputResult text_result_{NativeTextInputResult::Unsupported};
+    struct SurroundingEntry { UiId client; TextSurrounding value; TextChangeCause cause; };
+    Vec<SurroundingEntry> surroundings_;
+    Option<TextInputState> delivered_text_state_;
     Option<Box<rstd::dyn<rstd::FnMut<Result<String, ClipboardError>()>>>> clipboard_read_;
     Option<Box<rstd::dyn<rstd::FnMut<Result<empty, ClipboardError>(ref<str>)>>>> clipboard_write_;
     static void path(const InputSnapshot &update, UiId id, Vec<UiId> &result) {
@@ -460,12 +465,31 @@ class EventRouter {
         if (target.is_some())
             route(*update_, *target, {EventType::FocusGained}, true);
     }
+    auto current_text_state() const -> Option<TextInputState> {
+        if (text_request_.is_none() || text_client_.is_none()) return None();
+        for (const auto &entry : surroundings_)
+            if (entry.client == *text_client_)
+                return Some(TextInputState{*text_request_, TextSurrounding(entry.value), entry.cause});
+        return Some(TextInputState{*text_request_});
+    }
+    void notify_text_input(bool force) {
+        if (native_text_state_.is_some()) {
+            auto state = current_text_state();
+            if (!force && ((state.is_none() && delivered_text_state_.is_none()) ||
+                (state.is_some() && delivered_text_state_.is_some() && *state == *delivered_text_state_))) return;
+            delivered_text_state_ = state.is_some() ? Some(TextInputState(*state)) : None<TextInputState>();
+            text_result_ = (*native_text_state_)->operator()(rstd::move(state));
+        } else {
+            delivered_text_state_ = None();
+            text_result_ = native_text_input_.is_some() ? (*native_text_input_)->operator()(text_request_)
+                                                       : NativeTextInputResult::Unsupported;
+        }
+    }
     void cancel_text_input(CancelReason reason) {
         if (text_client_.is_none()) return;
         auto client = *text_client_;
         text_client_ = None(); text_request_ = None();
-        text_result_ = native_text_input_.is_some() ? (*native_text_input_)->operator()(None<TextInputRequest>())
-                                                  : NativeTextInputResult::Unsupported;
+        notify_text_input(true);
         auto controls = rstd::exchange(controls_, false);
         InputEvent event; event.type = EventType::TextInputCancelled; event.cancel_reason = reason;
         route(*update_, client, event, true);
@@ -493,10 +517,9 @@ class EventRouter {
         if (client != text_client_) cancel_text_input(CancelReason::Explicit);
         if (client.is_none()) return;
         TextInputRequest request{text_request_.is_some() ? text_request_->session : new_session(), *area};
-        if (!force && text_request_ == Some(request)) return;
+        if (!force && text_request_ == Some(request) && native_text_state_.is_none()) return;
         text_client_ = client; text_request_ = Some(request);
-        text_result_ = native_text_input_.is_some() ? (*native_text_input_)->operator()(text_request_)
-                                                  : NativeTextInputResult::Unsupported;
+        notify_text_input(force);
     }
     void apply_transfer(const OwnershipChange &change) {
         auto state = pointer(change.pointer.pointer, change.pointer.device);
@@ -577,8 +600,7 @@ class EventRouter {
             } else if (command.type == CommandType::RestartText) {
                 if (command.target == text_client_) {
                     text_request_->session = new_session();
-                    text_result_ = native_text_input_.is_some() ? (*native_text_input_)->operator()(text_request_)
-                                                              : NativeTextInputResult::Unsupported;
+                    notify_text_input(true);
                     auto controls = rstd::exchange(controls_, false);
                     InputEvent event; event.type = EventType::TextInputCancelled; event.cancel_reason = CancelReason::Explicit;
                     route(*update_, *text_client_, event, true);
@@ -647,6 +669,7 @@ class EventRouter {
                 return document_.valid(behavior->target) &&
                        (behavior->binding.is_none() || behavior->binding->alive());
             });
+            surroundings_.retain([&](const auto &entry) { return document_.valid(entry.client); });
             prune_requested_ = false;
             routes_dirty_ = true;
         }
@@ -707,6 +730,8 @@ class EventRouter {
     ~EventRouter() {
         if (native_text_input_.is_some() && text_request_.is_some())
             (*native_text_input_)->operator()(None<TextInputRequest>());
+        if (native_text_state_.is_some() && text_request_.is_some())
+            (*native_text_state_)->operator()(None<TextInputState>());
     }
     void begin_input_batch() {
         if (!busy_)
@@ -853,19 +878,50 @@ class EventRouter {
         if (closed_) return Err(InputError::Unavailable);
         if (busy_ || !document_.can_route()) return Err(InputError::Reentrant);
         if (native_text_input_.is_some()) (*native_text_input_)->operator()(None<TextInputRequest>());
+        if (native_text_state_.is_some()) (*native_text_state_)->operator()(None<TextInputState>());
+        native_text_state_ = None(); delivered_text_state_ = None();
         native_text_input_ = Some(Box<rstd::dyn<rstd::FnMut<NativeTextInputResult(Option<TextInputRequest>)>>>::make(rstd::move(callback)));
         text_result_ = (*native_text_input_)->operator()(text_request_);
+        return Ok(empty{});
+    }
+    template <class F> auto set_native_text_input_state(F callback) -> Result<empty, InputError> {
+        if (closed_) return Err(InputError::Unavailable);
+        if (busy_ || !document_.can_route()) return Err(InputError::Reentrant);
+        if (native_text_input_.is_some()) (*native_text_input_)->operator()(None<TextInputRequest>());
+        if (native_text_state_.is_some()) (*native_text_state_)->operator()(None<TextInputState>());
+        native_text_input_ = None(); delivered_text_state_ = None();
+        native_text_state_ = Some(Box<rstd::dyn<rstd::FnMut<NativeTextInputResult(Option<TextInputState>)>>>::make(rstd::move(callback)));
+        notify_text_input(true);
         return Ok(empty{});
     }
     auto clear_native_text_input() -> Result<empty, InputError> {
         if (busy_ || !document_.can_route()) return Err(InputError::Reentrant);
         if (native_text_input_.is_some()) (*native_text_input_)->operator()(None<TextInputRequest>());
-        native_text_input_ = None(); text_result_ = NativeTextInputResult::Unsupported;
+        if (native_text_state_.is_some()) (*native_text_state_)->operator()(None<TextInputState>());
+        native_text_input_ = None(); native_text_state_ = None(); delivered_text_state_ = None();
+        text_result_ = NativeTextInputResult::Unsupported;
         return Ok(empty{});
     }
     auto text_input_request() const -> Option<TextInputRequest> { return text_request_; }
+    auto text_input_state() const -> Option<TextInputState> { return current_text_state(); }
     auto text_input_client() const -> Option<UiId> { return text_client_; }
     auto text_input_result() const -> NativeTextInputResult { return text_result_; }
+    auto set_text_input_surrounding(UiId client, TextSurrounding surrounding,
+                                    TextChangeCause cause = TextChangeCause::Other) -> Result<empty, InputError> {
+        if (closed_) return Err(InputError::Unavailable);
+        if (!document_.valid(client)) return Err(InputError::InvalidId);
+        if (!surrounding.valid() || unsigned(cause) > unsigned(TextChangeCause::Other))
+            return Err(InputError::InvalidEvent);
+        SurroundingEntry *found{};
+        for (auto &entry : surroundings_) if (entry.client == client) { found = &entry; break; }
+        if (found && found->value == surrounding) return Ok(empty{});
+        if (!surrounding.present()) surroundings_.retain([&](const auto &entry) { return entry.client != client; });
+        else if (found) { found->value = rstd::move(surrounding); found->cause = cause; }
+        else surroundings_.push({client, rstd::move(surrounding), cause});
+        if (!busy_ && document_.can_route()) { begin(); return end(); }
+        document_.bindings().wake();
+        return Ok(empty{});
+    }
     auto restart_text_input(UiId client) -> Result<empty, InputError> {
         if (text_client_ != Some(client)) return Err(InputError::Unavailable);
         return command({CommandType::RestartText, 0, Some(client)});
@@ -1115,7 +1171,7 @@ class EventRouter {
             scopes_.resolve_focus(*update_, false, [](Option<UiId>) {});
         if (window_focused_)
             for (auto &state : pointers_) {
-                if (state.kind != PointerKind::Touch) {
+                if (state.kind != PointerKind::Touch && state.inside_window) {
                     auto hit = hit_at(*update_, state.position);
                     hover(state, hit.is_some() ? Some(*hit) : None<UiId>());
                 }
@@ -1159,18 +1215,23 @@ class EventRouter {
             return Err(InputError::Reentrant);
         if (update_.is_none())
             return Err(InputError::Unavailable);
-        bool pointer_event =
+        bool pointer_enter = input.type == EventType::WindowPointerEnter;
+        bool pointer_leave = input.type == EventType::WindowPointerLeave;
+        bool pointer_event = pointer_enter ||
             input.type == EventType::PointerMove || input.type == EventType::PointerDown ||
             input.type == EventType::PointerUp || input.type == EventType::PointerCancel;
         bool key_event = input.type == EventType::KeyDown || input.type == EventType::KeyUp;
-        bool text_event = input.type == EventType::TextInput || input.type == EventType::TextEditing;
+        bool transaction_event = input.type == EventType::TextTransaction;
+        bool text_event = input.type == EventType::TextInput || input.type == EventType::TextEditing || transaction_event;
         bool wheel_event = input.type == EventType::Wheel;
         bool device_event = input.type == EventType::DeviceLost;
         bool window_event =
             input.type == EventType::WindowFocusLost || input.type == EventType::WindowFocusGained;
-        if ((!pointer_event && !key_event && !text_event && !window_event && !wheel_event && !device_event) ||
-            (text_event && (!input.text.present() ||
+        if ((!pointer_event && !pointer_leave && !key_event && !text_event && !window_event && !wheel_event && !device_event) ||
+            (text_event && !transaction_event && (!input.text.present() ||
                 (input.type == EventType::TextInput && input.text.selection().is_some()))) ||
+            (transaction_event && (!input.transaction.get() || input.text.present())) ||
+            (!transaction_event && input.transaction.get()) ||
             (!text_event && (input.text.present() || input.text_session != 0)) ||
             ((pointer_event || wheel_event) &&
              (!finite(input.position.x) || !finite(input.position.y))) ||
@@ -1215,9 +1276,19 @@ class EventRouter {
             if (input.type == EventType::PointerUp && !(state->buttons & mask) &&
                 !(state->kind == PointerKind::Touch && state->contact))
                 return Ok(empty{});
+            if (pointer_enter) {
+                state->inside_window = true;
+                input.type = EventType::PointerMove;
+            }
         }
         begin();
-        if (input.type == EventType::WindowFocusLost) {
+        if (pointer_leave) {
+            auto value = pointer(input.pointer, input.device);
+            if (value) {
+                value->inside_window = false;
+                hover(*value, None());
+            }
+        } else if (input.type == EventType::WindowFocusLost) {
             availability_dirty_=true;
             controls_ = false;
             window_focused_ = false;
@@ -1264,7 +1335,8 @@ class EventRouter {
                 hover(*state, None());
                 controls_ = true;
             } else {
-                auto hit = state->kind == PointerKind::Touch && input.type != EventType::PointerDown
+                auto hit = (state->kind == PointerKind::Touch && input.type != EventType::PointerDown) ||
+                                   !state->inside_window
                                ? None<UiId>()
                                : hit_at(*update_, input.position);
                 if (state->kind != PointerKind::Touch)
@@ -1406,6 +1478,8 @@ class EventRouter {
         arena_.close();
         contacts_.clear();
         pointers_.clear();
+        surroundings_.clear();
+        delivered_text_state_ = None();
         update_ = None();
         return Ok(empty{});
     }

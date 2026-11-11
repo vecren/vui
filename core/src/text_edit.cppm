@@ -23,6 +23,7 @@ struct TextEditState {
     Option<TextInputSelection> preedit_selection;
     Index caret{};
     bool composing{}, can_undo{}, can_redo{};
+    Option<TextPreeditCursor> preedit_cursor;
     auto operator==(const TextEditState &) const -> bool = default;
     auto selected_text() const -> ref<str> {
         auto range = selection.range(); return text.text()->get(usize(range.start), usize(range.end)).unwrap();
@@ -58,6 +59,7 @@ class TextEdit {
     auto erase_backwards() -> Result<bool, TextEditError>;
     auto erase_forwards() -> Result<bool, TextEditError>;
     auto preedit(const TextInput &) -> Result<bool, TextEditError>;
+    auto apply_input_transaction(const TextInputTransaction &) -> Result<bool, TextEditError>;
     auto cancel_composition() -> Result<bool, TextEditError>;
     auto undo() -> Result<bool, TextEditError>;
     auto redo() -> Result<bool, TextEditError>;
