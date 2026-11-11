@@ -42,6 +42,7 @@ class WaylandConnection {
                 self.listener_failed_ = true;
         }
         if (*text == "wl_seat"_str) self.input_.bind(registry, name, version);
+        if (*text == "wl_data_device_manager"_str) self.input_.bind_clipboard(registry, name, version);
         if (*text == "zwp_text_input_manager_v3"_str) self.input_.bind_text(registry, name, version);
     }
     static void removed(void *data, ffi::wayland::wl_registry *, rstd::uint32_t name) {

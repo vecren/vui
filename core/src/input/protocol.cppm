@@ -27,7 +27,8 @@ enum class EventType {
     TextInputCancelled,
     WindowPointerEnter,
     WindowPointerLeave,
-    TextTransaction
+    TextTransaction,
+    ClipboardResult
 };
 enum class InputDelivery { EverySample, LatestWithHistory };
 enum class RoutePhase { Capture, Target, Bubble };
@@ -256,6 +257,8 @@ struct InputEvent {
     TextInput text;
     Serial text_session{};
     TextTransaction transaction;
+    Serial clipboard_request{};
+    Option<ClipboardError> clipboard_error;
 };
 struct RoutedEvent {
     InputEvent input;

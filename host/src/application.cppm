@@ -72,6 +72,15 @@ class Application {
             window_.close();
             return Err(gpu::Error{gpu::Stage::State});
         }
+        if (session_.input().set_clipboard(
+                []() -> Result<String, ClipboardError> { return Err(ClipboardError::Unsupported); },
+                [this](ref<str> text) { return window_.write_clipboard(text); }).is_err() ||
+            session_.input().set_clipboard_request(
+                [this](Serial id) { return window_.request_clipboard(id); }).is_err()) {
+            (void)renderer_.shutdown(5'000'000'000);
+            window_.close();
+            return Err(gpu::Error{gpu::Stage::State});
+        }
         opened_ = true;
         return Ok(empty{});
     }

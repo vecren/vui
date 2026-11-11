@@ -61,6 +61,8 @@ class TextFieldState {
     rstd::rc::Rc<Blink> blink_;
     MotionRegistration motion_;
     Option<PointerKey> pointer_;
+    Option<Serial> paste_request_;
+    Option<state::Version> paste_version_;
     Option<TextFieldError> error_;
     Signal<void(EventContext &, const TextEditState &)> submitted_, cancelled_;
     Option<StateBinding<TextEditState>> binding_;
@@ -229,7 +231,7 @@ class TextFieldState {
             if (focused_) {
                 original_=Some(edit_.state().unwrap().text);
                 if (options_.select_all_on_focus) accept(edit_.select_all());
-            } else { accept(edit_.cancel_composition()); pointer_ = None();original_=None(); }
+            } else { accept(edit_.cancel_composition()); pointer_ = None(); original_=None(); paste_request_=None(); paste_version_=None(); }
             reset_blink();
             context.document().invalidate_paint(event.current).unwrap(); return;
         }
@@ -238,6 +240,17 @@ class TextFieldState {
         auto snapshot = edit_.state();
         if (snapshot.is_err()) { error_ = Some(TextFieldError{.edit = Some(snapshot.unwrap_err())}); return; }
         const auto &value = snapshot.unwrap();
+        if (input.type == EventType::ClipboardResult) {
+            if (paste_request_ != Some(input.clipboard_request)) return;
+            paste_request_ = None();
+            auto version = rstd::exchange(paste_version_, None<state::Version>());
+            auto current = state::read(edit_.value());
+            if (current.is_err()) { error_ = Some(TextFieldError{.edit = Some(TextEditError{.state = Some(current.unwrap_err())})}); return; }
+            if (version.is_none() || *version != current->version()) return;
+            if (input.clipboard_error.is_some()) error_ = Some(TextFieldError{.clipboard = input.clipboard_error});
+            else if (accept(edit_.insert(input.text.text()))) { reset_native(context, value.composing); reset_blink(); }
+            consume(context); return;
+        }
         if (input.type == EventType::TextInput) { native_commit_ = accept(edit_.insert(input.text.text())); consume(context); return; }
         if (input.type == EventType::TextEditing) { accept(edit_.preedit(input.text)); consume(context); return; }
         if (input.type == EventType::TextTransaction) {
@@ -282,9 +295,16 @@ class TextFieldState {
                 else changed = accept(edit_.insert(""_str));
             }
         } else if (command && input.key == Key::V) {
-            auto result = context.read_clipboard();
-            if (result.is_err()) error_ = Some(TextFieldError{.clipboard = Some(result.unwrap_err())});
-            else changed = accept(edit_.insert(result->as_str()));
+            paste_request_ = None(); paste_version_ = None();
+            auto version = state::read(edit_.value());
+            if (version.is_err()) { error_ = Some(TextFieldError{.edit = Some(TextEditError{.state = Some(version.unwrap_err())})}); return; }
+            auto request = context.request_clipboard();
+            if (request.is_ok()) { paste_request_ = Some(request.unwrap()); paste_version_ = Some(version->version()); }
+            else if (request.unwrap_err() == ClipboardError::Unsupported) {
+                auto result = context.read_clipboard();
+                if (result.is_err()) error_ = Some(TextFieldError{.clipboard = Some(result.unwrap_err())});
+                else changed = accept(edit_.insert(result->as_str()));
+            } else error_ = Some(TextFieldError{.clipboard = Some(request.unwrap_err())});
         } else if (command && input.key == Key::A) changed = accept(edit_.select_all());
         else if (command && input.key == Key::Z) changed = accept(input.modifiers.shift ? edit_.redo() : edit_.undo());
         else if (command && input.key == Key::Y) changed = accept(edit_.redo());

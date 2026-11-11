@@ -5,6 +5,7 @@ import :ffi.xkb;
 import :platform.keys;
 import :platform.keyboard_text;
 import :platform.wayland_text;
+import :platform.wayland_clipboard;
 import vui.render;
 
 namespace vui::host::detail {
@@ -47,13 +48,21 @@ class WaylandInput {
     WaylandText text_{this,
         [](void *data, InputEvent event) { static_cast<WaylandInput *>(data)->emit(rstd::move(event)); },
         [](void *data) { ++static_cast<WaylandInput *>(data)->dropped_; }};
+    WaylandClipboard clipboard_{this,
+        [](void *data, InputEvent event) { static_cast<WaylandInput *>(data)->emit(rstd::move(event)); }};
 
     static auto now_ns() -> Serial {
         auto now = rstd::time::Instant::now().duration_since_epoch().as_nanos().to_primitive();
         return now > ~Serial{} ? ~Serial{} : Serial(now);
     }
     void emit(InputEvent event) {
-        if (input_.len() >= usize(4096)) { ++dropped_; return; }
+        if (input_.len() >= usize(4096)) {
+            if (event.type == EventType::ClipboardResult) {
+                for (usize i{}; i < input_.len(); i += usize(1))
+                    if (input_[i].type != EventType::ClipboardResult) { input_.remove(i); ++dropped_; break; }
+            }
+            if (input_.len() >= usize(4096)) { ++dropped_; return; }
+        }
         event.sample_time = {clock_, now_ns(), 1, TimeOrigin::Received};
         event.modifiers = modifiers_;
         event.coordinate_generation = generation_;
@@ -122,6 +131,7 @@ class WaylandInput {
         if (keyboard_focused_) {
             InputEvent event; event.type = EventType::WindowFocusLost; emit(rstd::move(event));
         }
+        clipboard_.lost_focus();
         keyboard_focused_ = false;
         modifiers_ = {};
         repeat_rate_ = 4;
@@ -317,6 +327,7 @@ class WaylandInput {
         self.repeat_at_ = None(); self.keyboard_focused_ = false;
         self.repeat_text_ = TextInput{}; self.repeat_text_session_ = None(); self.reset_compose();
         InputEvent event; event.type = EventType::WindowFocusLost; self.emit(rstd::move(event));
+        self.clipboard_.lost_focus();
         self.modifiers_ = {};
     }
     void emit_key(rstd::uint32_t code, bool pressed, bool repeat = false) {
@@ -384,22 +395,31 @@ class WaylandInput {
         if (!seat_ || wl::wl_seat_add_listener(seat_, &seat_listener_, this)) { failed_ = true; return; }
         seat_name_ = name;
         text_.set_seat(seat_);
+        clipboard_.set_seat(seat_);
     }
     void bind_text(wl::wl_registry *registry, rstd::uint32_t name, rstd::uint32_t version) { text_.bind(registry, name, version); }
-    void remove(rstd::uint32_t name) { if (seat_ && seat_name_ == name) close_seat(); text_.remove(name); }
+    void bind_clipboard(wl::wl_registry *registry, rstd::uint32_t name, rstd::uint32_t version) { clipboard_.bind(registry, name, version); }
+    void remove(rstd::uint32_t name) { if (seat_ && seat_name_ == name) close_seat(); text_.remove(name); clipboard_.remove(name); }
     void close_seat() {
         text_.set_seat(nullptr);
         release_pointer(); release_touch(); release_keyboard();
+        clipboard_.set_seat(nullptr);
         if (seat_) {
             if (wl::wl_seat_get_version(seat_) >= wl::seat_release_version) wl::wl_seat_release(seat_);
             else wl::wl_seat_destroy(seat_);
         }
         seat_ = nullptr; seat_name_ = 0;
     }
-    void close() { close_seat(); text_.close(); surface_ = nullptr; input_.clear(); dropped_ = 0; failed_ = false; }
+    void close() { close_seat(); clipboard_.close(); text_.close(); surface_ = nullptr; input_.clear(); dropped_ = 0; failed_ = false; }
     void set_surface(wl::wl_surface *surface) { surface_ = surface; text_.set_surface(surface); }
     void set_generation(Serial generation) { generation_ = generation; }
-    auto failed() const -> bool { return failed_ || text_.failed(); }
+    auto failed() const -> bool { return failed_ || text_.failed() || clipboard_.failed(); }
+    auto request_clipboard(Serial id) -> Result<empty, ClipboardError> {
+        if (!keyboard_focused_) return Err(ClipboardError::Unavailable);
+        if (input_.len() + clipboard_.pending() >= usize(4096)) return Err(ClipboardError::Limit);
+        return clipboard_.request(id);
+    }
+    auto clipboard() -> WaylandClipboard & { return clipboard_; }
     auto set_text_input(Option<TextInputState> state) -> NativeTextInputResult {
         auto previous = text_.session();
         auto result = text_.set_state(rstd::move(state));

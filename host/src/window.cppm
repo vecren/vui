@@ -36,6 +36,8 @@ class Window final : public gpu::SurfaceHost {
     auto wake_stats() const -> WakeStats;
     auto capture(PointerKind kind, bool enabled) -> NativeCaptureResult;
     auto set_text_input(Option<TextInputState> state) -> NativeTextInputResult;
+    auto request_clipboard(Serial id) -> Result<empty, ClipboardError>;
+    auto write_clipboard(ref<str> text) -> Result<empty, ClipboardError>;
     auto instance_extensions() -> Result<Vec<vrento::vulkan::Extension>, gpu::Error> override;
     auto create_surface(VkInstance instance) -> Result<gpu::NativeSurface, gpu::Error> override;
     auto pixel_extent() const -> VkExtent2D override;

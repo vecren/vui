@@ -63,6 +63,7 @@ class EventContext {
     auto focus() -> Result<empty, InputError>;
     auto restart_text_input() -> Result<empty, InputError>;
     auto read_clipboard() -> Result<String, ClipboardError>;
+    auto request_clipboard() -> Result<Serial, ClipboardError>;
     auto write_clipboard(ref<str>) -> Result<empty, ClipboardError>;
     template <class F> auto defer(F callback) -> Result<Serial, UiError> {
         return document().defer(rstd::move(callback));
@@ -216,6 +217,9 @@ class EventRouter {
     Option<TextInputState> delivered_text_state_;
     Option<Box<rstd::dyn<rstd::FnMut<Result<String, ClipboardError>()>>>> clipboard_read_;
     Option<Box<rstd::dyn<rstd::FnMut<Result<empty, ClipboardError>(ref<str>)>>>> clipboard_write_;
+    Option<Box<rstd::dyn<rstd::FnMut<Result<empty, ClipboardError>(Serial)>>>> clipboard_request_;
+    struct ClipboardPending { Serial id; UiId target; Serial focus_revision; };
+    Vec<ClipboardPending> clipboard_pending_;
     static void path(const InputSnapshot &update, UiId id, Vec<UiId> &result) {
         result.clear();
         auto cursor = Some(id);
@@ -320,6 +324,7 @@ class EventRouter {
         bool pointer_input = input.type != EventType::KeyDown && input.type != EventType::KeyUp &&
                              input.type != EventType::TextInput && input.type != EventType::TextEditing &&
                              input.type != EventType::TextInputCancelled &&
+                             input.type != EventType::ClipboardResult &&
                              input.type != EventType::FocusGained &&
                              input.type != EventType::FocusLost;
         bool allowed = cleanup || scopes_.allows(update, event.current, pointer_input);
@@ -457,6 +462,7 @@ class EventRouter {
         if (focus_revision_ == ~Serial{})
             rstd::panic("vui focus revision exhausted");
         ++focus_revision_;
+        clipboard_pending_.clear();
         cancel_text_input(text_reason);
         auto old = focus_;
         focus_ = target;
@@ -930,18 +936,41 @@ class EventRouter {
     auto set_clipboard(Read read, Write write) -> Result<empty, InputError> {
         if (closed_) return Err(InputError::Unavailable);
         if (busy_ || !document_.can_route()) return Err(InputError::Reentrant);
+        clipboard_request_ = None(); clipboard_pending_.clear();
         clipboard_read_ = Some(Box<rstd::dyn<rstd::FnMut<Result<String, ClipboardError>()>>>::make(rstd::move(read)));
         clipboard_write_ = Some(Box<rstd::dyn<rstd::FnMut<Result<empty, ClipboardError>(ref<str>)>>>::make(rstd::move(write)));
         return Ok(empty{});
     }
+    template <class Request>
+    auto set_clipboard_request(Request request) -> Result<empty, InputError> {
+        if (closed_) return Err(InputError::Unavailable);
+        if (busy_ || !document_.can_route()) return Err(InputError::Reentrant);
+        clipboard_pending_.clear();
+        clipboard_request_ = Some(Box<rstd::dyn<rstd::FnMut<Result<empty, ClipboardError>(Serial)>>>::make(rstd::move(request)));
+        return Ok(empty{});
+    }
     auto clear_clipboard() -> Result<empty, InputError> {
         if (busy_ || !document_.can_route()) return Err(InputError::Reentrant);
-        clipboard_read_ = None(); clipboard_write_ = None(); return Ok(empty{});
+        clipboard_read_ = None(); clipboard_write_ = None(); clipboard_request_ = None();
+        clipboard_pending_.clear(); return Ok(empty{});
     }
     auto read_clipboard() -> Result<String, ClipboardError> {
         if (closed_) return Err(ClipboardError::Unavailable);
         if (clipboard_read_.is_none()) return Err(ClipboardError::Unsupported);
         return (*clipboard_read_)->operator()();
+    }
+    auto request_clipboard(UiId target) -> Result<Serial, ClipboardError> {
+        if (closed_ || !window_focused_ || focus_ != Some(target)) return Err(ClipboardError::Unavailable);
+        if (clipboard_request_.is_none()) return Err(ClipboardError::Unsupported);
+        if (clipboard_pending_.len() >= usize(32)) return Err(ClipboardError::Limit);
+        auto id = new_session();
+        clipboard_pending_.push({id, target, focus_revision_});
+        auto result = (*clipboard_request_)->operator()(id);
+        if (result.is_err()) {
+            clipboard_pending_.retain([&](const ClipboardPending &pending) { return pending.id != id; });
+            return Err(result.unwrap_err());
+        }
+        return Ok(id);
     }
     auto write_clipboard(ref<str> text) -> Result<empty, ClipboardError> {
         if (closed_) return Err(ClipboardError::Unavailable);
@@ -1222,17 +1251,22 @@ class EventRouter {
             input.type == EventType::PointerUp || input.type == EventType::PointerCancel;
         bool key_event = input.type == EventType::KeyDown || input.type == EventType::KeyUp;
         bool transaction_event = input.type == EventType::TextTransaction;
+        bool clipboard_event = input.type == EventType::ClipboardResult;
         bool text_event = input.type == EventType::TextInput || input.type == EventType::TextEditing || transaction_event;
         bool wheel_event = input.type == EventType::Wheel;
         bool device_event = input.type == EventType::DeviceLost;
         bool window_event =
             input.type == EventType::WindowFocusLost || input.type == EventType::WindowFocusGained;
-        if ((!pointer_event && !pointer_leave && !key_event && !text_event && !window_event && !wheel_event && !device_event) ||
+        if ((!pointer_event && !pointer_leave && !key_event && !text_event && !clipboard_event && !window_event && !wheel_event && !device_event) ||
             (text_event && !transaction_event && (!input.text.present() ||
                 (input.type == EventType::TextInput && input.text.selection().is_some()))) ||
             (transaction_event && (!input.transaction.get() || input.text.present())) ||
             (!transaction_event && input.transaction.get()) ||
-            (!text_event && (input.text.present() || input.text_session != 0)) ||
+            (clipboard_event && (!input.clipboard_request || input.text_session ||
+                (input.clipboard_error.is_some() == input.text.present()) || input.text.selection().is_some() ||
+                (input.clipboard_error.is_some() && unsigned(*input.clipboard_error) > unsigned(ClipboardError::Limit)))) ||
+            (!clipboard_event && (input.clipboard_request || input.clipboard_error.is_some())) ||
+            (!text_event && !clipboard_event && (input.text.present() || input.text_session != 0)) ||
             ((pointer_event || wheel_event) &&
              (!finite(input.position.x) || !finite(input.position.y))) ||
             (wheel_event &&
@@ -1316,6 +1350,13 @@ class EventRouter {
             auto hit = hit_at(*update_, input.position);
             if (hit.is_some())
                 route(*update_, *hit, input);
+        } else if (clipboard_event) {
+            Option<UiId> target;
+            for (const auto &pending : clipboard_pending_)
+                if (pending.id == input.clipboard_request && pending.focus_revision == focus_revision_ &&
+                    focus_ == Some(pending.target)) { target = Some(UiId(pending.target)); break; }
+            if (target.is_some()) clipboard_pending_.retain([&](const ClipboardPending &pending) { return pending.id != input.clipboard_request; });
+            if (target.is_some()) route(*update_, *target, input, true);
         } else if (text_event) {
             if (text_client_.is_some() && text_request_.is_some() &&
                 (input.text_session == 0 || input.text_session == text_request_->session))
@@ -1479,6 +1520,7 @@ class EventRouter {
         contacts_.clear();
         pointers_.clear();
         surroundings_.clear();
+        clipboard_pending_.clear();
         delivered_text_state_ = None();
         update_ = None();
         return Ok(empty{});
@@ -1487,6 +1529,7 @@ class EventRouter {
 inline auto EventContext::document() -> UiDocument & { return router_.document_; }
 inline auto EventContext::restart_text_input() -> Result<empty, InputError> { return router_.restart_text_input(event_.current); }
 inline auto EventContext::read_clipboard() -> Result<String, ClipboardError> { return router_.read_clipboard(); }
+inline auto EventContext::request_clipboard() -> Result<Serial, ClipboardError> { return router_.request_clipboard(event_.current); }
 inline auto EventContext::write_clipboard(ref<str> text) -> Result<empty, ClipboardError> { return router_.write_clipboard(text); }
 inline auto EventContext::visual(UiId id) const -> const UiVisual * {
     return router_.update_->get(id);

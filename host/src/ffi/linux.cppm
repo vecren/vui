@@ -1,5 +1,6 @@
 module;
 #include <errno.h>
+#include <fcntl.h>
 #include <poll.h>
 #include <sys/eventfd.h>
 #include <sys/mman.h>
@@ -27,6 +28,8 @@ inline constexpr auto map_read = PROT_READ;
 inline constexpr auto map_private = MAP_PRIVATE;
 inline auto map_failed(void *p) { return p == MAP_FAILED; }
 inline auto error_number() { return errno; }
+inline auto make_pipe(int *fds) { return pipe2(fds, O_CLOEXEC); }
+inline auto nonblocking(int fd) { auto flags = fcntl(fd, F_GETFL); return flags >= 0 && fcntl(fd, F_SETFL, flags | O_NONBLOCK) >= 0; }
 } // namespace vui_linux_constants
 
 export module vui.host:ffi.linux;
@@ -59,4 +62,6 @@ using ::vui_linux_constants::map_read;
 using ::vui_linux_constants::map_private;
 using ::vui_linux_constants::map_failed;
 using ::vui_linux_constants::error_number;
+using ::vui_linux_constants::make_pipe;
+using ::vui_linux_constants::nonblocking;
 }

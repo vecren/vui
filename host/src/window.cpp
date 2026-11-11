@@ -98,6 +98,8 @@ auto Window::open(const char *title, Index width, Index height, WindowBackend ba
         auto window = rstd::sync::Arc<detail::WaylandWindow>::make();
         auto opened = window.get_mut().unwrap()->open(title, width, height);
         if (opened.is_ok()) {
+            window.get_mut().unwrap()->input().clipboard().set_waker(
+                FrameWaker::make([state = wake.clone()] { return state->request(); }));
             impl_->wayland = Some(rstd::move(window));
             impl_->selected = WindowBackend::Wayland;
             impl_->wake = Some(rstd::move(wake));
@@ -123,8 +125,12 @@ void Window::close() {
     if (impl_->x11.is_some()) {
         (void)(*impl_->x11)->capture(false);
         (void)(*impl_->x11)->set_text_input(None());
+        (*impl_->x11)->close_clipboard();
     }
-    if (impl_->wayland.is_some()) (void)(*impl_->wayland)->input().set_text_input(None());
+    if (impl_->wayland.is_some()) {
+        (void)(*impl_->wayland)->input().set_text_input(None());
+        (*impl_->wayland)->input().clipboard().close();
+    }
     impl_->wayland = None();
     impl_->x11 = None();
     impl_->selected = WindowBackend::Automatic;
@@ -164,12 +170,23 @@ auto Window::set_text_input(Option<TextInputState> state) -> NativeTextInputResu
     if (impl_->x11.is_some()) return (*impl_->x11)->set_text_input(rstd::move(state));
     return state.is_some() ? NativeTextInputResult::Failed : NativeTextInputResult::Succeeded;
 }
+auto Window::request_clipboard(Serial id) -> Result<empty, ClipboardError> {
+    if (impl_->x11.is_some()) return (*impl_->x11)->request_clipboard(id);
+    if (impl_->wayland.is_some()) return (*impl_->wayland)->input().request_clipboard(id);
+    return Err(ClipboardError::Unavailable);
+}
+auto Window::write_clipboard(ref<str> text) -> Result<empty, ClipboardError> {
+    if (impl_->x11.is_some()) return (*impl_->x11)->write_clipboard(text);
+    if (impl_->wayland.is_some()) return Err(ClipboardError::Unsupported);
+    return Err(ClipboardError::Unavailable);
+}
 auto Window::wait(Index milliseconds) -> Result<WindowEvents, gpu::Error> {
     if (impl_->wake.is_none()) return Err(gpu::Error{gpu::Stage::State});
     auto wake = impl_->wake->as_ptr().as_raw_ptr();
     bool redraw = wake->take();
     bool prepared{};
     Index timeout_ms = milliseconds;
+    Option<usize> clipboard_owner_fd;
     ffi::wayland::wl_display *wayland{};
     auto &fds = impl_->pollfds;
     fds.clear();
@@ -186,8 +203,10 @@ auto Window::wait(Index milliseconds) -> Result<WindowEvents, gpu::Error> {
             redraw = redraw || dispatched > 0;
         }
         native->input().pump_repeat();
+        native->input().clipboard().drain();
         redraw = redraw || native->input().has_input();
         timeout_ms = native->input().repeat_wait(timeout_ms);
+        timeout_ms = native->input().clipboard().wait(timeout_ms);
         prepared = true;
         fds[usize(0)] = {ffi::wayland::wl_display_get_fd(wayland), ffi::linux::input, 0};
         if (ffi::wayland::wl_display_flush(wayland) < 0) {
@@ -200,14 +219,22 @@ auto Window::wait(Index milliseconds) -> Result<WindowEvents, gpu::Error> {
     } else if (impl_->x11.is_some()) {
         auto native = impl_->x11->as_ptr().as_raw_ptr();
         auto display = native->display();
+        native->dispatch_clipboard_owner();
+        redraw = redraw || native->clipboard_owner_pending();
         redraw = redraw || ffi::x11::XPending(display) > 0;
-        if (native->dispatch().is_err()) return Err(gpu::Error{gpu::Stage::Surface});
+        if (native->dispatch(true).is_err()) return Err(gpu::Error{gpu::Stage::Surface});
+        native->expire_clipboard();
+        timeout_ms = native->clipboard_wait(timeout_ms);
         redraw = redraw || native->has_input();
         fds[usize(0)] = {ffi::x11::XConnectionNumber(display), ffi::linux::input, 0};
         ffi::x11::XFlush(display);
         native->copy_internal_connections(impl_->x11_internal);
         for (auto item : impl_->x11_internal)
             fds.push(ffi::linux::pollfd{item.fd, ffi::linux::input, 0});
+        if (native->clipboard_owner_fd() >= 0) {
+            clipboard_owner_fd = Some(usize(fds.len()));
+            fds.push(ffi::linux::pollfd{native->clipboard_owner_fd(), ffi::linux::input, 0});
+        }
     } else return Err(gpu::Error{gpu::Stage::State});
 
     auto started = rstd::time::Instant::now();
@@ -232,8 +259,15 @@ auto Window::wait(Index milliseconds) -> Result<WindowEvents, gpu::Error> {
             if (dispatched < 0) return Err(gpu::Error{gpu::Stage::Surface});
             redraw = redraw || dispatched > 0;
         } else ffi::wayland::wl_display_cancel_read(wayland);
+        auto native = impl_->wayland->as_ptr().as_raw_ptr();
+        native->input().clipboard().drain();
     } else {
         auto native = impl_->x11->as_ptr().as_raw_ptr();
+        if (clipboard_owner_fd.is_some() && fds[*clipboard_owner_fd].revents) {
+            native->dispatch_clipboard_owner();
+            if ((fds[*clipboard_owner_fd].revents & ffi::linux::error) || native->clipboard_owner_failed())
+                native->disable_clipboard_owner();
+        }
         for (usize i{}; i < impl_->x11_internal.len(); i += usize(1)) {
             auto entry = impl_->x11_internal[i];
             auto ready = fds[i + usize(2)].revents;
@@ -246,7 +280,8 @@ auto Window::wait(Index milliseconds) -> Result<WindowEvents, gpu::Error> {
                     return Err(gpu::Error{gpu::Stage::Surface});
             }
         }
-        if (native->dispatch().is_err()) return Err(gpu::Error{gpu::Stage::Surface});
+        if (native->dispatch(true).is_err()) return Err(gpu::Error{gpu::Stage::Surface});
+        native->expire_clipboard();
     }
     redraw = wake->take() || redraw;
     Serial revision{}, dropped{};

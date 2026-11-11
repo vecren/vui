@@ -1,5 +1,8 @@
 module vui.host:platform.x11_window;
 import :platform.x11;
+import :platform.x11_input;
+import :platform.x11_clipboard;
+import :platform.x11_clipboard_owner;
 import :ffi.x11;
 import :platform.keys;
 import :platform.x11_text;
@@ -13,10 +16,17 @@ enum class X11WindowError { State, InvalidSize, Connection, Window, Protocol };
 class X11Window {
     friend struct X11TextTest;
     friend struct X11ConnectionTest;
+    friend struct X11InputTest;
     X11Connection connection_;
     X11Text text_{this,
         [](void *data, InputEvent event) { static_cast<X11Window *>(data)->emit(rstd::move(event)); },
         [](void *data) { ++static_cast<X11Window *>(data)->dropped_input_; }};
+    X11Input xi_{this,
+        [](void *data, InputEvent event) { static_cast<X11Window *>(data)->emit(rstd::move(event)); },
+        [](void *data) { ++static_cast<X11Window *>(data)->dropped_input_; }};
+    X11Clipboard clipboard_{this,
+        [](void *data, InputEvent event) { static_cast<X11Window *>(data)->emit(rstd::move(event)); }};
+    X11ClipboardOwner clipboard_owner_;
     ffi::x11::Window window_{};
     ffi::x11::Atom protocols_{}, delete_window_{};
     rstd::uint32_t width_{}, height_{};
@@ -27,7 +37,15 @@ class X11Window {
     Serial dropped_input_{}, sample_clock_{new_session()};
 
     void emit(InputEvent input) {
-        if (input_.len() >= usize(4096)) { ++dropped_input_; return; }
+        if (input_.len() >= usize(4096)) {
+            if (input.type == EventType::ClipboardResult) {
+                for (usize i{}; i < input_.len(); i += usize(1))
+                    if (input_[i].type != EventType::ClipboardResult) {
+                        input_.remove(i); ++dropped_input_; break;
+                    }
+            }
+            if (input_.len() >= usize(4096)) { ++dropped_input_; return; }
+        }
         auto now = rstd::time::Instant::now().duration_since_epoch().as_nanos().to_primitive();
         input.sample_time = {sample_clock_, now > ~Serial{} ? ~Serial{} : Serial(now), 1,
                              TimeOrigin::Received};
@@ -82,6 +100,9 @@ class X11Window {
             ffi::x11::enter_window_mask | ffi::x11::leave_window_mask |
             ffi::x11::key_press_mask | ffi::x11::key_release_mask;
         ffi::x11::XSelectInput(native, window_, event_mask);
+        xi_.open(native, window_, root);
+        clipboard_.open(native, root);
+        (void)clipboard_owner_.open(ffi::x11::XDisplayString(native));
         text_.open(native, window_, event_mask);
         ffi::x11::XMapWindow(native, window_);
         ffi::x11::XFlush(native);
@@ -125,10 +146,11 @@ class X11Window {
         }
         return text_.set_state(rstd::move(state));
     }
-    auto dispatch() -> Result<empty, X11WindowError> {
+    auto dispatch(bool bounded = false) -> Result<empty, X11WindowError> {
         if (!window_)
             return Err(X11WindowError::State);
         auto display = connection_.display();
+        unsigned clipboard_events{};
         while (ffi::x11::XPending(display) > 0) {
             ffi::x11::XEvent event{};
             ffi::x11::XNextEvent(display, &event);
@@ -137,6 +159,18 @@ class X11Window {
             auto filtered = text_.filter(event);
             if (event.type == ffi::x11::key_press || event.type == ffi::x11::key_release)
                 event.xkey.keycode = code;
+            if (event.type == ffi::x11::generic_event) {
+                auto &cookie = event.xcookie;
+                if (xi_.enabled() && cookie.extension == xi_.opcode() && ffi::x11::XGetEventData(display, &cookie)) {
+                    xi_.event(cookie.evtype, cookie.data);
+                    ffi::x11::XFreeEventData(display, &cookie);
+                }
+                continue;
+            }
+            if (clipboard_.event(event)) {
+                if (bounded && ++clipboard_events >= 8) break;
+                continue;
+            }
             if (event.xany.window != window_)
                 continue;
             if (event.type == ffi::x11::configure_notify && event.xconfigure.width > 0 &&
@@ -155,11 +189,15 @@ class X11Window {
             } else if (event.type == ffi::x11::destroy_notify) {
                 (void)capture(false);
                 text_.close();
+                xi_.close();
+                clipboard_.close();
+                clipboard_owner_.close();
                 window_ = 0;
                 close_requested_ = true;
             } else if (event.type == ffi::x11::unmap_notify) {
                 pointer_grabbed_ = false;
                 text_.focus(false);
+                xi_.clear_contacts();
                 InputEvent input; input.type = EventType::WindowFocusLost;
                 emit(rstd::move(input));
             } else if (event.type == ffi::x11::focus_in || event.type == ffi::x11::focus_out) {
@@ -187,6 +225,7 @@ class X11Window {
                 if (event.type == ffi::x11::focus_out) {
                     (void)capture(false);
                     for (auto &key : pressed_) key = false;
+                    xi_.clear_contacts();
                 }
                 emit(rstd::move(input));
             } else if (event.type == ffi::x11::key_press || event.type == ffi::x11::key_release) {
@@ -224,6 +263,7 @@ class X11Window {
                 }
             } else if (event.type == ffi::x11::motion_notify ||
                        event.type == ffi::x11::enter_notify || event.type == ffi::x11::leave_notify) {
+                if (xi_.enabled() && event.type == ffi::x11::motion_notify) continue;
                 InputEvent input;
                 input.type = event.type == ffi::x11::motion_notify ? EventType::PointerMove
                              : event.type == ffi::x11::enter_notify ? EventType::WindowPointerEnter
@@ -237,6 +277,7 @@ class X11Window {
                 }
                 emit(rstd::move(input));
             } else if (event.type == ffi::x11::button_press || event.type == ffi::x11::button_release) {
+                if (xi_.enabled()) continue;
                 InputEvent input;
                 auto button = event.xbutton.button;
                 input.position = {Scalar(event.xbutton.x), Scalar(event.xbutton.y)};
@@ -268,6 +309,9 @@ class X11Window {
     void close() {
         if (window_) (void)capture(false);
         text_.close();
+        xi_.close();
+        clipboard_.close();
+        clipboard_owner_.close();
         if (window_)
             ffi::x11::XDestroyWindow(connection_.display(), window_);
         window_ = 0;
@@ -278,6 +322,19 @@ class X11Window {
         for (auto &key : pressed_) key = false;
     }
     auto display() const -> ffi::x11::Display * { return connection_.display(); }
+    auto request_clipboard(Serial id) -> Result<empty, ClipboardError> {
+        if (input_.len() + clipboard_.pending() >= usize(4096)) return Err(ClipboardError::Limit);
+        return clipboard_.request(id);
+    }
+    auto write_clipboard(ref<str> text) -> Result<empty, ClipboardError> { return clipboard_owner_.write(text); }
+    auto clipboard_wait(Index milliseconds) const -> Index { return clipboard_owner_.wait(clipboard_.wait(milliseconds)); }
+    void expire_clipboard() { clipboard_.expire(); clipboard_owner_.expire(); }
+    void dispatch_clipboard_owner() { clipboard_owner_.dispatch(); }
+    auto clipboard_owner_fd() const -> int { return clipboard_owner_.fd(); }
+    auto clipboard_owner_pending() const -> bool { return clipboard_owner_.pending(); }
+    auto clipboard_owner_failed() const -> bool { return clipboard_owner_.failed(); }
+    void disable_clipboard_owner() { clipboard_owner_.close(); }
+    void close_clipboard() { clipboard_.close(); clipboard_owner_.close(); }
     void copy_internal_connections(Vec<X11InternalConnection> &result) const { connection_.copy_internal(result); }
     auto internal_connection_current(X11InternalConnection item) const -> bool { return connection_.current(item); }
     void process_internal_connection(X11InternalConnection item) { connection_.process(item); }
