@@ -25,6 +25,8 @@ class WaylandWindow {
     rstd::uint32_t scale_numerator_{120};
     rstd::uint64_t revision_{};
     bool configured_{}, close_requested_{}, fullscreen_{}, pending_fullscreen_{}, mode_known_{}, pending_mode_known_{}, scale_failed_{};
+    bool suspended_{}, pending_suspended_{};
+    Option<bool> minimize_capability_, pending_minimize_capability_;
 
     static auto pixels(rstd::uint32_t size, rstd::uint32_t numerator) -> rstd::uint64_t {
         return (rstd::uint64_t(size) * numerator + 60) / 120;
@@ -79,30 +81,37 @@ class WaylandWindow {
     }
     ffi::wayland::wl_surface_listener surface_output_listener_{enter_output, leave_output};
 
-    static void configure(void *data, ffi::xdg_shell::xdg_surface *surface, rstd::uint32_t serial) {
-        auto &self = *static_cast<WaylandWindow *>(data);
-        ffi::xdg_shell::xdg_surface_ack_configure(surface, serial);
-        if (self.pending_mode_known_ && !self.fullscreen_ && self.pending_fullscreen_) {
-            self.windowed_width_ = self.width_; self.windowed_height_ = self.height_;
+    void apply_configure() {
+        if (pending_mode_known_ && !fullscreen_ && pending_fullscreen_) {
+            windowed_width_ = width_; windowed_height_ = height_;
         }
-        if (self.pending_mode_known_) self.fullscreen_ = self.pending_fullscreen_;
-        self.mode_known_ = self.pending_mode_known_;
-        self.width_ = self.pending_width_;
-        self.height_ = self.pending_height_;
-        self.update_scale();
-        self.configured_ = true;
-        ++self.revision_;
-        self.connection_.input().set_generation(self.revision_ + 1);
+        if (pending_mode_known_) fullscreen_ = pending_fullscreen_;
+        if (pending_mode_known_) suspended_ = pending_suspended_;
+        mode_known_ = pending_mode_known_;
+        minimize_capability_ = pending_minimize_capability_;
+        width_ = pending_width_;
+        height_ = pending_height_;
+        update_scale();
+        configured_ = true;
+        ++revision_;
+        connection_.input().set_generation(revision_ + 1);
+    }
+    static void configure(void *data, ffi::xdg_shell::xdg_surface *surface, rstd::uint32_t serial) {
+        ffi::xdg_shell::xdg_surface_ack_configure(surface, serial);
+        static_cast<WaylandWindow *>(data)->apply_configure();
     }
     static void resize(void *data, ffi::xdg_shell::xdg_toplevel *, rstd::int32_t width,
                        rstd::int32_t height, ffi::wayland::wl_array *states) {
         auto &self = *static_cast<WaylandWindow *>(data);
         self.pending_mode_known_ = !states || (states->size % sizeof(rstd::uint32_t) == 0 && (!states->size || states->data));
         self.pending_fullscreen_ = self.pending_mode_known_ ? false : self.fullscreen_;
+        self.pending_suspended_ = self.pending_mode_known_ ? false : self.suspended_;
         if (self.pending_mode_known_ && states && states->data) {
             auto values = static_cast<const rstd::uint32_t *>(states->data);
-            for (rstd::usize i{}; i < rstd::usize(states->size / sizeof(rstd::uint32_t)); i += rstd::usize(1))
+            for (rstd::usize i{}; i < rstd::usize(states->size / sizeof(rstd::uint32_t)); i += rstd::usize(1)) {
                 if (values[i.to_primitive()] == ffi::xdg_shell::fullscreen_state) self.pending_fullscreen_ = true;
+                if (values[i.to_primitive()] == ffi::xdg_shell::suspended_state) self.pending_suspended_ = true;
+            }
         }
         bool restoring = self.fullscreen_ && !self.pending_fullscreen_;
         self.pending_width_ = width > 0 ? rstd::uint32_t(width) : restoring ? self.windowed_width_ : self.width_;
@@ -112,7 +121,16 @@ class WaylandWindow {
         static_cast<WaylandWindow *>(data)->close_requested_ = true;
     }
     static void bounds(void *, ffi::xdg_shell::xdg_toplevel *, rstd::int32_t, rstd::int32_t) {}
-    static void capabilities(void *, ffi::xdg_shell::xdg_toplevel *, ffi::wayland::wl_array *) {}
+    static void capabilities(void *data, ffi::xdg_shell::xdg_toplevel *, ffi::wayland::wl_array *values) {
+        auto &self = *static_cast<WaylandWindow *>(data);
+        if (!values || values->size % sizeof(rstd::uint32_t) || (values->size && !values->data)) {
+            self.pending_minimize_capability_ = None(); return;
+        }
+        bool minimize{}; auto items = static_cast<const rstd::uint32_t *>(values->data);
+        for (rstd::usize i{}; i < rstd::usize(values->size / sizeof(rstd::uint32_t)); i += rstd::usize(1))
+            if (items[i.to_primitive()] == ffi::xdg_shell::minimize_capability) minimize = true;
+        self.pending_minimize_capability_ = Some(minimize);
+    }
 
     ffi::xdg_shell::xdg_surface_listener surface_listener_{configure};
     ffi::xdg_shell::xdg_toplevel_listener toplevel_listener_{resize, request_close, bounds,
@@ -147,6 +165,7 @@ class WaylandWindow {
         scale_numerator_ = 120; scale_failed_ = false;
         revision_ = 0;
         configured_ = close_requested_ = fullscreen_ = pending_fullscreen_ = mode_known_ = pending_mode_known_ = false;
+        suspended_ = pending_suspended_ = false; minimize_capability_ = pending_minimize_capability_ = None();
         surface_ = ffi::wayland::wl_compositor_create_surface(connection_.compositor());
         if (!surface_)
             return fail(WaylandWindowError::Surface);
@@ -196,6 +215,19 @@ class WaylandWindow {
         return Ok(empty{});
     }
     auto fullscreen() const -> Option<bool> { return configured_ && mode_known_ ? Some(bool(fullscreen_)) : None<bool>(); }
+    auto suspended() const -> Option<bool> {
+        return toplevel_ && ffi::xdg_shell::xdg_toplevel_get_version(toplevel_) >= 6 && configured_ && mode_known_
+            ? Some(bool(suspended_)) : None<bool>();
+    }
+    auto minimize_capability() const -> Option<bool> {
+        if (!toplevel_) return None();
+        if (ffi::xdg_shell::xdg_toplevel_get_version(toplevel_) < 5) return Some(true);
+        return minimize_capability_;
+    }
+    auto minimize() -> bool {
+        if (!toplevel_) return false;
+        ffi::xdg_shell::xdg_toplevel_set_minimized(toplevel_); return true;
+    }
     auto set_minimum_size(rstd::uint32_t width, rstd::uint32_t height) -> Result<empty, WaylandWindowError> {
         if (!surface_) return Err(WaylandWindowError::State);
         if (width > 32768 || height > 32768) return Err(WaylandWindowError::InvalidSize);
@@ -220,6 +252,7 @@ class WaylandWindow {
         surface_ = nullptr;
         connection_.close();
         configured_ = close_requested_ = fullscreen_ = pending_fullscreen_ = mode_known_ = pending_mode_known_ = false;
+        suspended_ = pending_suspended_ = false; minimize_capability_ = pending_minimize_capability_ = None();
         scale_numerator_ = 120; scale_failed_ = false;
         minimum_width_ = minimum_height_ = 0;
     }

@@ -10,6 +10,7 @@ struct HostEvents {
     bool redraw{}, close_requested{};
     Serial dropped_input{};
     Option<gpu::Error> error;
+    Option<bool> minimized, suspended;
 };
 struct HostDriver {
     template <class Self, class Delegate = void> struct Api {
@@ -149,6 +150,7 @@ class Runner {
                 for (const auto &mutation : session_.poll_mutations())
                     if (mutation.error.is_some())
                         return fail({RunStage::Callback, {}, {}, mutation.error});
+                frames_.set_suspended(events.suspended.unwrap_or(false));
                 frames_.set_surface(events.extent, events.surface.generation);
                 dirty = dirty || events.redraw || result.frame_needed;
                 if (dirty) {

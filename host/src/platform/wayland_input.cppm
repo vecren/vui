@@ -39,6 +39,8 @@ class WaylandInput {
     Point position_{};
     Serial generation_{1}, clock_{new_session()}, pointer_device_{new_session()}, touch_device_{new_session()};
     Vec<InputEvent> input_;
+    InputTraceSource input_trace_;
+    bool trace_input_{};
     struct Activation { Serial token; rstd::uint32_t serial; };
     Vec<Activation> queued_activations_, delivered_activations_;
     Serial dropped_{};
@@ -68,6 +70,7 @@ class WaylandInput {
         event.sample_time = {clock_, now_ns(), 1, TimeOrigin::Received};
         event.modifiers = modifiers_;
         event.coordinate_generation = generation_;
+        if (trace_input_) event.stamp = input_trace_.stamp();
         input_.push(rstd::move(event));
     }
     auto activation(rstd::uint32_t serial) -> Serial {
@@ -456,6 +459,7 @@ class WaylandInput {
                                                                   : NativeCaptureResult::Unsupported;
     }
     auto has_input() const -> bool { return !input_.is_empty() || dropped_ != 0; }
+    void set_input_tracing(bool enabled) { trace_input_ = enabled; }
     auto take_input() -> Vec<InputEvent> {
         delivered_activations_ = rstd::exchange(queued_activations_, Vec<Activation>{});
         return rstd::exchange(input_, Vec<InputEvent>{});

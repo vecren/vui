@@ -12,10 +12,7 @@ struct ApplicationOptions {
 };
 struct WindowDriver {
     Window &window;
-    auto timing() -> FrameTiming {
-        auto now = rstd::time::Instant::now().duration_since_epoch().as_nanos().to_primitive();
-        return {now > ~Serial{} ? ~Serial{} : Serial(now), {}};
-    }
+    auto timing() -> FrameTiming { return window.timing(); }
     auto wait(Index milliseconds) -> HostEvents {
         auto result = window.wait(milliseconds);
         if (result.is_err()) {
@@ -26,7 +23,7 @@ struct WindowDriver {
         auto events = rstd::move(result).unwrap();
         return {rstd::move(events.input), events.surface,
                 window.configured() ? window.pixel_extent() : VkExtent2D{},
-                events.redraw, events.close_requested, events.dropped_input};
+                events.redraw, events.close_requested, events.dropped_input, {}, events.minimized, events.suspended};
     }
 };
 class Application {

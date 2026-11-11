@@ -39,6 +39,8 @@ class X11Window {
     bool close_requested_{};
     bool detectable_repeat_{}, pointer_grabbed_{}, pressed_[256]{};
     Vec<InputEvent> input_;
+    InputTraceSource input_trace_;
+    bool trace_input_{};
     Serial dropped_input_{}, sample_clock_{new_session()};
 
     void emit(InputEvent input) {
@@ -55,6 +57,7 @@ class X11Window {
         input.sample_time = {sample_clock_, now > ~Serial{} ? ~Serial{} : Serial(now), 1,
                              TimeOrigin::Received};
         input.coordinate_generation = revision_ + 1;
+        if (trace_input_) input.stamp = input_trace_.stamp();
         input_.push(rstd::move(input));
     }
     static auto modifiers(unsigned state) -> Modifiers {
@@ -92,6 +95,7 @@ class X11Window {
         supported_atom_ = ffi::x11::XInternAtom(native, "_NET_SUPPORTED", 0);
         state_atom_ = ffi::x11::XInternAtom(native, "_NET_WM_STATE", 0);
         fullscreen_atom_ = ffi::x11::XInternAtom(native, "_NET_WM_STATE_FULLSCREEN", 0);
+        auto wm_state = ffi::x11::XInternAtom(native, "WM_STATE", 0);
         auto desktop = ffi::x11::XInternAtom(native, "_NET_CURRENT_DESKTOP", 0);
         auto workarea = ffi::x11::XInternAtom(native, "_NET_WORKAREA", 0);
         if (!protocols_ || !delete_window_ ||
@@ -112,7 +116,7 @@ class X11Window {
             ffi::x11::key_press_mask | ffi::x11::key_release_mask;
         ffi::x11::XSelectInput(native, window_, event_mask);
         ffi::x11::XSync(native, 0);
-        (void)state_.open(ffi::x11::XDisplayString(native), root, window_, supported_atom_, state_atom_, fullscreen_atom_);
+        (void)state_.open(ffi::x11::XDisplayString(native), root, window_, supported_atom_, state_atom_, fullscreen_atom_, wm_state);
         (void)displays_.open(ffi::x11::XDisplayString(native), root, window_, desktop, workarea);
         xi_.open(native, window_, root);
         clipboard_.open(native, root);
@@ -158,6 +162,18 @@ class X11Window {
     }
     auto fullscreen() const -> Option<bool> { return window_ ? state_.active() : None<bool>(); }
     auto fullscreen_supported() const -> Option<bool> { return window_ ? state_.supported() : None<bool>(); }
+    auto minimized() const -> Option<bool> { return window_ ? state_.minimized() : None<bool>(); }
+    auto minimize() -> bool {
+        if (!window_) return false;
+        auto display = connection_.display();
+        auto result = ffi::x11::XIconifyWindow(display, window_, ffi::x11::XDefaultScreen(display));
+        ffi::x11::XFlush(display); return result != 0;
+    }
+    auto restore() -> bool {
+        if (!window_) return false;
+        auto display = connection_.display(); auto result = ffi::x11::XMapWindow(display, window_);
+        ffi::x11::XFlush(display); return result != 0;
+    }
     auto set_fullscreen(bool enabled) -> bool {
         if (!window_) return false;
         auto display = connection_.display(); auto root = ffi::x11::XRootWindow(display, ffi::x11::XDefaultScreen(display));
@@ -416,6 +432,7 @@ class X11Window {
     auto minimum_size() const -> Size { return {Scalar(minimum_width_), Scalar(minimum_height_)}; }
     auto revision() const -> rstd::uint64_t { return revision_; }
     auto has_input() const -> bool { return !input_.is_empty() || dropped_input_ != 0; }
+    void set_input_tracing(bool enabled) { trace_input_ = enabled; }
     auto take_input() -> Vec<InputEvent> { return rstd::exchange(input_, Vec<InputEvent>{}); }
     auto take_dropped_input() -> Serial { return rstd::exchange(dropped_input_, Serial{}); }
 };

@@ -184,6 +184,7 @@ using ::XGrabPointer;
 using ::XUngrabPointer;
 using ::XInternAtom;
 using ::XMapWindow;
+using ::XIconifyWindow;
 using ::XMoveWindow;
 using ::XUnmapWindow;
 using ::XNextEvent;

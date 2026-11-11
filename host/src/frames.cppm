@@ -53,7 +53,7 @@ class FrameLoop {
     gpu::PresentMode presentation_{gpu::PresentMode::Fifo};
     Serial next_request_{}, generation_{}, submitted_input_sequence_{};
     VkExtent2D extent_{};
-    bool rebuild_{}, closing_{}, closed_{}, waiting_{};
+    bool rebuild_{}, closing_{}, closed_{}, waiting_{}, externally_suspended_{};
     Option<gpu::Error> fault_;
 
     static auto waiting(const gpu::Error &error) -> bool {
@@ -62,7 +62,7 @@ class FrameLoop {
                (error.result == VK_TIMEOUT || error.result == VK_NOT_READY);
     }
     auto backpressure() const -> bool { return events_.len() >= usize(56); }
-    auto suspended() const -> bool { return windowed_ && (!extent_.width || !extent_.height); }
+    auto suspended() const -> bool { return windowed_ && (externally_suspended_ || !extent_.width || !extent_.height); }
     auto interval_remaining(Serial now) const -> Serial {
         if (!frame_interval_ns_ || last_submission_ns_.is_none()) return 0;
         auto elapsed = now >= *last_submission_ns_ ? now - *last_submission_ns_ : 0;
@@ -165,6 +165,7 @@ class FrameLoop {
         extent_ = extent;
         generation_ = generation;
     }
+    void set_suspended(bool value) { if (!closing_ && !closed_) externally_suspended_ = value; }
     void close() {
         if (closing_ || closed_)
             return;
@@ -223,7 +224,7 @@ class FrameLoop {
             auto left = rstd::min(Serial(1'000'000'000), interval_remaining(timing.now_ns));
             return static_cast<Index>((left + 999'999) / 1'000'000);
         };
-        if (active_.is_some() || closing_ || (rebuild_ && !suspended()))
+        if ((active_.is_some() && (active_->submission || !suspended())) || closing_ || (rebuild_ && !suspended()))
             return active_.is_some() && !active_->submission && !waiting_ && !closing_ && !rebuild_
                 ? interval_wait() : 1;
         if (pending_.is_some() && !suspended())

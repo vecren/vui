@@ -35,7 +35,11 @@ inline void xdg_toplevel_set_min_size(::xdg_toplevel *t, int32_t width, int32_t 
 }
 inline void xdg_toplevel_set_fullscreen(::xdg_toplevel *t) { ::xdg_toplevel_set_fullscreen(t, nullptr); }
 inline void xdg_toplevel_unset_fullscreen(::xdg_toplevel *t) { ::xdg_toplevel_unset_fullscreen(t); }
+inline void xdg_toplevel_set_minimized(::xdg_toplevel *t) { ::xdg_toplevel_set_minimized(t); }
+inline auto xdg_toplevel_get_version(::xdg_toplevel *t) { return ::xdg_toplevel_get_version(t); }
 inline constexpr auto fullscreen_state = XDG_TOPLEVEL_STATE_FULLSCREEN;
+inline constexpr auto suspended_state = XDG_TOPLEVEL_STATE_SUSPENDED;
+inline constexpr auto minimize_capability = XDG_TOPLEVEL_WM_CAPABILITIES_MINIMIZE;
 inline void xdg_toplevel_set_app_id(::xdg_toplevel *t, const char *id) {
     ::xdg_toplevel_set_app_id(t, id);
 }
@@ -62,7 +66,11 @@ using ::vui_xdg_inline::xdg_toplevel_set_title;
 using ::vui_xdg_inline::xdg_toplevel_set_min_size;
 using ::vui_xdg_inline::xdg_toplevel_set_fullscreen;
 using ::vui_xdg_inline::xdg_toplevel_unset_fullscreen;
+using ::vui_xdg_inline::xdg_toplevel_set_minimized;
+using ::vui_xdg_inline::xdg_toplevel_get_version;
 using ::vui_xdg_inline::fullscreen_state;
+using ::vui_xdg_inline::suspended_state;
+using ::vui_xdg_inline::minimize_capability;
 using ::vui_xdg_inline::xdg_wm_base_add_listener;
 using ::vui_xdg_inline::xdg_wm_base_destroy;
 using ::vui_xdg_inline::xdg_wm_base_get_xdg_surface;

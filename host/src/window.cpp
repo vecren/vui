@@ -73,6 +73,7 @@ struct Window::Impl {
     Vec<detail::X11InternalConnection> x11_internal;
     Serial observed_revision{};
     Serial observed_display_revision{};
+    bool trace_input{};
 };
 
 Window::Window() : impl_(Box<Impl>::make()) {}
@@ -97,6 +98,7 @@ auto Window::open(const char *title, Index width, Index height, WindowBackend ba
     auto wake = rstd::sync::Arc<WakeState>::make(wake_fd);
     if (backend == WindowBackend::Automatic || backend == WindowBackend::Wayland) {
         auto window = rstd::sync::Arc<detail::WaylandWindow>::make();
+        window.get_mut().unwrap()->input().set_input_tracing(impl_->trace_input);
         auto opened = window.get_mut().unwrap()->open(title, width, height);
         if (opened.is_ok()) {
             window.get_mut().unwrap()->input().clipboard().set_waker(
@@ -112,6 +114,7 @@ auto Window::open(const char *title, Index width, Index height, WindowBackend ba
             return Err(gpu::Error{gpu::Stage::Surface});
     }
     auto window = rstd::sync::Arc<detail::X11Window>::make();
+    window.get_mut().unwrap()->set_input_tracing(impl_->trace_input);
     auto opened = window.get_mut().unwrap()->open(title, width, height);
     if (opened.is_err())
         return Err(gpu::Error{gpu::Stage::Surface});
@@ -141,6 +144,10 @@ void Window::close() {
     impl_->selected = WindowBackend::Automatic;
 }
 auto Window::backend() const -> WindowBackend { return impl_->selected; }
+auto Window::timing() const -> FrameTiming {
+    auto now = rstd::time::Instant::now().duration_since_epoch().as_nanos().to_primitive();
+    return {now > ~Serial{} ? ~Serial{} : Serial(now), {}};
+}
 auto Window::configured() const -> bool {
     if (impl_->wayland.is_some()) return (*impl_->wayland)->configured();
     return impl_->x11.is_some() && (*impl_->x11)->window() != 0;
@@ -163,6 +170,11 @@ auto Window::frame_waker() const -> Option<FrameWaker> {
 }
 auto Window::wake_stats() const -> WakeStats {
     return impl_->wake.is_some() ? (*impl_->wake)->snapshot() : WakeStats{0, 0, 0, false, true};
+}
+void Window::set_input_tracing(bool enabled) {
+    impl_->trace_input = enabled;
+    if (impl_->wayland.is_some()) (*impl_->wayland)->input().set_input_tracing(enabled);
+    if (impl_->x11.is_some()) (*impl_->x11)->set_input_tracing(enabled);
 }
 auto Window::capture(PointerKind kind, bool enabled) -> NativeCaptureResult {
     if (kind != PointerKind::Mouse) return NativeCaptureResult::Unsupported;
@@ -241,6 +253,32 @@ auto Window::mode() const -> Option<WindowMode> {
     else if (impl_->x11.is_some()) value = (*impl_->x11)->fullscreen();
     if (value.is_none()) return None();
     return Some(*value ? WindowMode::Fullscreen : WindowMode::Windowed);
+}
+auto Window::minimized() const -> Option<bool> {
+    return impl_->x11.is_some() ? (*impl_->x11)->minimized() : None<bool>();
+}
+auto Window::suspended() const -> Option<bool> {
+    if (impl_->wayland.is_some()) return (*impl_->wayland)->suspended();
+    return minimized();
+}
+auto Window::minimize() -> Result<empty, WindowActionError> {
+    if (impl_->wayland.is_some()) {
+        auto capability = (*impl_->wayland)->minimize_capability();
+        if (capability.is_none()) return Err(WindowActionError::Unavailable);
+        if (!*capability) return Err(WindowActionError::Unsupported);
+        if (!(*impl_->wayland)->minimize()) return Err(WindowActionError::Failed);
+        if (impl_->wake.is_some()) (void)(*impl_->wake)->request();
+        return Ok(empty{});
+    }
+    if (impl_->x11.is_some())
+        return (*impl_->x11)->minimize() ? Result<empty, WindowActionError>(Ok(empty{})) : Err(WindowActionError::Failed);
+    return Err(WindowActionError::Unavailable);
+}
+auto Window::restore() -> Result<empty, WindowActionError> {
+    if (impl_->wayland.is_some()) return Err(WindowActionError::Unsupported);
+    if (impl_->x11.is_some())
+        return (*impl_->x11)->restore() ? Result<empty, WindowActionError>(Ok(empty{})) : Err(WindowActionError::Failed);
+    return Err(WindowActionError::Unavailable);
 }
 auto Window::displays() const -> DisplaySnapshot {
     if (impl_->wayland.is_some() && (*impl_->wayland)->surface()) return (*impl_->wayland)->displays();
@@ -424,7 +462,7 @@ auto Window::wait(Index milliseconds) -> Result<WindowEvents, gpu::Error> {
     auto extent = pixel_extent();
     return Ok(WindowEvents{rstd::move(input),
                            {logical.unwrap_or(Size{}), scale, revision + 1, Some(PixelSize{extent.width, extent.height})},
-                           redraw, close_requested, dropped});
+                           redraw, close_requested, dropped, minimized(), suspended()});
 }
 auto Window::instance_extensions() -> Result<Vec<vrento::vulkan::Extension>, gpu::Error> {
     if (impl_->selected == WindowBackend::Automatic)

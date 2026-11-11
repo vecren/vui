@@ -8,11 +8,13 @@ enum class WindowBackend { Automatic, Wayland, X11 };
 enum class WindowPositionResult { Requested, Unsupported, Failed };
 enum class WindowMode { Windowed, Fullscreen };
 enum class WindowModeError { Unavailable, Unsupported, InvalidValue, Failed };
+enum class WindowActionError { Unavailable, Unsupported, Failed };
 struct WindowEvents {
     Vec<InputEvent> input;
     SurfaceInfo surface;
     bool redraw{}, close_requested{};
     Serial dropped_input{};
+    Option<bool> minimized, suspended;
 };
 struct WakeStats {
     Serial queued{}, coalesced{}, failed{};
@@ -36,8 +38,11 @@ class Window final : public gpu::SurfaceHost {
     auto synchronize() -> Result<empty, gpu::Error>;
     auto wait(Index milliseconds) -> Result<WindowEvents, gpu::Error>;
     auto poll() -> Result<WindowEvents, gpu::Error> { return wait(0); }
+    auto timing() const -> FrameTiming;
     auto frame_waker() const -> Option<FrameWaker>;
     auto wake_stats() const -> WakeStats;
+    // Stamps are taken on native queue insertion; toggling does not change queued events.
+    void set_input_tracing(bool enabled);
     auto capture(PointerKind kind, bool enabled) -> NativeCaptureResult;
     auto set_text_input(Option<TextInputState> state) -> NativeTextInputResult;
     auto request_clipboard(Serial id) -> Result<empty, ClipboardError>;
@@ -51,6 +56,10 @@ class Window final : public gpu::SurfaceHost {
     auto set_position(Point position) -> WindowPositionResult;
     auto mode() const -> Option<WindowMode>;
     auto set_mode(WindowMode mode) -> Result<empty, WindowModeError>;
+    auto minimized() const -> Option<bool>;
+    auto suspended() const -> Option<bool>;
+    auto minimize() -> Result<empty, WindowActionError>;
+    auto restore() -> Result<empty, WindowActionError>;
     auto displays() const -> DisplaySnapshot;
     auto instance_extensions() -> Result<Vec<vrento::vulkan::Extension>, gpu::Error> override;
     auto create_surface(VkInstance instance) -> Result<gpu::NativeSurface, gpu::Error> override;
