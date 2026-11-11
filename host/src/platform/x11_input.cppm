@@ -18,8 +18,11 @@ class X11Input {
     bool enabled_{};
     struct Device { int native{}; DeviceId id{}; };
     struct Contact { int source{}, native{}; DeviceId device{}; Index pointer{}; };
+    struct PointerButtons { int master{}; unsigned buttons{}; };
     Vec<Device> devices_;
     Vec<Contact> contacts_;
+    Vec<PointerButtons> pointer_buttons_;
+    bool pointer_buttons_unknown_{};
     Index next_contact_{1};
 
     static auto modifiers(unsigned state) -> Modifiers {
@@ -81,6 +84,24 @@ class X11Input {
                            : native.detail == 9 ? PointerButton::Forward : PointerButton::None;
             if (event.button == PointerButton::None) return;
             event.type = native.evtype == xi::button_press ? EventType::PointerDown : EventType::PointerUp;
+            if (!native.send_event && native.deviceid > 0) {
+                PointerButtons *buttons{};
+                for (auto &item : pointer_buttons_)
+                    if (item.master == native.deviceid) { buttons = &item; break; }
+                if (!buttons && native.evtype == xi::button_press) {
+                    if (pointer_buttons_.len() >= usize(32)) pointer_buttons_unknown_ = true;
+                    else {
+                        pointer_buttons_.push({native.deviceid, 0});
+                        buttons = &pointer_buttons_[pointer_buttons_.len() - usize(1)];
+                    }
+                }
+                if (buttons) {
+                    auto mask = 1u << unsigned(native.detail);
+                    if (native.evtype == xi::button_press) buttons->buttons |= mask;
+                    else buttons->buttons &= ~mask;
+                }
+                pointer_buttons_.retain([](const PointerButtons &item) { return item.buttons != 0; });
+            }
         }
         emit_(sink_, rstd::move(event));
     }
@@ -115,15 +136,21 @@ class X11Input {
             auto &change = *static_cast<const xi::XIHierarchyEvent *>(data);
             if (!change.info) return;
             for (int i{}; i < change.num_info; ++i)
-                if (change.info[i].flags & (xi::slave_removed | xi::master_removed | xi::slave_detached | xi::device_disabled))
+                if (change.info[i].flags & (xi::slave_removed | xi::master_removed | xi::slave_detached | xi::device_disabled)) {
                     remove_device(change.info[i].deviceid);
+                    clear_pointer_buttons();
+                }
         } else if (type == xi::touch_begin || type == xi::touch_update || type == xi::touch_end)
             touch(*static_cast<const xi::XIDeviceEvent *>(data));
         else if (type == xi::motion || type == xi::button_press || type == xi::button_release)
             pointer(*static_cast<const xi::XIDeviceEvent *>(data));
     }
     void clear_contacts() { contacts_.clear(); }
-    void close() { enabled_ = false; window_ = 0; contacts_.clear(); devices_.clear(); }
+    void clear_pointer_buttons() { pointer_buttons_.clear(); pointer_buttons_unknown_ = false; }
+    auto has_implicit_pointer_capture() const -> bool {
+        return enabled_ && !pointer_buttons_unknown_ && pointer_buttons_.len() == usize(1);
+    }
+    void close() { enabled_ = false; window_ = 0; contacts_.clear(); devices_.clear(); clear_pointer_buttons(); }
     auto enabled() const -> bool { return enabled_; }
     auto opcode() const -> int { return opcode_; }
 };

@@ -191,6 +191,7 @@ class X11Window {
         if (enabled == pointer_grabbed_) return NativeCaptureResult::Succeeded;
         auto display = connection_.display();
         if (enabled) {
+            if (xi_.has_implicit_pointer_capture()) return NativeCaptureResult::Succeeded;
             auto result = ffi::x11::XGrabPointer(display, window_, 1,
                 ffi::x11::button_press_mask | ffi::x11::button_release_mask |
                 ffi::x11::pointer_motion_mask | ffi::x11::enter_window_mask |
@@ -270,6 +271,7 @@ class X11Window {
                 pointer_grabbed_ = false;
                 text_.focus(false);
                 xi_.clear_contacts();
+                xi_.clear_pointer_buttons();
                 InputEvent input; input.type = EventType::WindowFocusLost;
                 emit(rstd::move(input));
             } else if (event.type == ffi::x11::focus_in || event.type == ffi::x11::focus_out) {
@@ -298,6 +300,7 @@ class X11Window {
                     (void)capture(false);
                     for (auto &key : pressed_) key = false;
                     xi_.clear_contacts();
+                    xi_.clear_pointer_buttons();
                 }
                 emit(rstd::move(input));
             } else if (event.type == ffi::x11::key_press || event.type == ffi::x11::key_release) {
