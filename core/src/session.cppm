@@ -527,7 +527,7 @@ class UiSession {
         bool changed = published_ui_ != update_->revision();
         bool surface_changed = surface_.is_none() || surface_->generation != surface.generation ||
                                surface_->logical_size != surface.logical_size ||
-                               surface_->scale != surface.scale;
+                               surface_->scale != surface.scale || surface_->pixel_size != surface.pixel_size;
         auto published = publish_update();
         if (published.is_err()) return failure(published.unwrap_err());
         surface_ = Some(surface);

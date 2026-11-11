@@ -9,10 +9,15 @@ constexpr Index no_clip = ~Index{};
 struct FrameIdentity {
     Serial id{}, scene_session{}, scene_revision{}, ui_revision{}, surface_generation{};
 };
+struct PixelSize {
+    Index width{}, height{};
+    friend auto operator==(const PixelSize &, const PixelSize &) -> bool = default;
+};
 struct SurfaceInfo {
     Size logical_size;
     Scalar scale{1};
     Serial generation{1};
+    Option<PixelSize> pixel_size;
     auto valid() const -> bool {
         return logical_size.valid() && finite(scale) && scale > 0 && generation != 0 &&
                finite(logical_size.width * scale) && finite(logical_size.height * scale);

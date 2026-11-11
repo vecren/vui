@@ -1,5 +1,6 @@
 module;
 #include <xcb/xcb.h>
+#include <xcb/xcbext.h>
 #include <stdlib.h>
 
 namespace vui_xcb_constants {
@@ -7,6 +8,7 @@ inline constexpr auto none = XCB_NONE, current_time = XCB_CURRENT_TIME, copy_fro
 inline constexpr auto selection_clear = XCB_SELECTION_CLEAR, selection_request = XCB_SELECTION_REQUEST,
                       selection_notify = XCB_SELECTION_NOTIFY, property_notify = XCB_PROPERTY_NOTIFY,
                       destroy_notify = XCB_DESTROY_NOTIFY;
+inline constexpr auto configure_notify = XCB_CONFIGURE_NOTIFY, reparent_notify = XCB_REPARENT_NOTIFY;
 }
 
 export module vui.host:ffi.xcb;
@@ -17,6 +19,9 @@ using ::xcb_atom_t;
 using ::xcb_timestamp_t;
 using ::xcb_generic_event_t;
 using ::xcb_generic_error_t;
+using ::xcb_get_property_reply_t;
+using ::xcb_get_geometry_reply_t;
+using ::xcb_translate_coordinates_reply_t;
 using ::xcb_selection_clear_event_t;
 using ::xcb_selection_request_event_t;
 using ::xcb_selection_notify_event_t;
@@ -43,10 +48,14 @@ using ::xcb_get_property;
 using ::xcb_get_property_reply;
 using ::xcb_get_property_value;
 using ::xcb_get_property_value_length;
+using ::xcb_get_geometry;
+using ::xcb_translate_coordinates;
+using ::xcb_get_extension_data;
 using ::xcb_send_event;
 using ::xcb_get_input_focus;
 using ::xcb_get_input_focus_reply;
 using ::xcb_poll_for_event;
+using ::xcb_poll_for_reply;
 using ::xcb_flush;
 using ::free;
 using ::vui_xcb_constants::none;
@@ -58,6 +67,7 @@ using ::XCB_EVENT_MASK_PROPERTY_CHANGE;
 using ::XCB_EVENT_MASK_STRUCTURE_NOTIFY;
 using ::XCB_ATOM_ATOM;
 using ::XCB_ATOM_INTEGER;
+using ::XCB_ATOM_CARDINAL;
 using ::XCB_ATOM_STRING;
 using ::XCB_PROP_MODE_REPLACE;
 using ::vui_xcb_constants::selection_clear;
@@ -67,4 +77,6 @@ using ::vui_xcb_constants::property_notify;
 using ::vui_xcb_constants::destroy_notify;
 using ::XCB_PROPERTY_NEW_VALUE;
 using ::XCB_PROPERTY_DELETE;
+using ::vui_xcb_constants::configure_notify;
+using ::vui_xcb_constants::reparent_notify;
 }

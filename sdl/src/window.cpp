@@ -180,9 +180,10 @@ struct Window::Impl {
         SDL_GetWindowSize(window, &width, &height);
         Scalar scale = pixels.width && width > 0 ? Scalar(pixels.width) / width : metrics.scale;
         Size size{pixels.width / scale, pixels.height / scale};
-        if (size == metrics.logical_size && scale == metrics.scale)
+        auto pixel_size = Some(PixelSize{pixels.width, pixels.height});
+        if (size == metrics.logical_size && scale == metrics.scale && pixel_size == metrics.pixel_size)
             return false;
-        metrics = {size, scale, metrics.generation + 1};
+        metrics = {size, scale, metrics.generation + 1, pixel_size};
         return true;
     }
     auto position(int x, int y) const -> Point {

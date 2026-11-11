@@ -1309,8 +1309,10 @@ auto Renderer::prepare_impl(FramePlan plan, DrawOptions options,
     if (options.timings)
         prepare_start = Some(rstd::time::Instant::now());
     auto surface = plan.surface();
-    auto width = std::ceil(surface.logical_size.width * surface.scale);
-    auto height = std::ceil(surface.logical_size.height * surface.scale);
+    auto width = surface.pixel_size.is_some() ? Scalar(surface.pixel_size->width)
+                                              : std::ceil(surface.logical_size.width * surface.scale);
+    auto height = surface.pixel_size.is_some() ? Scalar(surface.pixel_size->height)
+                                               : std::ceil(surface.logical_size.height * surface.scale);
     if (width < 1 || height < 1 || width > self.device().limits().maxImageDimension2D ||
         height > self.device().limits().maxImageDimension2D || plan.pass_count() > usize(1024) ||
         plan.clips().len() > usize(65535))

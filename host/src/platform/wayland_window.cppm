@@ -2,6 +2,8 @@ module vui.host:platform.wayland_window;
 import :platform.wayland;
 import :ffi.wayland;
 import :ffi.xdg_shell;
+import :ffi.wayland_fractional;
+import :display;
 import rstd;
 
 namespace vui::host::detail {
@@ -10,30 +12,101 @@ using namespace rstd::prelude;
 enum class WaylandWindowError { State, InvalidSize, Connection, Surface, Listener, Protocol };
 
 class WaylandWindow {
+    friend struct WaylandWindowTest;
     WaylandConnection connection_;
     ffi::wayland::wl_surface *surface_{};
     ffi::xdg_shell::xdg_surface *xdg_{};
     ffi::xdg_shell::xdg_toplevel *toplevel_{};
     rstd::uint32_t width_{}, height_{}, pending_width_{}, pending_height_{};
+    rstd::uint32_t minimum_width_{}, minimum_height_{};
+    rstd::uint32_t windowed_width_{}, windowed_height_{};
+    ffi::wayland_fractional::wp_viewport *viewport_{};
+    ffi::wayland_fractional::wp_fractional_scale_v1 *fractional_{};
+    rstd::uint32_t scale_numerator_{120};
     rstd::uint64_t revision_{};
-    bool configured_{}, close_requested_{};
+    bool configured_{}, close_requested_{}, fullscreen_{}, pending_fullscreen_{}, mode_known_{}, pending_mode_known_{}, scale_failed_{};
+
+    static auto pixels(rstd::uint32_t size, rstd::uint32_t numerator) -> rstd::uint64_t {
+        return (rstd::uint64_t(size) * numerator + 60) / 120;
+    }
+    auto valid_scale(rstd::uint32_t numerator, rstd::uint32_t width, rstd::uint32_t height) const -> bool {
+        return numerator && pixels(width, numerator) && pixels(height, numerator) &&
+            pixels(width, numerator) <= ~rstd::uint32_t{} && pixels(height, numerator) <= ~rstd::uint32_t{};
+    }
+    void mark_scale_changed() { ++revision_; connection_.input().set_generation(revision_ + 1); }
+    static void preferred_scale(void *data, ffi::wayland_fractional::wp_fractional_scale_v1 *, rstd::uint32_t numerator) {
+        auto &self = *static_cast<WaylandWindow *>(data);
+        if (!self.valid_scale(numerator, self.width_, self.height_)) { self.scale_failed_ = true; return; }
+        if (self.scale_numerator_ != numerator) { self.scale_numerator_ = numerator; self.mark_scale_changed(); }
+    }
+    ffi::wayland_fractional::wp_fractional_scale_v1_listener fractional_listener_{preferred_scale};
+    void setup_fractional() {
+        if (!surface_ || fractional_ || !connection_.fractional() || !connection_.viewporter()) return;
+        auto viewport = ffi::wayland_fractional::viewport_create(connection_.viewporter(), surface_);
+        if (!viewport) { scale_failed_ = true; return; }
+        auto fractional = ffi::wayland_fractional::fractional_create(connection_.fractional(), surface_);
+        if (!fractional) { ffi::wayland_fractional::viewport_destroy(viewport); scale_failed_ = true; return; }
+        if (ffi::wayland_fractional::fractional_listener(fractional, &fractional_listener_, this)) {
+            ffi::wayland_fractional::fractional_destroy(fractional); ffi::wayland_fractional::viewport_destroy(viewport);
+            scale_failed_ = true; return;
+        }
+        viewport_ = viewport; fractional_ = fractional;
+        ffi::wayland_fractional::viewport_destination(viewport_, rstd::int32_t(width_), rstd::int32_t(height_));
+        if (ffi::wayland::wl_surface_get_version(surface_) >= ffi::wayland::surface_buffer_scale_version)
+            ffi::wayland::wl_surface_set_buffer_scale(surface_, 1);
+        mark_scale_changed();
+    }
+    void update_scale() {
+        if (!surface_) return;
+        if (viewport_) ffi::wayland_fractional::viewport_destination(viewport_, rstd::int32_t(width_), rstd::int32_t(height_));
+        if (fractional_) {
+            if (!valid_scale(scale_numerator_, width_, height_)) scale_failed_ = true;
+            return;
+        }
+        auto scale = ffi::wayland::wl_surface_get_version(surface_) >= ffi::wayland::surface_buffer_scale_version
+            ? connection_.outputs().scale() : 1;
+        auto numerator = rstd::uint64_t(scale) * 120;
+        if (numerator > ~rstd::uint32_t{} || !valid_scale(rstd::uint32_t(numerator), width_, height_)) { scale_failed_ = true; return; }
+        if (scale_numerator_ == numerator) return;
+        scale_numerator_ = rstd::uint32_t(numerator); ffi::wayland::wl_surface_set_buffer_scale(surface_, scale);
+        mark_scale_changed();
+    }
+    static void enter_output(void *data, ffi::wayland::wl_surface *, ffi::wayland::wl_output *output) {
+        static_cast<WaylandWindow *>(data)->connection_.outputs().enter(output);
+    }
+    static void leave_output(void *data, ffi::wayland::wl_surface *, ffi::wayland::wl_output *output) {
+        static_cast<WaylandWindow *>(data)->connection_.outputs().leave(output);
+    }
+    ffi::wayland::wl_surface_listener surface_output_listener_{enter_output, leave_output};
 
     static void configure(void *data, ffi::xdg_shell::xdg_surface *surface, rstd::uint32_t serial) {
         auto &self = *static_cast<WaylandWindow *>(data);
         ffi::xdg_shell::xdg_surface_ack_configure(surface, serial);
+        if (self.pending_mode_known_ && !self.fullscreen_ && self.pending_fullscreen_) {
+            self.windowed_width_ = self.width_; self.windowed_height_ = self.height_;
+        }
+        if (self.pending_mode_known_) self.fullscreen_ = self.pending_fullscreen_;
+        self.mode_known_ = self.pending_mode_known_;
         self.width_ = self.pending_width_;
         self.height_ = self.pending_height_;
+        self.update_scale();
         self.configured_ = true;
         ++self.revision_;
         self.connection_.input().set_generation(self.revision_ + 1);
     }
     static void resize(void *data, ffi::xdg_shell::xdg_toplevel *, rstd::int32_t width,
-                       rstd::int32_t height, ffi::wayland::wl_array *) {
+                       rstd::int32_t height, ffi::wayland::wl_array *states) {
         auto &self = *static_cast<WaylandWindow *>(data);
-        if (width > 0)
-            self.pending_width_ = rstd::uint32_t(width);
-        if (height > 0)
-            self.pending_height_ = rstd::uint32_t(height);
+        self.pending_mode_known_ = !states || (states->size % sizeof(rstd::uint32_t) == 0 && (!states->size || states->data));
+        self.pending_fullscreen_ = self.pending_mode_known_ ? false : self.fullscreen_;
+        if (self.pending_mode_known_ && states && states->data) {
+            auto values = static_cast<const rstd::uint32_t *>(states->data);
+            for (rstd::usize i{}; i < rstd::usize(states->size / sizeof(rstd::uint32_t)); i += rstd::usize(1))
+                if (values[i.to_primitive()] == ffi::xdg_shell::fullscreen_state) self.pending_fullscreen_ = true;
+        }
+        bool restoring = self.fullscreen_ && !self.pending_fullscreen_;
+        self.pending_width_ = width > 0 ? rstd::uint32_t(width) : restoring ? self.windowed_width_ : self.width_;
+        self.pending_height_ = height > 0 ? rstd::uint32_t(height) : restoring ? self.windowed_height_ : self.height_;
     }
     static void request_close(void *data, ffi::xdg_shell::xdg_toplevel *) {
         static_cast<WaylandWindow *>(data)->close_requested_ = true;
@@ -62,18 +135,27 @@ class WaylandWindow {
             return Err(WaylandWindowError::State);
         if (!title || !width || !height || width > 32768 || height > 32768)
             return Err(WaylandWindowError::InvalidSize);
+        connection_.outputs().set_callback(this, [](void *data) { static_cast<WaylandWindow *>(data)->update_scale(); });
+        connection_.set_scaling_callback(this, [](void *data) { static_cast<WaylandWindow *>(data)->setup_fractional(); });
         auto connected = connection_.open(display);
         if (connected.is_err())
             return Err(WaylandWindowError::Connection);
         width_ = pending_width_ = width;
         height_ = pending_height_ = height;
+        windowed_width_ = width; windowed_height_ = height;
+        minimum_width_ = minimum_height_ = 0;
+        scale_numerator_ = 120; scale_failed_ = false;
         revision_ = 0;
-        configured_ = close_requested_ = false;
+        configured_ = close_requested_ = fullscreen_ = pending_fullscreen_ = mode_known_ = pending_mode_known_ = false;
         surface_ = ffi::wayland::wl_compositor_create_surface(connection_.compositor());
         if (!surface_)
             return fail(WaylandWindowError::Surface);
+        if (ffi::wayland::wl_surface_add_listener(surface_, &surface_output_listener_, this) != 0)
+            return fail(WaylandWindowError::Listener);
+        setup_fractional();
+        if (scale_failed_) return fail(WaylandWindowError::Protocol);
         connection_.input().set_surface(surface_);
-        connection_.input().set_generation(1);
+        connection_.input().set_generation(revision_ + 1);
         xdg_ = ffi::xdg_shell::xdg_wm_base_get_xdg_surface(connection_.shell(), surface_);
         if (!xdg_)
             return fail(WaylandWindowError::Surface);
@@ -91,12 +173,42 @@ class WaylandWindow {
     auto roundtrip() -> Result<empty, WaylandWindowError> {
         if (!surface_)
             return Err(WaylandWindowError::State);
-        if (ffi::wayland::wl_display_roundtrip(connection_.display()) < 0 || connection_.input().failed())
+        if (ffi::wayland::wl_display_roundtrip(connection_.display()) < 0 || failed())
             return Err(WaylandWindowError::Protocol);
+        return Ok(empty{});
+    }
+    auto resize(rstd::uint32_t width, rstd::uint32_t height) -> Result<empty, WaylandWindowError> {
+        if (!surface_) return Err(WaylandWindowError::State);
+        if (fullscreen_) return Err(WaylandWindowError::State);
+        if (!width || !height || width > 32768 || height > 32768 ||
+            !valid_scale(scale_numerator_, width, height)) return Err(WaylandWindowError::InvalidSize);
+        if (width_ != width || height_ != height) {
+            width_ = pending_width_ = width; height_ = pending_height_ = height;
+            update_scale();
+            ++revision_; connection_.input().set_generation(revision_ + 1);
+        }
+        return Ok(empty{});
+    }
+    auto set_fullscreen(bool enabled) -> Result<empty, WaylandWindowError> {
+        if (!toplevel_) return Err(WaylandWindowError::State);
+        if (enabled) ffi::xdg_shell::xdg_toplevel_set_fullscreen(toplevel_);
+        else ffi::xdg_shell::xdg_toplevel_unset_fullscreen(toplevel_);
+        return Ok(empty{});
+    }
+    auto fullscreen() const -> Option<bool> { return configured_ && mode_known_ ? Some(bool(fullscreen_)) : None<bool>(); }
+    auto set_minimum_size(rstd::uint32_t width, rstd::uint32_t height) -> Result<empty, WaylandWindowError> {
+        if (!surface_) return Err(WaylandWindowError::State);
+        if (width > 32768 || height > 32768) return Err(WaylandWindowError::InvalidSize);
+        ffi::xdg_shell::xdg_toplevel_set_min_size(toplevel_, rstd::int32_t(width), rstd::int32_t(height));
+        ffi::wayland::wl_surface_commit(surface_);
+        minimum_width_ = width; minimum_height_ = height;
         return Ok(empty{});
     }
     void close() {
         connection_.input().close();
+        if (fractional_) ffi::wayland_fractional::fractional_destroy(fractional_);
+        if (viewport_) ffi::wayland_fractional::viewport_destroy(viewport_);
+        fractional_ = nullptr; viewport_ = nullptr;
         if (toplevel_)
             ffi::xdg_shell::xdg_toplevel_destroy(toplevel_);
         if (xdg_)
@@ -107,7 +219,9 @@ class WaylandWindow {
         xdg_ = nullptr;
         surface_ = nullptr;
         connection_.close();
-        configured_ = close_requested_ = false;
+        configured_ = close_requested_ = fullscreen_ = pending_fullscreen_ = mode_known_ = pending_mode_known_ = false;
+        scale_numerator_ = 120; scale_failed_ = false;
+        minimum_width_ = minimum_height_ = 0;
     }
     auto display() const -> ffi::wayland::wl_display * { return connection_.display(); }
     auto surface() const -> ffi::wayland::wl_surface * { return surface_; }
@@ -115,6 +229,13 @@ class WaylandWindow {
     auto close_requested() const -> bool { return close_requested_; }
     auto width() const -> rstd::uint32_t { return width_; }
     auto height() const -> rstd::uint32_t { return height_; }
+    auto scale() const -> Scalar { return Scalar(scale_numerator_) / 120; }
+    auto pixel_width() const -> rstd::uint32_t { return rstd::uint32_t(pixels(width_, scale_numerator_)); }
+    auto pixel_height() const -> rstd::uint32_t { return rstd::uint32_t(pixels(height_, scale_numerator_)); }
+    auto failed() const -> bool { return scale_failed_ || connection_.failed(); }
+    auto displays() const -> DisplaySnapshot { return connection_.outputs().snapshot(); }
+    auto display_revision() const -> Serial { return connection_.outputs().revision(); }
+    auto minimum_size() const -> Size { return {Scalar(minimum_width_), Scalar(minimum_height_)}; }
     auto revision() const -> rstd::uint64_t { return revision_; }
     auto input() -> WaylandInput & { return connection_.input(); }
 };

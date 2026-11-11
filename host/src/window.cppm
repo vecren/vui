@@ -1,9 +1,13 @@
 export module vui.host:window;
 import vui.render;
+import :display;
 using namespace rstd::prelude;
 
 export namespace vui::host {
 enum class WindowBackend { Automatic, Wayland, X11 };
+enum class WindowPositionResult { Requested, Unsupported, Failed };
+enum class WindowMode { Windowed, Fullscreen };
+enum class WindowModeError { Unavailable, Unsupported, InvalidValue, Failed };
 struct WindowEvents {
     Vec<InputEvent> input;
     SurfaceInfo surface;
@@ -37,7 +41,17 @@ class Window final : public gpu::SurfaceHost {
     auto capture(PointerKind kind, bool enabled) -> NativeCaptureResult;
     auto set_text_input(Option<TextInputState> state) -> NativeTextInputResult;
     auto request_clipboard(Serial id) -> Result<empty, ClipboardError>;
+    auto request_clipboard_write(Serial id, Serial activation, ref<str> text) -> Result<empty, ClipboardError>;
     auto write_clipboard(ref<str> text) -> Result<empty, ClipboardError>;
+    auto resize(Index width, Index height) -> Result<empty, gpu::Error>;
+    auto logical_size() const -> Option<Size>;
+    auto set_minimum_size(Index width, Index height) -> Result<empty, gpu::Error>;
+    auto minimum_size() const -> Option<Size>;
+    auto position() const -> Option<Point>;
+    auto set_position(Point position) -> WindowPositionResult;
+    auto mode() const -> Option<WindowMode>;
+    auto set_mode(WindowMode mode) -> Result<empty, WindowModeError>;
+    auto displays() const -> DisplaySnapshot;
     auto instance_extensions() -> Result<Vec<vrento::vulkan::Extension>, gpu::Error> override;
     auto create_surface(VkInstance instance) -> Result<gpu::NativeSurface, gpu::Error> override;
     auto pixel_extent() const -> VkExtent2D override;

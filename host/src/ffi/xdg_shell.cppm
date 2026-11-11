@@ -30,6 +30,12 @@ inline void xdg_toplevel_destroy(::xdg_toplevel *t) { ::xdg_toplevel_destroy(t);
 inline void xdg_toplevel_set_title(::xdg_toplevel *t, const char *title) {
     ::xdg_toplevel_set_title(t, title);
 }
+inline void xdg_toplevel_set_min_size(::xdg_toplevel *t, int32_t width, int32_t height) {
+    ::xdg_toplevel_set_min_size(t, width, height);
+}
+inline void xdg_toplevel_set_fullscreen(::xdg_toplevel *t) { ::xdg_toplevel_set_fullscreen(t, nullptr); }
+inline void xdg_toplevel_unset_fullscreen(::xdg_toplevel *t) { ::xdg_toplevel_unset_fullscreen(t); }
+inline constexpr auto fullscreen_state = XDG_TOPLEVEL_STATE_FULLSCREEN;
 inline void xdg_toplevel_set_app_id(::xdg_toplevel *t, const char *id) {
     ::xdg_toplevel_set_app_id(t, id);
 }
@@ -53,6 +59,10 @@ using ::vui_xdg_inline::xdg_toplevel_add_listener;
 using ::vui_xdg_inline::xdg_toplevel_destroy;
 using ::vui_xdg_inline::xdg_toplevel_set_app_id;
 using ::vui_xdg_inline::xdg_toplevel_set_title;
+using ::vui_xdg_inline::xdg_toplevel_set_min_size;
+using ::vui_xdg_inline::xdg_toplevel_set_fullscreen;
+using ::vui_xdg_inline::xdg_toplevel_unset_fullscreen;
+using ::vui_xdg_inline::fullscreen_state;
 using ::vui_xdg_inline::xdg_wm_base_add_listener;
 using ::vui_xdg_inline::xdg_wm_base_destroy;
 using ::vui_xdg_inline::xdg_wm_base_get_xdg_surface;

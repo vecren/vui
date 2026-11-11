@@ -3,6 +3,8 @@ import :platform.x11;
 import :platform.x11_input;
 import :platform.x11_clipboard;
 import :platform.x11_clipboard_owner;
+import :platform.x11_state;
+import :platform.x11_displays;
 import :ffi.x11;
 import :platform.keys;
 import :platform.x11_text;
@@ -27,9 +29,12 @@ class X11Window {
     X11Clipboard clipboard_{this,
         [](void *data, InputEvent event) { static_cast<X11Window *>(data)->emit(rstd::move(event)); }};
     X11ClipboardOwner clipboard_owner_;
+    X11State state_;
+    X11Displays displays_;
     ffi::x11::Window window_{};
-    ffi::x11::Atom protocols_{}, delete_window_{};
+    ffi::x11::Atom protocols_{}, delete_window_{}, supported_atom_{}, state_atom_{}, fullscreen_atom_{};
     rstd::uint32_t width_{}, height_{};
+    rstd::uint32_t minimum_width_{}, minimum_height_{};
     rstd::uint64_t revision_{};
     bool close_requested_{};
     bool detectable_repeat_{}, pointer_grabbed_{}, pressed_[256]{};
@@ -84,11 +89,17 @@ class X11Window {
             return fail(X11WindowError::Window);
         protocols_ = ffi::x11::XInternAtom(native, "WM_PROTOCOLS", 0);
         delete_window_ = ffi::x11::XInternAtom(native, "WM_DELETE_WINDOW", 0);
+        supported_atom_ = ffi::x11::XInternAtom(native, "_NET_SUPPORTED", 0);
+        state_atom_ = ffi::x11::XInternAtom(native, "_NET_WM_STATE", 0);
+        fullscreen_atom_ = ffi::x11::XInternAtom(native, "_NET_WM_STATE_FULLSCREEN", 0);
+        auto desktop = ffi::x11::XInternAtom(native, "_NET_CURRENT_DESKTOP", 0);
+        auto workarea = ffi::x11::XInternAtom(native, "_NET_WORKAREA", 0);
         if (!protocols_ || !delete_window_ ||
             !ffi::x11::XSetWMProtocols(native, window_, &delete_window_, 1))
             return fail(X11WindowError::Protocol);
         width_ = width;
         height_ = height;
+        minimum_width_ = minimum_height_ = 0;
         revision_ = 0;
         close_requested_ = false;
         int supported{};
@@ -100,6 +111,9 @@ class X11Window {
             ffi::x11::enter_window_mask | ffi::x11::leave_window_mask |
             ffi::x11::key_press_mask | ffi::x11::key_release_mask;
         ffi::x11::XSelectInput(native, window_, event_mask);
+        ffi::x11::XSync(native, 0);
+        (void)state_.open(ffi::x11::XDisplayString(native), root, window_, supported_atom_, state_atom_, fullscreen_atom_);
+        (void)displays_.open(ffi::x11::XDisplayString(native), root, window_, desktop, workarea);
         xi_.open(native, window_, root);
         clipboard_.open(native, root);
         (void)clipboard_owner_.open(ffi::x11::XDisplayString(native));
@@ -116,6 +130,45 @@ class X11Window {
         ffi::x11::XResizeWindow(connection_.display(), window_, width, height);
         ffi::x11::XFlush(connection_.display());
         return Ok(empty{});
+    }
+    auto set_minimum_size(rstd::uint32_t width, rstd::uint32_t height) -> Result<empty, X11WindowError> {
+        if (!window_) return Err(X11WindowError::State);
+        if (width > 32768 || height > 32768) return Err(X11WindowError::InvalidSize);
+        ffi::x11::XSizeHints hints{};
+        if (width || height) {
+            hints.flags = ffi::x11::min_size_hint;
+            hints.min_width = int(width); hints.min_height = int(height);
+        }
+        ffi::x11::XSetWMNormalHints(connection_.display(), window_, &hints);
+        ffi::x11::XFlush(connection_.display());
+        minimum_width_ = width; minimum_height_ = height;
+        return Ok(empty{});
+    }
+    auto position() const -> Option<Point> {
+        if (!window_) return None();
+        auto display = connection_.display(); auto root = ffi::x11::XRootWindow(display, ffi::x11::XDefaultScreen(display));
+        ffi::x11::Window child{}; int x{}, y{};
+        if (!ffi::x11::XTranslateCoordinates(display, window_, root, 0, 0, &x, &y, &child)) return None();
+        return Some(Point{Scalar(x), Scalar(y)});
+    }
+    auto set_position(int x, int y) -> Result<empty, X11WindowError> {
+        if (!window_) return Err(X11WindowError::State);
+        ffi::x11::XMoveWindow(connection_.display(), window_, x, y);
+        ffi::x11::XFlush(connection_.display()); return Ok(empty{});
+    }
+    auto fullscreen() const -> Option<bool> { return window_ ? state_.active() : None<bool>(); }
+    auto fullscreen_supported() const -> Option<bool> { return window_ ? state_.supported() : None<bool>(); }
+    auto set_fullscreen(bool enabled) -> bool {
+        if (!window_) return false;
+        auto display = connection_.display(); auto root = ffi::x11::XRootWindow(display, ffi::x11::XDefaultScreen(display));
+        ffi::x11::XEvent event{};
+        event.xclient.type = ffi::x11::client_message; event.xclient.window = window_;
+        event.xclient.message_type = state_atom_; event.xclient.format = 32;
+        event.xclient.data.l[0] = enabled ? 1 : 0; event.xclient.data.l[1] = long(fullscreen_atom_);
+        event.xclient.data.l[3] = 1;
+        auto result = ffi::x11::XSendEvent(display, root, 0,
+            ffi::x11::substructure_notify_mask | ffi::x11::substructure_redirect_mask, &event);
+        ffi::x11::XFlush(display); return result != 0;
     }
     auto capture(bool enabled) -> NativeCaptureResult {
         if (!window_) return NativeCaptureResult::Failed;
@@ -175,6 +228,7 @@ class X11Window {
                 continue;
             if (event.type == ffi::x11::configure_notify && event.xconfigure.width > 0 &&
                 event.xconfigure.height > 0) {
+                displays_.window_changed();
                 auto width = rstd::uint32_t(event.xconfigure.width),
                      height = rstd::uint32_t(event.xconfigure.height);
                 if (width != width_ || height != height_) {
@@ -192,6 +246,8 @@ class X11Window {
                 xi_.close();
                 clipboard_.close();
                 clipboard_owner_.close();
+                state_.close();
+                displays_.close();
                 window_ = 0;
                 close_requested_ = true;
             } else if (event.type == ffi::x11::unmap_notify) {
@@ -312,11 +368,14 @@ class X11Window {
         xi_.close();
         clipboard_.close();
         clipboard_owner_.close();
+        state_.close();
+        displays_.close();
         if (window_)
             ffi::x11::XDestroyWindow(connection_.display(), window_);
         window_ = 0;
         connection_.close();
         close_requested_ = false;
+        minimum_width_ = minimum_height_ = 0;
         input_.clear();
         dropped_input_ = 0;
         for (auto &key : pressed_) key = false;
@@ -335,6 +394,18 @@ class X11Window {
     auto clipboard_owner_failed() const -> bool { return clipboard_owner_.failed(); }
     void disable_clipboard_owner() { clipboard_owner_.close(); }
     void close_clipboard() { clipboard_.close(); clipboard_owner_.close(); }
+    auto dispatch_state() -> bool { state_.dispatch(); return state_.take_changed(); }
+    auto state_fd() const -> int { return state_.fd(); }
+    auto state_pending() const -> bool { return state_.pending(); }
+    auto state_failed() const -> bool { return state_.failed(); }
+    void close_state() { state_.close(); }
+    void dispatch_displays() { displays_.dispatch(); }
+    auto displays() const -> DisplaySnapshot { return displays_.snapshot(); }
+    auto display_revision() const -> Serial { return displays_.revision(); }
+    auto displays_fd() const -> int { return displays_.fd(); }
+    auto displays_pending() const -> bool { return displays_.pending(); }
+    auto displays_failed() const -> bool { return displays_.failed(); }
+    void close_displays() { displays_.close(); }
     void copy_internal_connections(Vec<X11InternalConnection> &result) const { connection_.copy_internal(result); }
     auto internal_connection_current(X11InternalConnection item) const -> bool { return connection_.current(item); }
     void process_internal_connection(X11InternalConnection item) { connection_.process(item); }
@@ -342,6 +413,7 @@ class X11Window {
     auto close_requested() const -> bool { return close_requested_; }
     auto width() const -> rstd::uint32_t { return width_; }
     auto height() const -> rstd::uint32_t { return height_; }
+    auto minimum_size() const -> Size { return {Scalar(minimum_width_), Scalar(minimum_height_)}; }
     auto revision() const -> rstd::uint64_t { return revision_; }
     auto has_input() const -> bool { return !input_.is_empty() || dropped_input_ != 0; }
     auto take_input() -> Vec<InputEvent> { return rstd::exchange(input_, Vec<InputEvent>{}); }

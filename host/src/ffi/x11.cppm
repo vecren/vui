@@ -2,9 +2,13 @@ module;
 #include <X11/Xlib.h>
 #include <X11/XKBlib.h>
 #include <X11/Xatom.h>
+#include <X11/Xutil.h>
 
 namespace vui_x11_constants {
 inline constexpr auto structure_notify_mask = StructureNotifyMask;
+inline constexpr auto substructure_notify_mask = SubstructureNotifyMask;
+inline constexpr auto substructure_redirect_mask = SubstructureRedirectMask;
+inline constexpr auto min_size_hint = PMinSize;
 inline constexpr auto configure_notify = ConfigureNotify;
 inline constexpr auto destroy_notify = DestroyNotify;
 inline constexpr auto unmap_notify = UnmapNotify;
@@ -20,6 +24,7 @@ inline constexpr auto property_new_value = PropertyNewValue;
 inline constexpr auto any_property_type = AnyPropertyType;
 inline constexpr auto string_atom = XA_STRING;
 inline constexpr auto integer_atom = XA_INTEGER;
+inline constexpr auto cardinal_atom = XA_CARDINAL;
 inline constexpr auto atom_atom = XA_ATOM;
 inline constexpr auto pointer_motion_mask = PointerMotionMask;
 inline constexpr auto button_press_mask = ButtonPressMask;
@@ -123,6 +128,10 @@ using ::Atom;
 using ::Display;
 using ::Window;
 using ::XCloseDisplay;
+using ::XSizeHints;
+using ::XSetWMNormalHints;
+using ::XGetWMNormalHints;
+using ::XTranslateCoordinates;
 using ::XConnectionNumber;
 using ::XAddConnectionWatch;
 using ::XRemoveConnectionWatch;
@@ -204,11 +213,15 @@ using ::vui_x11_constants::property_new_value;
 using ::vui_x11_constants::any_property_type;
 using ::vui_x11_constants::string_atom;
 using ::vui_x11_constants::integer_atom;
+using ::vui_x11_constants::cardinal_atom;
 using ::vui_x11_constants::atom_atom;
 using ::vui_x11_constants::configure_notify;
 using ::vui_x11_constants::destroy_notify;
 using ::vui_x11_constants::unmap_notify;
 using ::vui_x11_constants::structure_notify_mask;
+using ::vui_x11_constants::substructure_notify_mask;
+using ::vui_x11_constants::substructure_redirect_mask;
+using ::vui_x11_constants::min_size_hint;
 using ::vui_x11_constants::pointer_motion_mask;
 using ::vui_x11_constants::button_press_mask;
 using ::vui_x11_constants::button_release_mask;

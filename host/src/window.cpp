@@ -72,6 +72,7 @@ struct Window::Impl {
     Vec<ffi::linux::pollfd> pollfds;
     Vec<detail::X11InternalConnection> x11_internal;
     Serial observed_revision{};
+    Serial observed_display_revision{};
 };
 
 Window::Window() : impl_(Box<Impl>::make()) {}
@@ -104,6 +105,7 @@ auto Window::open(const char *title, Index width, Index height, WindowBackend ba
             impl_->selected = WindowBackend::Wayland;
             impl_->wake = Some(rstd::move(wake));
             impl_->observed_revision = 0;
+            impl_->observed_display_revision = 0;
             return Ok(empty{});
         }
         if (backend == WindowBackend::Wayland)
@@ -117,6 +119,7 @@ auto Window::open(const char *title, Index width, Index height, WindowBackend ba
     impl_->selected = WindowBackend::X11;
     impl_->wake = Some(rstd::move(wake));
     impl_->observed_revision = 0;
+    impl_->observed_display_revision = 0;
     return Ok(empty{});
 }
 void Window::close() {
@@ -126,6 +129,8 @@ void Window::close() {
         (void)(*impl_->x11)->capture(false);
         (void)(*impl_->x11)->set_text_input(None());
         (*impl_->x11)->close_clipboard();
+        (*impl_->x11)->close_state();
+        (*impl_->x11)->close_displays();
     }
     if (impl_->wayland.is_some()) {
         (void)(*impl_->wayland)->input().set_text_input(None());
@@ -175,10 +180,89 @@ auto Window::request_clipboard(Serial id) -> Result<empty, ClipboardError> {
     if (impl_->wayland.is_some()) return (*impl_->wayland)->input().request_clipboard(id);
     return Err(ClipboardError::Unavailable);
 }
+auto Window::request_clipboard_write(Serial id, Serial activation, ref<str> text) -> Result<empty, ClipboardError> {
+    if (impl_->wayland.is_some()) return (*impl_->wayland)->input().request_clipboard_write(id, activation, text);
+    if (impl_->x11.is_some()) return Err(ClipboardError::Unsupported);
+    return Err(ClipboardError::Unavailable);
+}
 auto Window::write_clipboard(ref<str> text) -> Result<empty, ClipboardError> {
     if (impl_->x11.is_some()) return (*impl_->x11)->write_clipboard(text);
     if (impl_->wayland.is_some()) return Err(ClipboardError::Unsupported);
     return Err(ClipboardError::Unavailable);
+}
+auto Window::resize(Index width, Index height) -> Result<empty, gpu::Error> {
+    if (!width || !height || width > 32768 || height > 32768) return Err(gpu::Error{gpu::Stage::State});
+    if (impl_->wayland.is_some()) {
+        if ((*impl_->wayland)->resize(width, height).is_err()) return Err(gpu::Error{gpu::Stage::State});
+        if (impl_->wake.is_some()) (void)(*impl_->wake)->request();
+        return Ok(empty{});
+    }
+    if (impl_->x11.is_some() && (*impl_->x11)->resize(width, height).is_ok()) return Ok(empty{});
+    return Err(gpu::Error{gpu::Stage::State});
+}
+auto Window::logical_size() const -> Option<Size> {
+    if (impl_->wayland.is_some() && (*impl_->wayland)->surface())
+        return Some(Size{Scalar((*impl_->wayland)->width()), Scalar((*impl_->wayland)->height())});
+    if (impl_->x11.is_some() && (*impl_->x11)->window())
+        return Some(Size{Scalar((*impl_->x11)->width()), Scalar((*impl_->x11)->height())});
+    return None();
+}
+auto Window::set_minimum_size(Index width, Index height) -> Result<empty, gpu::Error> {
+    if (width > 32768 || height > 32768) return Err(gpu::Error{gpu::Stage::State});
+    if (impl_->wayland.is_some()) {
+        if ((*impl_->wayland)->set_minimum_size(width, height).is_err()) return Err(gpu::Error{gpu::Stage::State});
+        if (impl_->wake.is_some()) (void)(*impl_->wake)->request();
+        return Ok(empty{});
+    }
+    if (impl_->x11.is_some() && (*impl_->x11)->set_minimum_size(width, height).is_ok()) return Ok(empty{});
+    return Err(gpu::Error{gpu::Stage::State});
+}
+auto Window::minimum_size() const -> Option<Size> {
+    if (impl_->wayland.is_some() && (*impl_->wayland)->surface()) return Some((*impl_->wayland)->minimum_size());
+    if (impl_->x11.is_some() && (*impl_->x11)->window()) return Some((*impl_->x11)->minimum_size());
+    return None();
+}
+auto Window::position() const -> Option<Point> {
+    if (impl_->x11.is_some()) return (*impl_->x11)->position();
+    return None();
+}
+auto Window::set_position(Point position) -> WindowPositionResult {
+    if (!finite(position.x) || !finite(position.y) || position.x < -32768 || position.x > 32767 ||
+        position.y < -32768 || position.y > 32767 || int(position.x) != position.x ||
+        int(position.y) != position.y) return WindowPositionResult::Failed;
+    if (impl_->wayland.is_some() && (*impl_->wayland)->surface()) return WindowPositionResult::Unsupported;
+    if (impl_->x11.is_some() && (*impl_->x11)->set_position(int(position.x), int(position.y)).is_ok())
+        return WindowPositionResult::Requested;
+    return WindowPositionResult::Failed;
+}
+auto Window::mode() const -> Option<WindowMode> {
+    Option<bool> value;
+    if (impl_->wayland.is_some()) value = (*impl_->wayland)->fullscreen();
+    else if (impl_->x11.is_some()) value = (*impl_->x11)->fullscreen();
+    if (value.is_none()) return None();
+    return Some(*value ? WindowMode::Fullscreen : WindowMode::Windowed);
+}
+auto Window::displays() const -> DisplaySnapshot {
+    if (impl_->wayland.is_some() && (*impl_->wayland)->surface()) return (*impl_->wayland)->displays();
+    if (impl_->x11.is_some() && (*impl_->x11)->window()) return (*impl_->x11)->displays();
+    return {};
+}
+auto Window::set_mode(WindowMode mode) -> Result<empty, WindowModeError> {
+    if (unsigned(mode) > unsigned(WindowMode::Fullscreen)) return Err(WindowModeError::InvalidValue);
+    auto enabled = mode == WindowMode::Fullscreen;
+    if (impl_->wayland.is_some()) {
+        if ((*impl_->wayland)->set_fullscreen(enabled).is_err()) return Err(WindowModeError::Unavailable);
+        if (impl_->wake.is_some()) (void)(*impl_->wake)->request();
+        return Ok(empty{});
+    }
+    if (impl_->x11.is_some()) {
+        auto supported = (*impl_->x11)->fullscreen_supported();
+        if (supported.is_none()) return Err(WindowModeError::Unavailable);
+        if (!*supported) return Err(WindowModeError::Unsupported);
+        if (!(*impl_->x11)->set_fullscreen(enabled)) return Err(WindowModeError::Failed);
+        return Ok(empty{});
+    }
+    return Err(WindowModeError::Unavailable);
 }
 auto Window::wait(Index milliseconds) -> Result<WindowEvents, gpu::Error> {
     if (impl_->wake.is_none()) return Err(gpu::Error{gpu::Stage::State});
@@ -187,6 +271,8 @@ auto Window::wait(Index milliseconds) -> Result<WindowEvents, gpu::Error> {
     bool prepared{};
     Index timeout_ms = milliseconds;
     Option<usize> clipboard_owner_fd;
+    Option<usize> state_fd;
+    Option<usize> displays_fd;
     ffi::wayland::wl_display *wayland{};
     auto &fds = impl_->pollfds;
     fds.clear();
@@ -205,6 +291,7 @@ auto Window::wait(Index milliseconds) -> Result<WindowEvents, gpu::Error> {
         native->input().pump_repeat();
         native->input().clipboard().drain();
         redraw = redraw || native->input().has_input();
+        redraw = redraw || native->display_revision() != impl_->observed_display_revision;
         timeout_ms = native->input().repeat_wait(timeout_ms);
         timeout_ms = native->input().clipboard().wait(timeout_ms);
         prepared = true;
@@ -219,6 +306,12 @@ auto Window::wait(Index milliseconds) -> Result<WindowEvents, gpu::Error> {
     } else if (impl_->x11.is_some()) {
         auto native = impl_->x11->as_ptr().as_raw_ptr();
         auto display = native->display();
+        native->dispatch_displays();
+        if (native->displays_failed()) { native->close_displays(); redraw = true; }
+        redraw = redraw || native->displays_pending() || native->display_revision() != impl_->observed_display_revision;
+        redraw = native->dispatch_state() || redraw;
+        if (native->state_failed()) { native->close_state(); redraw = true; }
+        redraw = redraw || native->state_pending();
         native->dispatch_clipboard_owner();
         redraw = redraw || native->clipboard_owner_pending();
         redraw = redraw || ffi::x11::XPending(display) > 0;
@@ -234,6 +327,14 @@ auto Window::wait(Index milliseconds) -> Result<WindowEvents, gpu::Error> {
         if (native->clipboard_owner_fd() >= 0) {
             clipboard_owner_fd = Some(usize(fds.len()));
             fds.push(ffi::linux::pollfd{native->clipboard_owner_fd(), ffi::linux::input, 0});
+        }
+        if (native->state_fd() >= 0) {
+            state_fd = Some(usize(fds.len()));
+            fds.push(ffi::linux::pollfd{native->state_fd(), ffi::linux::input, 0});
+        }
+        if (native->displays_fd() >= 0) {
+            displays_fd = Some(usize(fds.len()));
+            fds.push(ffi::linux::pollfd{native->displays_fd(), ffi::linux::input, 0});
         }
     } else return Err(gpu::Error{gpu::Stage::State});
 
@@ -263,6 +364,18 @@ auto Window::wait(Index milliseconds) -> Result<WindowEvents, gpu::Error> {
         native->input().clipboard().drain();
     } else {
         auto native = impl_->x11->as_ptr().as_raw_ptr();
+        if (displays_fd.is_some() && fds[*displays_fd].revents) {
+            native->dispatch_displays();
+            if ((fds[*displays_fd].revents & ffi::linux::error) || native->displays_failed()) {
+                native->close_displays(); redraw = true;
+            }
+        }
+        if (state_fd.is_some() && fds[*state_fd].revents) {
+            redraw = native->dispatch_state() || redraw;
+            if ((fds[*state_fd].revents & ffi::linux::error) || native->state_failed()) {
+                native->close_state(); redraw = true;
+            }
+        }
         if (clipboard_owner_fd.is_some() && fds[*clipboard_owner_fd].revents) {
             native->dispatch_clipboard_owner();
             if ((fds[*clipboard_owner_fd].revents & ffi::linux::error) || native->clipboard_owner_failed())
@@ -289,7 +402,7 @@ auto Window::wait(Index milliseconds) -> Result<WindowEvents, gpu::Error> {
     bool close_requested{};
     if (impl_->wayland.is_some()) {
         auto native = impl_->wayland->as_ptr().as_raw_ptr();
-        if (native->input().failed()) return Err(gpu::Error{gpu::Stage::Surface});
+        if (native->failed()) return Err(gpu::Error{gpu::Stage::Surface});
         native->input().pump_repeat();
         revision = native->revision(); close_requested = native->close_requested();
         input = native->input().take_input();
@@ -302,9 +415,15 @@ auto Window::wait(Index milliseconds) -> Result<WindowEvents, gpu::Error> {
     }
     redraw = redraw || revision != impl_->observed_revision;
     impl_->observed_revision = revision;
+    auto display_revision = impl_->wayland.is_some() ? (*impl_->wayland)->display_revision()
+                           : impl_->x11.is_some() ? (*impl_->x11)->display_revision() : Serial{};
+    redraw = redraw || display_revision != impl_->observed_display_revision;
+    impl_->observed_display_revision = display_revision;
+    auto logical = logical_size();
+    auto scale = impl_->wayland.is_some() ? Scalar((*impl_->wayland)->scale()) : Scalar(1);
     auto extent = pixel_extent();
     return Ok(WindowEvents{rstd::move(input),
-                           {{Scalar(extent.width), Scalar(extent.height)}, 1, revision + 1},
+                           {logical.unwrap_or(Size{}), scale, revision + 1, Some(PixelSize{extent.width, extent.height})},
                            redraw, close_requested, dropped});
 }
 auto Window::instance_extensions() -> Result<Vec<vrento::vulkan::Extension>, gpu::Error> {
@@ -358,7 +477,7 @@ auto Window::create_surface(VkInstance instance) -> Result<gpu::NativeSurface, g
 }
 auto Window::pixel_extent() const -> VkExtent2D {
     if (impl_->wayland.is_some())
-        return {(*impl_->wayland)->width(), (*impl_->wayland)->height()};
+        return {(*impl_->wayland)->pixel_width(), (*impl_->wayland)->pixel_height()};
     if (impl_->x11.is_some())
         return {(*impl_->x11)->width(), (*impl_->x11)->height()};
     return {};
