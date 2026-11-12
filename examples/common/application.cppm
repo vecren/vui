@@ -24,18 +24,12 @@ auto frame_limit(int argc, char **argv, unsigned &limit) -> bool {
     rstd::io::eprintln("usage: {} [frame-count; 0 means interactive]", program);
     return false;
 }
-template <class Backend> class BasicApplication {
-    Backend application_;
+class Application {
+    host::Application application_;
     Option<rstd::path::PathBuf> capture_path_;
 
     auto report(gpu::Error error) -> int {
-        if constexpr (requires { window.error(); }) {
-            auto detail = rstd::ffi::CStr::from_ptr(window.error()).to_str().unwrap_or("unknown error"_str);
-            rstd::io::eprintln("renderer stage={} vk={} SDL={}", unsigned(error.stage),
-                               int(error.result), detail);
-        } else {
-            rstd::io::eprintln("renderer stage={} vk={}", unsigned(error.stage), int(error.result));
-        }
+        rstd::io::eprintln("renderer stage={} vk={}", unsigned(error.stage), int(error.result));
         return 1;
     }
 
@@ -130,5 +124,4 @@ template <class Backend> class BasicApplication {
         return run(limit, [](const SurfaceInfo &) {}, [](const AdvanceResult &) {}, [] {});
     }
 };
-using Application = BasicApplication<host::Application>;
 } // namespace examples

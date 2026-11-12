@@ -1280,9 +1280,10 @@ class EventRouter {
         bool text_event = input.type == EventType::TextInput || input.type == EventType::TextEditing || transaction_event;
         bool wheel_event = input.type == EventType::Wheel;
         bool device_event = input.type == EventType::DeviceLost;
+        bool reset_event = input.type == EventType::InputReset;
         bool window_event =
             input.type == EventType::WindowFocusLost || input.type == EventType::WindowFocusGained;
-        if ((!pointer_event && !pointer_leave && !key_event && !text_event && !clipboard_event && !clipboard_write_event && !window_event && !wheel_event && !device_event) ||
+        if ((!pointer_event && !pointer_leave && !key_event && !text_event && !clipboard_event && !clipboard_write_event && !window_event && !wheel_event && !device_event && !reset_event) ||
             (text_event && !transaction_event && (!input.text.present() ||
                 (input.type == EventType::TextInput && input.text.selection().is_some()))) ||
             (transaction_event && (!input.transaction.get() || input.text.present())) ||
@@ -1300,7 +1301,7 @@ class EventRouter {
              (!finite(input.scroll_delta.x) || !finite(input.scroll_delta.y) ||
               static_cast<unsigned>(input.scroll_unit) > static_cast<unsigned>(ScrollUnit::Lines))))
             return Err(InputError::InvalidEvent);
-        if (!window_focused_ && !window_event)
+        if (!window_focused_ && !window_event && !reset_event)
             return Ok(empty{});
         if (static_cast<unsigned>(input.button) > static_cast<unsigned>(PointerButton::Forward) ||
             static_cast<unsigned>(input.pointer_kind) > static_cast<unsigned>(PointerKind::Touch))
@@ -1349,6 +1350,17 @@ class EventRouter {
                 value->inside_window = false;
                 hover(*value, None());
             }
+        } else if (reset_event) {
+            availability_dirty_=true;
+            controls_ = false;
+            for (auto &value : pointers_) {
+                cancel(value, CancelReason::InputLost);
+                hover(value, None());
+            }
+            pointers_.clear();
+            change_focus(None(), CancelReason::InputLost);
+            if (input.window_focused.is_some()) window_focused_ = *input.window_focused;
+            controls_ = true;
         } else if (input.type == EventType::WindowFocusLost) {
             availability_dirty_=true;
             controls_ = false;

@@ -1,6 +1,7 @@
 module vui.host:platform.x11_input;
 import :ffi.x11;
 import :ffi.xi2;
+import :platform.input_clock;
 import vui.render;
 
 namespace vui::host::detail {
@@ -13,6 +14,7 @@ class X11Input {
     void *sink_{};
     void (*emit_)(void *, InputEvent){};
     void (*drop_)(void *){};
+    NativeInputClock &clock_;
     x11::Window window_{};
     int opcode_{};
     bool enabled_{};
@@ -28,6 +30,11 @@ class X11Input {
     static auto modifiers(unsigned state) -> Modifiers {
         return {bool(state & x11::shift_mask), bool(state & x11::control_mask),
                 bool(state & x11::alt_mask), bool(state & x11::meta_mask)};
+    }
+    void stamp(InputEvent &event, rstd::uint32_t value) {
+        auto sample = clock_.sample(value);
+        if (sample.discontinuity) { InputEvent reset; reset.type = EventType::InputReset; emit_(sink_, rstd::move(reset)); }
+        event.sample_time = sample.time;
     }
     auto device(int native) -> DeviceId {
         for (auto item : devices_) if (item.native == native) return item.id;
@@ -62,6 +69,7 @@ class X11Input {
                      : native.evtype == xi::touch_end ? EventType::PointerUp : EventType::PointerMove;
         event.pointer_kind = PointerKind::Touch; event.device = current->device; event.pointer = current->pointer;
         event.position = {native.event_x, native.event_y}; event.modifiers = modifiers(native.mods.effective);
+        stamp(event, rstd::uint32_t(native.time));
         emit_(sink_, rstd::move(event));
         if (native.evtype == xi::touch_end)
             contacts_.retain([&](const Contact &item) { return item.source != native.sourceid || item.native != native.detail; });
@@ -103,10 +111,12 @@ class X11Input {
                 pointer_buttons_.retain([](const PointerButtons &item) { return item.buttons != 0; });
             }
         }
+        stamp(event, rstd::uint32_t(native.time));
         emit_(sink_, rstd::move(event));
     }
   public:
-    X11Input(void *sink, void (*emit)(void *, InputEvent), void (*drop)(void *)) : sink_(sink), emit_(emit), drop_(drop) {}
+    X11Input(void *sink, void (*emit)(void *, InputEvent), void (*drop)(void *), NativeInputClock &clock)
+        : sink_(sink), emit_(emit), drop_(drop), clock_(clock) {}
     X11Input(const X11Input &) = delete;
     auto operator=(const X11Input &) -> X11Input & = delete;
     void open(x11::Display *display, x11::Window window, x11::Window root) {

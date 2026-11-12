@@ -1,5 +1,7 @@
 module vui.host:platform.x11_window;
 import :platform.x11;
+import :platform.input_queue;
+import :platform.input_clock;
 import :platform.x11_input;
 import :platform.x11_clipboard;
 import :platform.x11_clipboard_owner;
@@ -23,9 +25,10 @@ class X11Window {
     X11Text text_{this,
         [](void *data, InputEvent event) { static_cast<X11Window *>(data)->emit(rstd::move(event)); },
         [](void *data) { ++static_cast<X11Window *>(data)->dropped_input_; }};
+    NativeInputClock native_clock_;
     X11Input xi_{this,
         [](void *data, InputEvent event) { static_cast<X11Window *>(data)->emit(rstd::move(event)); },
-        [](void *data) { ++static_cast<X11Window *>(data)->dropped_input_; }};
+        [](void *data) { ++static_cast<X11Window *>(data)->dropped_input_; }, native_clock_};
     X11Clipboard clipboard_{this,
         [](void *data, InputEvent event) { static_cast<X11Window *>(data)->emit(rstd::move(event)); }};
     X11ClipboardOwner clipboard_owner_;
@@ -38,27 +41,26 @@ class X11Window {
     rstd::uint64_t revision_{};
     bool close_requested_{};
     bool detectable_repeat_{}, pointer_grabbed_{}, pressed_[256]{};
-    Vec<InputEvent> input_;
+    InputQueue input_;
     InputTraceSource input_trace_;
     bool trace_input_{};
     Serial dropped_input_{}, sample_clock_{new_session()};
 
     void emit(InputEvent input) {
-        if (input_.len() >= usize(4096)) {
-            if (input.type == EventType::ClipboardResult) {
-                for (usize i{}; i < input_.len(); i += usize(1))
-                    if (input_[i].type != EventType::ClipboardResult) {
-                        input_.remove(i); ++dropped_input_; break;
-                    }
+        dropped_input_ += input_.push(rstd::move(input), clipboard_.pending(), [&](InputEvent &queued) {
+            if (!queued.sample_time.clock) {
+                auto now = rstd::time::Instant::now().duration_since_epoch().as_nanos().to_primitive();
+                queued.sample_time = {sample_clock_, now > ~Serial{} ? ~Serial{} : Serial(now), 1,
+                                      TimeOrigin::Received};
             }
-            if (input_.len() >= usize(4096)) { ++dropped_input_; return; }
-        }
-        auto now = rstd::time::Instant::now().duration_since_epoch().as_nanos().to_primitive();
-        input.sample_time = {sample_clock_, now > ~Serial{} ? ~Serial{} : Serial(now), 1,
-                             TimeOrigin::Received};
-        input.coordinate_generation = revision_ + 1;
-        if (trace_input_) input.stamp = input_trace_.stamp();
-        input_.push(rstd::move(input));
+            queued.coordinate_generation = revision_ + 1;
+            if (trace_input_) queued.stamp = input_trace_.stamp();
+        });
+    }
+    auto native_time(rstd::uint32_t value) -> SampleTime {
+        auto sample = native_clock_.sample(value);
+        if (sample.discontinuity) { InputEvent reset; reset.type = EventType::InputReset; emit(rstd::move(reset)); }
+        return sample.time;
     }
     static auto modifiers(unsigned state) -> Modifiers {
         return {bool(state & ffi::x11::shift_mask), bool(state & ffi::x11::control_mask),
@@ -329,6 +331,8 @@ class X11Window {
                 input.modifiers = modifiers(event.xkey.state);
                 input.repeat = event.type == ffi::x11::key_press && pressed_[code];
                 pressed_[code] = event.type == ffi::x11::key_press;
+                auto sample = native_time(rstd::uint32_t(event.xkey.time));
+                input.sample_time = sample;
                 emit(rstd::move(input));
                 if (event.type == ffi::x11::key_press && !filtered) {
                     bool invalid{};
@@ -340,6 +344,7 @@ class X11Window {
                     if (text.present() && session.is_some() && !mods.control && !mods.alt && !mods.meta) {
                         InputEvent typed; typed.type = EventType::TextInput; typed.text = rstd::move(text);
                         typed.text_session = *session; typed.modifiers = mods;
+                        typed.sample_time = sample;
                         emit(rstd::move(typed));
                     }
                 }
@@ -353,9 +358,11 @@ class X11Window {
                 if (event.type == ffi::x11::motion_notify) {
                     input.position = {Scalar(event.xmotion.x), Scalar(event.xmotion.y)};
                     input.modifiers = modifiers(event.xmotion.state);
+                    input.sample_time = native_time(rstd::uint32_t(event.xmotion.time));
                 } else {
                     input.position = {Scalar(event.xcrossing.x), Scalar(event.xcrossing.y)};
                     input.modifiers = modifiers(event.xcrossing.state);
+                    input.sample_time = native_time(rstd::uint32_t(event.xcrossing.time));
                 }
                 emit(rstd::move(input));
             } else if (event.type == ffi::x11::button_press || event.type == ffi::x11::button_release) {
@@ -377,6 +384,7 @@ class X11Window {
                     if (input.button == PointerButton::None) continue;
                     input.type = event.type == ffi::x11::button_press ? EventType::PointerDown : EventType::PointerUp;
                 }
+                input.sample_time = native_time(rstd::uint32_t(event.xbutton.time));
                 emit(rstd::move(input));
             }
         }
@@ -403,12 +411,13 @@ class X11Window {
         close_requested_ = false;
         minimum_width_ = minimum_height_ = 0;
         input_.clear();
+        native_clock_.reset();
         dropped_input_ = 0;
         for (auto &key : pressed_) key = false;
     }
     auto display() const -> ffi::x11::Display * { return connection_.display(); }
     auto request_clipboard(Serial id) -> Result<empty, ClipboardError> {
-        if (input_.len() + clipboard_.pending() >= usize(4096)) return Err(ClipboardError::Limit);
+        if (!input_.can_reserve(clipboard_.pending())) return Err(ClipboardError::Limit);
         return clipboard_.request(id);
     }
     auto write_clipboard(ref<str> text) -> Result<empty, ClipboardError> { return clipboard_owner_.write(text); }
@@ -443,7 +452,7 @@ class X11Window {
     auto revision() const -> rstd::uint64_t { return revision_; }
     auto has_input() const -> bool { return !input_.is_empty() || dropped_input_ != 0; }
     void set_input_tracing(bool enabled) { trace_input_ = enabled; }
-    auto take_input() -> Vec<InputEvent> { return rstd::exchange(input_, Vec<InputEvent>{}); }
+    auto take_input() -> Vec<InputEvent> { return input_.take(); }
     auto take_dropped_input() -> Serial { return rstd::exchange(dropped_input_, Serial{}); }
 };
 } // namespace vui::host::detail

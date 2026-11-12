@@ -29,7 +29,9 @@ enum class EventType {
     WindowPointerLeave,
     TextTransaction,
     ClipboardResult,
-    ClipboardWriteResult
+    ClipboardWriteResult,
+    // Cancels active input after a gap; window_focused is the last known native state.
+    InputReset
 };
 enum class InputDelivery { EverySample, LatestWithHistory };
 enum class RoutePhase { Capture, Target, Bubble };
@@ -74,7 +76,8 @@ enum class CancelReason {
     Explicit,
     DeviceLost,
     Closed,
-    ScopeChanged
+    ScopeChanged,
+    InputLost
 };
 enum class NativeCaptureResult { Succeeded, Failed, Unsupported };
 enum class NativeTextInputResult { Succeeded, Failed, Unsupported };
@@ -261,6 +264,7 @@ struct InputEvent {
     Serial clipboard_request{};
     Option<ClipboardError> clipboard_error;
     Serial activation{};
+    Option<bool> window_focused;
 };
 struct RoutedEvent {
     InputEvent input;

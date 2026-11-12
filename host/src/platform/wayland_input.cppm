@@ -4,6 +4,8 @@ import :ffi.linux;
 import :ffi.xkb;
 import :platform.keys;
 import :platform.keyboard_text;
+import :platform.input_clock;
+import :platform.input_queue;
 import :platform.wayland_text;
 import :platform.wayland_clipboard;
 import vui.render;
@@ -38,7 +40,8 @@ class WaylandInput {
     rstd::uint32_t key_group_{};
     Point position_{};
     Serial generation_{1}, clock_{new_session()}, pointer_device_{new_session()}, touch_device_{new_session()};
-    Vec<InputEvent> input_;
+    NativeInputClock native_clock_;
+    InputQueue input_;
     InputTraceSource input_trace_;
     bool trace_input_{};
     struct Activation { Serial token; rstd::uint32_t serial; };
@@ -48,6 +51,7 @@ class WaylandInput {
     Vec<Contact> contacts_;
     Index next_contact_{1};
     Point axis_pixels_{}, axis_steps_{};
+    Option<SampleTime> axis_time_;
     bool axis_pending_{}, axis_discrete_{}, axis_value120_{}, axis_wheel_{};
     WaylandText text_{this,
         [](void *data, InputEvent event) { static_cast<WaylandInput *>(data)->emit(rstd::move(event)); },
@@ -60,21 +64,20 @@ class WaylandInput {
         return now > ~Serial{} ? ~Serial{} : Serial(now);
     }
     void emit(InputEvent event) {
-        if (input_.len() >= usize(4096)) {
-            if (event.type == EventType::ClipboardResult || event.type == EventType::ClipboardWriteResult) {
-                for (usize i{}; i < input_.len(); i += usize(1))
-                    if (input_[i].type != EventType::ClipboardResult && input_[i].type != EventType::ClipboardWriteResult) { input_.remove(i); ++dropped_; break; }
-            }
-            if (input_.len() >= usize(4096)) { ++dropped_; return; }
-        }
-        event.sample_time = {clock_, now_ns(), 1, TimeOrigin::Received};
-        event.modifiers = modifiers_;
-        event.coordinate_generation = generation_;
-        if (trace_input_) event.stamp = input_trace_.stamp();
-        input_.push(rstd::move(event));
+        dropped_ += input_.push(rstd::move(event), clipboard_.pending(), [&](InputEvent &queued) {
+            if (!queued.sample_time.clock) queued.sample_time = {clock_, now_ns(), 1, TimeOrigin::Received};
+            queued.modifiers = modifiers_;
+            queued.coordinate_generation = generation_;
+            if (trace_input_) queued.stamp = input_trace_.stamp();
+        });
+    }
+    auto native_time(rstd::uint32_t value) -> SampleTime {
+        auto sample = native_clock_.sample(value, now_ns());
+        if (sample.discontinuity) { InputEvent reset; reset.type = EventType::InputReset; emit(rstd::move(reset)); }
+        return sample.time;
     }
     auto activation(rstd::uint32_t serial) -> Serial {
-        if (input_.len() >= usize(4096)) return 0;
+        if (!input_.can_reserve(clipboard_.pending())) return 0;
         auto token = new_session(); queued_activations_.push({token, serial}); return token;
     }
     void flush_axis() {
@@ -83,6 +86,7 @@ class WaylandInput {
             event.type = EventType::Wheel;
             event.device = pointer_device_;
             event.position = position_;
+            if (axis_time_.is_some()) event.sample_time = *axis_time_;
             if (axis_discrete_) {
                 event.scroll_unit = ScrollUnit::Lines;
                 event.scroll_delta = axis_steps_;
@@ -96,6 +100,7 @@ class WaylandInput {
             if (event.scroll_delta.x || event.scroll_delta.y) emit(rstd::move(event));
         }
         axis_pixels_ = {}; axis_steps_ = {};
+        axis_time_ = None();
         axis_pending_ = axis_discrete_ = axis_value120_ = axis_wheel_ = false;
     }
     auto contact(rstd::int32_t id) -> Contact * {
@@ -201,14 +206,15 @@ class WaylandInput {
         self.emit(rstd::move(event));
         self.pointer_focused_ = false;
     }
-    static void motion(void *data, wl::wl_pointer *, rstd::uint32_t, wl::wl_fixed_t x, wl::wl_fixed_t y) {
+    static void motion(void *data, wl::wl_pointer *, rstd::uint32_t time, wl::wl_fixed_t x, wl::wl_fixed_t y) {
         auto &self = *static_cast<WaylandInput *>(data);
         if (!self.pointer_focused_) return;
         self.position_ = {wl::wl_fixed_to_double(x), wl::wl_fixed_to_double(y)};
         InputEvent event; event.type = EventType::PointerMove; event.device = self.pointer_device_; event.position = self.position_;
+        event.sample_time = self.native_time(time);
         self.emit(rstd::move(event));
     }
-    static void button(void *data, wl::wl_pointer *, rstd::uint32_t serial, rstd::uint32_t, rstd::uint32_t button, rstd::uint32_t state) {
+    static void button(void *data, wl::wl_pointer *, rstd::uint32_t serial, rstd::uint32_t time, rstd::uint32_t button, rstd::uint32_t state) {
         auto &self = *static_cast<WaylandInput *>(data);
         if (!self.pointer_focused_ || (state != wl::WL_POINTER_BUTTON_STATE_PRESSED && state != wl::WL_POINTER_BUTTON_STATE_RELEASED)) return;
         InputEvent event;
@@ -221,15 +227,17 @@ class WaylandInput {
         else self.pointer_buttons_ &= ~mask;
         event.type = state == wl::WL_POINTER_BUTTON_STATE_PRESSED ? EventType::PointerDown : EventType::PointerUp;
         event.device = self.pointer_device_; event.position = self.position_;
+        event.sample_time = self.native_time(time);
         event.activation = self.activation(serial);
         self.emit(rstd::move(event));
     }
-    static void axis(void *data, wl::wl_pointer *pointer, rstd::uint32_t, rstd::uint32_t axis, wl::wl_fixed_t value) {
+    static void axis(void *data, wl::wl_pointer *pointer, rstd::uint32_t time, rstd::uint32_t axis, wl::wl_fixed_t value) {
         auto &self = *static_cast<WaylandInput *>(data);
         if (!self.pointer_focused_) return;
         if (axis == wl::WL_POINTER_AXIS_HORIZONTAL_SCROLL) self.axis_pixels_.x += wl::wl_fixed_to_double(value);
         else if (axis == wl::WL_POINTER_AXIS_VERTICAL_SCROLL) self.axis_pixels_.y += wl::wl_fixed_to_double(value);
         else return;
+        self.axis_time_ = Some(self.native_time(time));
         self.axis_pending_ = true;
         if (wl::wl_pointer_get_version(pointer) < wl::pointer_frame_version) self.flush_axis();
     }
@@ -253,7 +261,7 @@ class WaylandInput {
         if (axis == wl::WL_POINTER_AXIS_HORIZONTAL_SCROLL) self.axis_steps_.x += Scalar(value) / 120;
         else if (axis == wl::WL_POINTER_AXIS_VERTICAL_SCROLL) self.axis_steps_.y += Scalar(value) / 120;
     }
-    static void touch_down(void *data, wl::wl_touch *, rstd::uint32_t serial, rstd::uint32_t, wl::wl_surface *surface, rstd::int32_t id, wl::wl_fixed_t x, wl::wl_fixed_t y) {
+    static void touch_down(void *data, wl::wl_touch *, rstd::uint32_t serial, rstd::uint32_t time, wl::wl_surface *surface, rstd::int32_t id, wl::wl_fixed_t x, wl::wl_fixed_t y) {
         auto &self = *static_cast<WaylandInput *>(data);
         if (surface != self.surface_ || !surface || self.contact(id)) return;
         if (self.contacts_.len() >= usize(32) || self.next_contact_ == ~Index{}) { ++self.dropped_; return; }
@@ -262,24 +270,27 @@ class WaylandInput {
         self.contacts_.push({id, pointer, pos});
         InputEvent event; event.type = EventType::PointerDown; event.pointer_kind = PointerKind::Touch;
         event.device = self.touch_device_; event.pointer = pointer; event.position = pos;
+        event.sample_time = self.native_time(time);
         event.activation = self.activation(serial);
         self.emit(rstd::move(event));
     }
-    static void touch_up(void *data, wl::wl_touch *, rstd::uint32_t serial, rstd::uint32_t, rstd::int32_t id) {
+    static void touch_up(void *data, wl::wl_touch *, rstd::uint32_t serial, rstd::uint32_t time, rstd::int32_t id) {
         auto &self = *static_cast<WaylandInput *>(data);
         auto contact = self.contact(id); if (!contact) return;
         InputEvent event; event.type = EventType::PointerUp; event.pointer_kind = PointerKind::Touch;
         event.device = self.touch_device_; event.pointer = contact->pointer; event.position = contact->position;
+        event.sample_time = self.native_time(time);
         event.activation = self.activation(serial);
         self.emit(rstd::move(event));
         self.contacts_.retain([&](const Contact &item) { return item.native != id; });
     }
-    static void touch_motion(void *data, wl::wl_touch *, rstd::uint32_t, rstd::int32_t id, wl::wl_fixed_t x, wl::wl_fixed_t y) {
+    static void touch_motion(void *data, wl::wl_touch *, rstd::uint32_t time, rstd::int32_t id, wl::wl_fixed_t x, wl::wl_fixed_t y) {
         auto &self = *static_cast<WaylandInput *>(data);
         auto contact = self.contact(id); if (!contact) return;
         contact->position = {wl::wl_fixed_to_double(x), wl::wl_fixed_to_double(y)};
         InputEvent event; event.type = EventType::PointerMove; event.pointer_kind = PointerKind::Touch;
         event.device = self.touch_device_; event.pointer = contact->pointer; event.position = contact->position;
+        event.sample_time = self.native_time(time);
         self.emit(rstd::move(event));
     }
     static void touch_frame(void *, wl::wl_touch *) {}
@@ -307,9 +318,10 @@ class WaylandInput {
         if (invalid) ++dropped_;
         return result;
     }
-    void emit_keyboard_text(const TextInput &text, Option<Serial> session) {
+    void emit_keyboard_text(const TextInput &text, Option<Serial> session, Option<SampleTime> time = {}) {
         if (!text.present() || session.is_none() || modifiers_.control || modifiers_.alt || modifiers_.meta) return;
         InputEvent event; event.type = EventType::TextInput; event.text = text; event.text_session = *session;
+        if (time.is_some()) event.sample_time = *time;
         emit(rstd::move(event));
     }
     static void keyboard_keymap(void *data, wl::wl_keyboard *, rstd::uint32_t format, rstd::int32_t fd, rstd::uint32_t size) {
@@ -351,27 +363,29 @@ class WaylandInput {
         self.clipboard_.lost_focus();
         self.modifiers_ = {};
     }
-    void emit_key(rstd::uint32_t code, bool pressed, bool repeat = false, Serial token = 0) {
+    void emit_key(rstd::uint32_t code, bool pressed, bool repeat = false, Serial token = 0, Option<SampleTime> time = {}) {
         InputEvent event;
         event.type = pressed ? EventType::KeyDown : EventType::KeyUp;
         event.repeat = repeat;
         event.activation = token;
+        if (time.is_some()) event.sample_time = *time;
         if (key_state_) event.key = key_from_symbol(xkb::xkb_state_key_get_one_sym(key_state_, code + 8));
         emit(rstd::move(event));
     }
-    static void keyboard_key(void *data, wl::wl_keyboard *, rstd::uint32_t serial, rstd::uint32_t,
+    static void keyboard_key(void *data, wl::wl_keyboard *, rstd::uint32_t serial, rstd::uint32_t time,
                              rstd::uint32_t code, rstd::uint32_t state) {
         auto &self = *static_cast<WaylandInput *>(data);
         if (!self.keyboard_focused_ || code > ~rstd::uint32_t{} - 8 ||
             (state != wl::WL_KEYBOARD_KEY_STATE_PRESSED && state != wl::WL_KEYBOARD_KEY_STATE_RELEASED)) return;
         bool pressed = state == wl::WL_KEYBOARD_KEY_STATE_PRESSED;
-        self.emit_key(code, pressed, false, self.activation(serial));
+        auto sample = self.native_time(time);
+        self.emit_key(code, pressed, false, self.activation(serial), Some(sample));
         bool composed{};
         TextInput text;
         auto text_session = self.text_.session();
         if (pressed) {
             text = self.keyboard_text(code, true, composed);
-            self.emit_keyboard_text(text, text_session);
+            self.emit_keyboard_text(text, text_session, Some(sample));
         }
         if (pressed && self.keymap_ && self.repeat_rate_ > 0 && xkb::xkb_keymap_key_repeats(self.keymap_, code + 8)) {
             self.repeat_key_ = code;
@@ -432,18 +446,18 @@ class WaylandInput {
         }
         seat_ = nullptr; seat_name_ = 0;
     }
-    void close() { close_seat(); clipboard_.close(); text_.close(); surface_ = nullptr; input_.clear(); queued_activations_.clear(); delivered_activations_.clear(); dropped_ = 0; failed_ = false; }
+    void close() { close_seat(); clipboard_.close(); text_.close(); surface_ = nullptr; input_.clear(); native_clock_.reset(); queued_activations_.clear(); delivered_activations_.clear(); dropped_ = 0; failed_ = false; }
     void set_surface(wl::wl_surface *surface) { surface_ = surface; text_.set_surface(surface); }
     void set_generation(Serial generation) { generation_ = generation; }
     auto failed() const -> bool { return failed_ || text_.failed() || clipboard_.failed(); }
     auto request_clipboard(Serial id) -> Result<empty, ClipboardError> {
         if (!keyboard_focused_) return Err(ClipboardError::Unavailable);
-        if (input_.len() + clipboard_.pending() >= usize(4096)) return Err(ClipboardError::Limit);
+        if (!input_.can_reserve(clipboard_.pending())) return Err(ClipboardError::Limit);
         return clipboard_.request(id);
     }
     auto request_clipboard_write(Serial id, Serial token, ref<str> text) -> Result<empty, ClipboardError> {
         if (!keyboard_focused_ || !token) return Err(ClipboardError::Unavailable);
-        if (input_.len() + clipboard_.pending() >= usize(4096)) return Err(ClipboardError::Limit);
+        if (!input_.can_reserve(clipboard_.pending())) return Err(ClipboardError::Limit);
         for (const auto &entry : delivered_activations_)
             if (entry.token == token) return clipboard_.write(id, entry.serial, text);
         return Err(ClipboardError::Unavailable);
@@ -469,7 +483,7 @@ class WaylandInput {
     void set_input_tracing(bool enabled) { trace_input_ = enabled; }
     auto take_input() -> Vec<InputEvent> {
         delivered_activations_ = rstd::exchange(queued_activations_, Vec<Activation>{});
-        return rstd::exchange(input_, Vec<InputEvent>{});
+        return input_.take();
     }
     auto take_dropped_input() -> Serial { return rstd::exchange(dropped_, Serial{}); }
     auto has_seat() const -> bool { return seat_ != nullptr; }

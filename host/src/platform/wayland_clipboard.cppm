@@ -53,6 +53,7 @@ class WaylandClipboard {
     Vec<Box<Read>> reads_;
     Vec<Box<Source>> sources_;
     Vec<Box<Send>> sends_;
+    usize pending_sources_{};
     Option<FrameWaker> waker_;
     bool failed_{};
     void *sink_{};
@@ -77,7 +78,10 @@ class WaylandClipboard {
     void remove_source(wd::wl_data_source *native, Option<ClipboardError> error = None()) {
         for (usize i{}; i < sources_.len(); i += usize(1)) if (sources_[i]->native == native) {
             auto entry = sources_.remove(i);
-            if (entry->pending) emit_write_result(entry->id, error.is_some() ? error : Some(ClipboardError::Unavailable));
+            if (entry->pending) {
+                pending_sources_ -= usize(1);
+                emit_write_result(entry->id, error.is_some() ? error : Some(ClipboardError::Unavailable));
+            }
             wd::destroy_source(native); return;
         }
     }
@@ -288,7 +292,7 @@ class WaylandClipboard {
         self.selection_ = native && self.offer(native) ? native : nullptr;
         auto entry = self.offer(self.selection_);
         if (entry) for (auto &source : self.sources_) if (source->pending && source->id == entry->marker) {
-            source->pending = false; self.emit_write_result(source->id); break;
+            source->pending = false; self.pending_sources_ -= usize(1); self.emit_write_result(source->id); break;
         }
     }
     wd::wl_data_offer_listener offer_listener_{mime, source_actions, action};
@@ -371,6 +375,7 @@ class WaylandClipboard {
             else i += usize(1);
         }
         sources_.push(rstd::move(entry));
+        pending_sources_ += usize(1);
         wd::set_selection(device_, native, serial);
         return Ok(empty{});
     }
@@ -441,9 +446,7 @@ class WaylandClipboard {
             return milliseconds < 1 ? milliseconds : 1;
         return milliseconds;
     }
-    auto pending() const -> usize {
-        usize count = reads_.len(); for (const auto &entry : sources_) if (entry->pending) count += usize(1); return count;
-    }
+    auto pending() const -> usize { return reads_.len() + pending_sources_; }
     auto failed() const -> bool { return failed_; }
     void close() {
         for (auto &send : sends_) {
