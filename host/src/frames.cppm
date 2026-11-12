@@ -254,15 +254,22 @@ class FrameLoop {
             }
             return Ok(empty{});
         }
-        if (active_.is_some() && (pending_.is_some() || rebuild_ || closing_)) {
+        if (active_.is_some() && closing_) {
+            auto stopped = renderer_.shutdown(0);
+            if (stopped.is_err())
+                return retry_or_fail(stopped.unwrap_err());
+            notify(FrameEventType::Cancelled);
+            active_ = None();
+            closed_ = true;
+            return Ok(empty{});
+        }
+        if (active_.is_some() && (pending_.is_some() || rebuild_)) {
             auto discarded = renderer_.discard_prepared(0);
             if (discarded.is_err()) {
                 auto error = discarded.unwrap_err();
                 return retry_or_fail(error);
             }
-            if (closing_)
-                notify(FrameEventType::Cancelled);
-            else if (pending_.is_some())
+            if (pending_.is_some())
                 notify(FrameEventType::Skipped);
             else
                 pending_ = Some(active_->request);

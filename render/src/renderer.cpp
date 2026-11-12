@@ -914,6 +914,9 @@ struct Renderer::Impl {
     Vec<PresentSync> presents;
     PFN_vkReleaseSwapchainImagesEXT release_images{};
     bool windowed{}, initialized{}, readback_enabled{true};
+    auto maintenance() const -> bool {
+        return session.is_some() && device().capabilities().swapchain_maintenance1;
+    }
     PresentMode presentation{PresentMode::Fifo};
     auto swapchain_options() const -> vk::SwapchainOptions {
         return {true, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
@@ -925,7 +928,7 @@ struct Renderer::Impl {
             PresentSync sync;
             auto result = device().handle().CreateSemaphore(
                 {VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO}, sync.semaphore);
-            if (result == VK_SUCCESS)
+            if (result == VK_SUCCESS && maintenance())
                 result = device().handle().CreateFence({VK_STRUCTURE_TYPE_FENCE_CREATE_INFO},
                                                        sync.fence);
             if (result != VK_SUCCESS)
@@ -940,7 +943,9 @@ struct Renderer::Impl {
             auto &active = **frame;
             auto result = session->observe_result(active.output.acquire_fence.Wait(timeout));
             if (result != VK_SUCCESS)
-                return Err(Error{Stage::Acquire, result});
+                return Err(Error{result == VK_TIMEOUT ? Stage::Timeout : Stage::Acquire, result});
+            if (!maintenance())
+                return Ok(empty{});
             VkReleaseSwapchainImagesInfoEXT release{
                 VK_STRUCTURE_TYPE_RELEASE_SWAPCHAIN_IMAGES_INFO_EXT};
             release.swapchain = *device().swapchain().handle();
@@ -994,7 +999,7 @@ struct Renderer::Impl {
                         Error{result == VK_TIMEOUT ? Stage::Timeout : Stage::Acquire, result});
             }
             for (auto &sync : presents) {
-                if (!sync.pending)
+                if (!sync.pending || !maintenance())
                     continue;
                 result = session->observe_result(sync.fence.Wait(timeout));
                 if (result != VK_SUCCESS && result != VK_ERROR_DEVICE_LOST)
@@ -1009,6 +1014,8 @@ struct Renderer::Impl {
             auto result = session->wait_idle();
             if (result != VK_SUCCESS && result != VK_ERROR_DEVICE_LOST)
                 return Err(Error{Stage::Submit, result});
+            if (result == VK_ERROR_DEVICE_LOST)
+                return retire(timeout);
             (**frame).uncertain_submission = VK_SUCCESS;
         }
         if (state == State::Submitted) {
@@ -1036,7 +1043,7 @@ struct Renderer::Impl {
         if (released.is_err())
             return released;
         for (auto &sync : presents) {
-            if (!sync.pending)
+            if (!sync.pending || !maintenance())
                 continue;
             auto result = session->observe_result(sync.fence.Wait(timeout));
             if (result != VK_SUCCESS)
@@ -1066,6 +1073,11 @@ struct Renderer::Impl {
                     retire(~Serial{}).is_err())
                     rstd::panic("cannot retire renderer device resources");
             }
+        }
+        if (windowed && session.is_some() && state != State::Closed) {
+            auto result = session->wait_idle();
+            if (result != VK_SUCCESS && result != VK_ERROR_DEVICE_LOST)
+                rstd::panic("cannot retire renderer device resources");
         }
         clear_resources();
         if (windowed && session.is_some())
@@ -1138,11 +1150,11 @@ auto Renderer::initialize_impl(SurfaceHost *host, bool validation, bool readback
         if (extensions.is_err())
             return Err(extensions.unwrap_err());
         instance_extensions = extensions.unwrap();
-        instance_extensions.push({true, "VK_KHR_get_surface_capabilities2"_str});
-        instance_extensions.push({true, "VK_EXT_surface_maintenance1"_str});
+        instance_extensions.push({false, "VK_KHR_get_surface_capabilities2"_str});
+        instance_extensions.push({false, "VK_EXT_surface_maintenance1"_str});
     }
     vk::Extension required[]{{true, "VK_KHR_swapchain"_str},
-                             {true, "VK_EXT_swapchain_maintenance1"_str}};
+                             {false, "VK_EXT_swapchain_maintenance1"_str}};
     vk::DeviceSessionOptions options;
     options.instance_extensions = instance_extensions.as_slice();
     options.device_extensions = slice<vk::Extension>::from_raw_parts(required, usize(host ? 2 : 0));
@@ -1208,14 +1220,20 @@ auto Renderer::finish_initialize() -> Result<empty, Error> {
         (VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT))
         return Err(Error{Stage::Unsupported});
     if (self.windowed) {
-        self.release_images = reinterpret_cast<PFN_vkReleaseSwapchainImagesEXT>(
-            self.device().handle().Dispatch().vkGetDeviceProcAddr(*self.device().handle(),
-                                                                  "vkReleaseSwapchainImagesEXT"));
+        if (self.maintenance())
+            self.release_images = reinterpret_cast<PFN_vkReleaseSwapchainImagesEXT>(
+                self.device().handle().Dispatch().vkGetDeviceProcAddr(*self.device().handle(),
+                                                                      "vkReleaseSwapchainImagesEXT"));
+        if (self.maintenance() && !self.release_images)
+            return Err(Error::session(vk::DeviceSessionError::from(
+                vk::DeviceSessionStage::Device,
+                {"load swapchain maintenance"_Str,
+                 vk::BackendCause::Unsupported("vkReleaseSwapchainImagesEXT"_Str)})));
         auto destination = self.device()
                                .gpu()
                                .GetFormatProperties(self.device().swapchain().format())
                                .optimalTilingFeatures;
-        if (!self.release_images || !(features & VK_FORMAT_FEATURE_BLIT_SRC_BIT) ||
+        if (!(features & VK_FORMAT_FEATURE_BLIT_SRC_BIT) ||
             !(destination & VK_FORMAT_FEATURE_BLIT_DST_BIT))
             return Err(Error{Stage::Unsupported});
         auto sync = self.presentation_sync();
@@ -1759,7 +1777,7 @@ auto Renderer::submit_impl() -> Result<Serial, Error> {
         if (!frame.output.acquired) {
             CpuSample acquire(frame.metric(&FrameTimings::acquire));
             result = d.vkAcquireNextImageKHR(
-                *self.device().handle(), *self.device().swapchain().handle(), 0,
+                *self.device().handle(), *self.device().swapchain().handle(), ~Serial{},
                 *frame.output.acquire_semaphore, *frame.output.acquire_fence,
                 &frame.output.image_index);
             if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
@@ -1771,7 +1789,7 @@ auto Renderer::submit_impl() -> Result<Serial, Error> {
             frame.output.suboptimal = result == VK_SUBOPTIMAL_KHR;
         }
         auto &sync = self.presents[usize(frame.output.image_index)];
-        if (sync.pending) {
+        if (sync.pending && self.maintenance()) {
             CpuSample reuse(frame.metric(&FrameTimings::present_reuse));
             result = sync.fence.Wait(0);
             if (result != VK_SUCCESS)
@@ -2052,17 +2070,20 @@ auto Renderer::present_impl() -> Result<PresentResult, Error> {
         return Err(Error{Stage::State});
     auto &sync = self.presents[usize(frame.output.image_index)];
     const auto &device = self.device().handle();
-    VkFence fence = *sync.fence;
-    auto result = device.Dispatch().vkResetFences(*device, 1, &fence);
-    if (result != VK_SUCCESS)
-        return Err(Error{Stage::Present, result});
+    VkFence fence = self.maintenance() ? *sync.fence : VK_NULL_HANDLE;
+    VkResult result = VK_SUCCESS;
+    if (self.maintenance()) {
+        result = device.Dispatch().vkResetFences(*device, 1, &fence);
+        if (result != VK_SUCCESS)
+            return Err(Error{Stage::Present, result});
+    }
     VkSwapchainPresentFenceInfoEXT finish{VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_FENCE_INFO_EXT};
     finish.swapchainCount = 1;
     finish.pFences = &fence;
     VkSemaphore semaphore = *sync.semaphore;
     VkSwapchainKHR swapchain = *self.device().swapchain().handle();
     VkPresentInfoKHR info{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
-    info.pNext = &finish;
+    info.pNext = self.maintenance() ? &finish : nullptr;
     info.waitSemaphoreCount = 1;
     info.pWaitSemaphores = &semaphore;
     info.swapchainCount = 1;
@@ -2070,6 +2091,7 @@ auto Renderer::present_impl() -> Result<PresentResult, Error> {
     info.pImageIndices = &frame.output.image_index;
     {
         CpuSample present(frame.metric(&FrameTimings::present));
+        auto access = self.session->queue_access();
         result = device.Dispatch().vkQueuePresentKHR(*self.device().present_queue().handle, &info);
     }
     if (result == VK_ERROR_OUT_OF_HOST_MEMORY || result == VK_ERROR_OUT_OF_DEVICE_MEMORY)
@@ -2097,6 +2119,8 @@ auto Renderer::discard_prepared_impl(Serial timeout_nanoseconds) -> Result<empty
     auto &self = *impl_;
     if (self.state != Impl::State::Prepared || !(**self.frame).recyclable)
         return Err(Error{Stage::State});
+    if (self.windowed && !self.maintenance() && (**self.frame).output.acquired)
+        return resize_impl(self.device().swapchain().extent(), timeout_nanoseconds);
     auto released = self.release_acquired(timeout_nanoseconds);
     if (released.is_err())
         return released;
@@ -2127,11 +2151,17 @@ auto Renderer::resize_impl(VkExtent2D extent, Serial timeout_nanoseconds, Option
     if (retired.is_err())
         return retired;
     if (mode.is_some()) self.presentation = *mode;
+    if (!extent.width || !extent.height) {
+        self.frame = None();
+        self.state = Impl::State::Unavailable;
+        return Ok(empty{});
+    }
+    auto idle = self.session->wait_idle();
+    if (idle != VK_SUCCESS)
+        return Err(Error{idle == VK_ERROR_DEVICE_LOST ? Stage::Lost : Stage::Device, idle});
     self.frame = None();
     self.presents.clear();
     self.state = Impl::State::Unavailable;
-    if (!extent.width || !extent.height)
-        return Ok(empty{});
     auto resized = self.session->resize_surface(extent, self.swapchain_options());
     if (resized.is_err())
         return Err(Error::session(resized.unwrap_err()));
@@ -2157,6 +2187,11 @@ auto Renderer::shutdown_impl(Serial timeout_nanoseconds) -> Result<empty, Error>
     auto retired = self.retire(timeout_nanoseconds);
     if (retired.is_err())
         return retired;
+    if (self.windowed && self.session.is_some()) {
+        auto result = self.session->wait_idle();
+        if (result != VK_SUCCESS && result != VK_ERROR_DEVICE_LOST)
+            return Err(Error{Stage::Device, result});
+    }
     self.clear_resources();
     if (self.windowed && self.session.is_some())
         self.session->release_surface();
@@ -2179,6 +2214,15 @@ auto Renderer::present_mode() const -> Option<PresentMode> {
     case VK_PRESENT_MODE_FIFO_RELAXED_KHR: return Some(PresentMode::FifoRelaxed);
     default: return None();
     }
+}
+auto Renderer::presentation_capabilities() const -> Option<PresentationCapabilities> {
+    if (!impl_->windowed || !impl_->initialized)
+        return None();
+    const bool maintenance = impl_->device().capabilities().swapchain_maintenance1;
+    return Some(PresentationCapabilities{
+        maintenance ? PresentationPath::Maintenance : PresentationPath::Basic,
+        maintenance ? PresentationRetirement::PresentFence
+                    : PresentationRetirement::CompatibilityIdle});
 }
 auto Renderer::frame_resource_stats() const -> FrameResourceStats {
     return impl_->frame_resources->stats;

@@ -108,6 +108,12 @@ class SurfaceHost {
     virtual auto pixel_extent() const -> VkExtent2D = 0;
 };
 enum class PresentStatus { Queued, Suboptimal, OutOfDate };
+enum class PresentationPath { Maintenance, Basic };
+enum class PresentationRetirement { PresentFence, CompatibilityIdle };
+struct PresentationCapabilities {
+    PresentationPath path;
+    PresentationRetirement retirement;
+};
 using PresentMode = vrento::vulkan::PresentationMode;
 struct PresentResult {
     FrameIdentity frame;
@@ -221,16 +227,20 @@ class Renderer {
     auto set_frame_resource_limits(FrameResourceLimits) -> Result<empty, Error>;
     auto clear_frame_resource_cache() -> Result<empty, Error>;
     auto release_completed_frame() -> Result<empty, Error>;
+    // Window submission waits for an available swapchain image.
     auto submit() -> Result<Serial, Error>;
     auto poll() -> Result<Option<Completion>, Error>;
     auto wait(Serial timeout_nanoseconds = 1'000'000'000) -> Result<Completion, Error>;
     auto readback() -> Result<Pixels, Error>;
     auto present() -> Result<PresentResult, Error>;
     auto discard_prepared(Serial timeout_nanoseconds = 0) -> Result<empty, Error>;
+    // Swapchain recreation may wait for device idle beyond the frame timeout.
     auto resize(VkExtent2D, Serial timeout_nanoseconds = 1'000'000'000) -> Result<empty, Error>;
     auto resize(VkExtent2D, PresentMode, Serial timeout_nanoseconds = 1'000'000'000)
         -> Result<empty, Error>;
     auto present_mode() const -> Option<PresentMode>;
+    auto presentation_capabilities() const -> Option<PresentationCapabilities>;
+    // Window shutdown may wait for device idle beyond the frame timeout.
     auto shutdown(Serial timeout_nanoseconds = 1'000'000'000) -> Result<empty, Error>;
     auto pixel_extent() const -> VkExtent2D;
     auto validation_errors() const -> unsigned;
