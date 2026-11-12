@@ -41,6 +41,8 @@ class Window final : public gpu::SurfaceHost {
     auto poll() -> Result<WindowEvents, gpu::Error> { return wait(0); }
     auto timing() const -> FrameTiming;
     auto frame_waker() const -> Option<FrameWaker>;
+    // Wakes event processing without requesting another drawing frame.
+    auto event_waker() const -> Option<FrameWaker>;
     auto wake_stats() const -> WakeStats;
     // Wayland signals after the next surface commit; false is pending, true is ready.
     auto request_frame_signal() -> Result<Serial,FrameSignalError>;

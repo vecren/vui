@@ -16,6 +16,7 @@ sources = [
     "src/binding/signal.cppm",
     "src/composition.cppm",
     "src/content.cppm",
+    "src/content_mailbox.cppm",
     "src/diagnostics.cppm",
     "src/display_list.cppm",
     "src/document.cppm",

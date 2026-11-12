@@ -10,20 +10,22 @@ namespace win = ffi::win32;
 struct WakeState {
     win::HANDLE event{};
     rstd::sync::Mutex<WakeStats> stats;
+    bool repaint{};
     explicit WakeState(win::HANDLE value): event(value) {}
     ~WakeState() { if (event) win::CloseHandle(event); }
-    auto request() -> FrameWakeResult {
+    auto request(bool draw = true) -> FrameWakeResult {
         auto guard = stats.lock().unwrap();
         if (guard->closed) return FrameWakeResult::Closed;
+        repaint |= draw;
         if (guard->pending) { ++guard->coalesced; return FrameWakeResult::Coalesced; }
         if (!win::SetEvent(event)) { ++guard->failed; return FrameWakeResult::Failed; }
         guard->pending = true; ++guard->queued; return FrameWakeResult::Queued;
     }
-    auto take() -> bool {
+    auto take(bool &draw) -> bool {
         auto guard = stats.lock().unwrap();
         if (!guard->pending) return false;
         if (!win::ResetEvent(event)) return false;
-        guard->pending = false; return true;
+        guard->pending = false; draw |= rstd::exchange(repaint, false); return true;
     }
     void close() { auto guard = stats.lock().unwrap(); guard->closed = true; guard->pending = false; }
     auto snapshot() -> WakeStats { auto guard = stats.lock().unwrap(); return *guard; }
@@ -85,6 +87,10 @@ auto Window::timing() const -> FrameTiming {
 auto Window::frame_waker() const -> Option<FrameWaker> {
     if (impl_->wake.is_none()) return None();
     return Some(FrameWaker::make([state = impl_->wake->clone()] { return state->request(); }));
+}
+auto Window::event_waker() const -> Option<FrameWaker> {
+    if (impl_->wake.is_none()) return None();
+    return Some(FrameWaker::make([state = impl_->wake->clone()] { return state->request(false); }));
 }
 auto Window::wake_stats() const -> WakeStats {
     return impl_->wake.is_some() ? (*impl_->wake)->snapshot() : WakeStats{0, 0, 0, false, true};
@@ -168,16 +174,17 @@ auto Window::wait(Index milliseconds) -> Result<WindowEvents, gpu::Error> {
     if (impl_->native.is_none() || impl_->wake.is_none()) return Err(gpu::Error{gpu::Stage::State});
     auto &native = **impl_->native; auto &wake = **impl_->wake;
     if (!native.alive()) return Err(gpu::Error{gpu::Stage::Surface});
-    bool redraw = wake.take();
+    bool redraw{};
+    bool woke = wake.take(redraw);
     auto before = native.view();
-    if (!redraw && !before.redraw && before.revision == impl_->observed_revision) {
+    if (!woke && !before.redraw && before.revision == impl_->observed_revision) {
         win::HANDLE events[]{native.changed_handle(), wake.event, native.thread_handle()};
         auto timeout = milliseconds > 0xfffffffeu ? 0xfffffffeu : milliseconds;
         auto waited = win::WaitForMultipleObjects(3, events, false, timeout);
         if (waited == win::wait_failed || waited == win::wait_object + 2)
             return Err(gpu::Error{gpu::Stage::Surface});
     }
-    redraw = wake.take() || redraw;
+    (void)wake.take(redraw);
     auto value = native.snapshot();
     redraw = redraw || value.redraw || value.revision != impl_->observed_revision;
     impl_->observed_revision = value.revision;

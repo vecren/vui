@@ -57,11 +57,12 @@ class TextureFrame {
     struct Data {
         TextureFrameInfo info;
         Box<Payload> payload;
-        Data(TextureFrameInfo i, Box<Payload> p) : info(i), payload(rstd::move(p)) {}
+        bool concurrent_read{};
+        Data(TextureFrameInfo i, Box<Payload> p, bool shared) : info(i), payload(rstd::move(p)), concurrent_read(shared) {}
     };
     rstd::sync::Arc<Data> data_;
-    TextureFrame(TextureFrameInfo info, Box<Payload> payload)
-        : data_(rstd::sync::Arc<Data>::make(info, rstd::move(payload))) {}
+    TextureFrame(TextureFrameInfo info, Box<Payload> payload, bool shared)
+        : data_(rstd::sync::Arc<Data>::make(info, rstd::move(payload), shared)) {}
 
   public:
     TextureFrame(const TextureFrame &other) : data_(other.data_.clone()) {}
@@ -73,13 +74,15 @@ class TextureFrame {
     TextureFrame(TextureFrame &&) = default;
     auto operator=(TextureFrame &&) -> TextureFrame & = default;
     template <class T>
-    static auto make(TextureFrameInfo info, T payload) -> Result<TextureFrame, ContentError> {
+    // Shared payloads permit concurrent const access; the UI retains the final frame reference.
+    static auto make(TextureFrameInfo info, T payload, bool concurrent_read = false) -> Result<TextureFrame, ContentError> {
         if (!info.valid())
             return Err(ContentError::InvalidValue);
         auto stored = Box<Stored<T>>::make(rstd::move(payload));
         return Ok(TextureFrame(
-            info, Box<Payload>::from_raw(rstd::move(stored).into_raw().template cast<Payload>())));
+            info, Box<Payload>::from_raw(rstd::move(stored).into_raw().template cast<Payload>()), concurrent_read));
     }
+    auto concurrent_read() const -> bool { return data_->concurrent_read; }
     auto valid() const -> bool { return bool(data_); }
     auto info() const -> TextureFrameInfo { return data_->info; }
     template <class T> auto payload() const -> const T * {

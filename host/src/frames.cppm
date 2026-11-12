@@ -10,7 +10,8 @@ enum class FrameEventType {
     GpuComplete,
     Skipped,
     Failed,
-    Cancelled
+    Cancelled,
+    CaptureReady
 };
 enum class PresentationFeedback { Unsupported };
 enum class FrameRequestError { Busy, Closing, Faulted, Limit };
@@ -26,13 +27,24 @@ struct FrameEvent {
     Option<InputTimings> inputs;
     Option<rstd::time::Instant> observed;
     Serial earlier_unselected_input_batches{};
+    Serial capture{};
+    Option<gpu::Pixels> pixels;
 };
 struct FrameLoopStatus {
     Option<Serial> active, pending;
     bool submitted{}, rebuilding{}, suspended{}, closing{}, closed{}, backpressure{};
     Option<gpu::Error> fault;
+    auto clone() const -> FrameLoopStatus {
+        return {active, pending, submitted, rebuilding, suspended, closing, closed, backpressure, fault.clone()};
+    }
 };
-class FrameLoop {
+struct FramePacket {
+    FramePlan plan;
+    Option<InputTimings> inputs;
+    bool frozen{};
+};
+
+template <class Backend = gpu::Renderer> class FrameExecutor {
     struct Active {
         Serial request;
         FrameIdentity frame;
@@ -40,8 +52,7 @@ class FrameLoop {
         Option<InputTimings> inputs;
         Serial earlier_unselected_input_batches{};
     };
-    UiSession &session_;
-    gpu::Renderer &renderer_;
+    Backend &renderer_;
     bool windowed_;
     gpu::DrawOptions options_;
     Option<Active> active_;
@@ -135,15 +146,15 @@ class FrameLoop {
 
   public:
     // The loop exclusively schedules renderer work. Both owners must outlive it.
-    FrameLoop(UiSession &session, gpu::Renderer &renderer, bool windowed = true,
+    FrameExecutor(Backend &renderer, bool windowed = true,
               gpu::DrawOptions options = {})
-        : session_(session), renderer_(renderer), windowed_(windowed), options_(options),
+        : renderer_(renderer), windowed_(windowed), options_(options),
           extent_(renderer.pixel_extent()) {
         events_.reserve(usize(64));
     }
-    FrameLoop(const FrameLoop &) = delete;
-    auto operator=(const FrameLoop &) -> FrameLoop & = delete;
-    auto request() -> Result<Serial, FrameRequestError> {
+    FrameExecutor(const FrameExecutor &) = delete;
+    auto operator=(const FrameExecutor &) -> FrameExecutor & = delete;
+    auto request(Option<Serial> identity = {}) -> Result<Serial, FrameRequestError> {
         if (closing_ || closed_)
             return Err(FrameRequestError::Closing);
         if (fault_.is_some())
@@ -154,7 +165,10 @@ class FrameLoop {
             return Err(FrameRequestError::Limit);
         if (pending_.is_some())
             events_.push({*pending_, FrameEventType::Skipped});
-        pending_ = Some(++next_request_);
+        if (identity.is_some() && *identity <= next_request_)
+            return Err(FrameRequestError::Limit);
+        next_request_ = identity.unwrap_or(next_request_ + 1);
+        pending_ = Some(next_request_);
         return Ok(next_request_);
     }
     void set_surface(VkExtent2D extent, Serial generation) {
@@ -198,6 +212,9 @@ class FrameLoop {
     }
     // Uses the same monotonic clock as pump and wait_milliseconds; zero removes the limit.
     void set_frame_interval(Serial nanoseconds) { frame_interval_ns_ = nanoseconds; }
+    auto production_wait(Serial now) const -> Index {
+        return Index((interval_remaining(now) + 999'999) / 1'000'000);
+    }
     auto requested_present_mode() const -> gpu::PresentMode { return presentation_; }
     auto set_present_mode(gpu::PresentMode mode) -> Result<empty, gpu::Error> {
         if (!windowed_ || closing_ || closed_ || unsigned(mode) > unsigned(gpu::PresentMode::FifoRelaxed))
@@ -231,11 +248,11 @@ class FrameLoop {
             return waiting_ ? 1 : interval_wait();
         return animation_wait();
     }
-    auto pump(FrameTiming timing = {}) -> Result<empty, gpu::Error> {
-        return pump_with_clock([timing] { return timing; });
+    auto pump_with_clock(auto clock, auto produce) -> Result<empty, gpu::Error> {
+        return pump_with_clock(clock, produce, [] {});
     }
     // Live clocks are sampled again after submission so preparation time cannot shorten the limit.
-    auto pump_with_clock(auto clock) -> Result<empty, gpu::Error> {
+    auto pump_with_clock(auto clock, auto produce, auto synchronize) -> Result<empty, gpu::Error> {
         auto timing = clock();
         if (closed_)
             return Ok(empty{});
@@ -295,12 +312,15 @@ class FrameLoop {
             rebuild_ = false;
         }
         if (interval_remaining(timing.now_ns)) return Ok(empty{});
-        if (active_.is_some())
+        if (active_.is_some()) {
+            synchronize();
+            if (closing_ || rebuild_ || suspended()) return Ok(empty{});
             return submit_active(clock);
+        }
         if (pending_.is_none())
             return Ok(empty{});
         auto id = *pending_;
-        auto plan = session_.plan_frame();
+        auto plan = produce();
         if (plan.is_err()) {
             if (plan.unwrap_err() == FrameError::Busy) {
                 waiting_ = true;
@@ -310,9 +330,10 @@ class FrameLoop {
             pending_ = None();
             return Ok(empty{});
         }
-        auto value = plan.unwrap();
+        auto packet = rstd::move(plan).unwrap();
+        auto value = rstd::move(packet.plan);
         auto identity = value.identity();
-        auto inputs = session_.last_successful_input_timings();
+        auto inputs = rstd::move(packet.inputs);
         if (inputs.is_some()) {
             auto batch = inputs->batch();
             if (batch.successful_sequence <= submitted_input_sequence_ ||
@@ -323,7 +344,7 @@ class FrameLoop {
         }
         if (windowed_ && generation_ && identity.surface_generation != generation_) {
             events_.push({id,
-                          FrameEventType::Failed,
+                          packet.frozen ? FrameEventType::Skipped : FrameEventType::Failed,
                           Some(identity),
                           0,
                           {},
@@ -351,7 +372,26 @@ class FrameLoop {
         }
         active_ = Some(Active{id, identity, 0, rstd::move(inputs)});
         pending_ = None();
+        synchronize();
+        if (closing_ || rebuild_ || suspended()) return Ok(empty{});
         return submit_active(clock);
+    }
+};
+class FrameLoop : public FrameExecutor<> {
+    UiSession &session_;
+  public:
+    FrameLoop(UiSession &session, gpu::Renderer &renderer, bool windowed = true,
+              gpu::DrawOptions options = {})
+        : FrameExecutor<>(renderer, windowed, options), session_(session) {}
+    auto pump(FrameTiming timing = {}) -> Result<empty, gpu::Error> {
+        return pump_with_clock([timing] { return timing; });
+    }
+    auto pump_with_clock(auto clock) -> Result<empty, gpu::Error> {
+        return FrameExecutor<>::pump_with_clock(clock, [&]() -> Result<FramePacket, FrameError> {
+            auto plan = session_.plan_frame();
+            if (plan.is_err()) return Err(plan.unwrap_err());
+            return Ok(FramePacket{rstd::move(plan).unwrap(), session_.last_successful_input_timings()});
+        });
     }
 };
 } // namespace vui::host

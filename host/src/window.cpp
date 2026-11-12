@@ -14,12 +14,14 @@ namespace {
 struct WakeState {
     int fd;
     rstd::sync::Mutex<WakeStats> stats;
+    bool repaint{};
     explicit WakeState(int value) : fd(value) {}
     ~WakeState() { ffi::linux::close(fd); }
-    auto request() -> FrameWakeResult {
+    auto request(bool draw = true) -> FrameWakeResult {
         auto guard = stats.lock().unwrap();
         auto &state = *guard;
         if (state.closed) return FrameWakeResult::Closed;
+        repaint |= draw;
         if (state.pending) {
             ++state.coalesced;
             return FrameWakeResult::Coalesced;
@@ -36,7 +38,7 @@ struct WakeState {
         ++state.queued;
         return FrameWakeResult::Queued;
     }
-    auto take() -> bool {
+    auto take(bool &draw) -> bool {
         auto guard = stats.lock().unwrap();
         auto &state = *guard;
         if (!state.pending) return false;
@@ -46,6 +48,7 @@ struct WakeState {
         while (count < 0 && ffi::linux::error_number() == ffi::linux::interrupted);
         if (count != sizeof(value)) return false;
         state.pending = false;
+        draw |= rstd::exchange(repaint, false);
         return true;
     }
     void close() {
@@ -168,6 +171,10 @@ auto Window::synchronize() -> Result<empty, gpu::Error> {
 auto Window::frame_waker() const -> Option<FrameWaker> {
     if (impl_->wake.is_none()) return None();
     return Some(FrameWaker::make([state = impl_->wake->clone()] { return state->request(); }));
+}
+auto Window::event_waker() const -> Option<FrameWaker> {
+    if (impl_->wake.is_none()) return None();
+    return Some(FrameWaker::make([state = impl_->wake->clone()] { return state->request(false); }));
 }
 auto Window::wake_stats() const -> WakeStats {
     return impl_->wake.is_some() ? (*impl_->wake)->snapshot() : WakeStats{0, 0, 0, false, true};
@@ -322,9 +329,10 @@ auto Window::set_mode(WindowMode mode) -> Result<empty, WindowModeError> {
 auto Window::wait(Index milliseconds) -> Result<WindowEvents, gpu::Error> {
     if (impl_->wake.is_none()) return Err(gpu::Error{gpu::Stage::State});
     auto wake = impl_->wake->as_ptr().as_raw_ptr();
-    bool redraw = wake->take();
+    bool redraw{};
+    bool woke = wake->take(redraw);
     bool prepared{};
-    Index timeout_ms = milliseconds;
+    Index timeout_ms = woke ? 0 : milliseconds;
     Option<usize> clipboard_owner_fd;
     Option<usize> state_fd;
     Option<usize> displays_fd;
@@ -451,7 +459,7 @@ auto Window::wait(Index milliseconds) -> Result<WindowEvents, gpu::Error> {
         if (native->dispatch(true).is_err()) return Err(gpu::Error{gpu::Stage::Surface});
         native->expire_clipboard();
     }
-    redraw = wake->take() || redraw;
+    (void)wake->take(redraw);
     Serial revision{}, dropped{};
     Vec<InputEvent> input;
     bool close_requested{};

@@ -191,6 +191,7 @@ using ::XMoveWindow;
 using ::XUnmapWindow;
 using ::XNextEvent;
 using ::XPeekEvent;
+using ::XInitThreads;
 using ::XOpenDisplay;
 using ::XDisplayString;
 using ::XPending;

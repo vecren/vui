@@ -25,7 +25,7 @@ auto frame_limit(int argc, char **argv, unsigned &limit) -> bool {
     return false;
 }
 class Application {
-    host::Application application_;
+    host::ThreadedApplication application_;
     Option<rstd::path::PathBuf> capture_path_;
 
     auto report(gpu::Error error) -> int {
@@ -33,13 +33,7 @@ class Application {
         return 1;
     }
 
-    auto capture(ref<rstd::path::Path> path) -> bool {
-        auto result = renderer.readback();
-        if (result.is_err()) {
-            report(result.unwrap_err());
-            return false;
-        }
-        auto image = result.unwrap();
+    auto capture(ref<rstd::path::Path> path, const gpu::Pixels &image) -> bool {
         auto header = rstd::format("P6\n{} {}\n255\n", image.width, image.height);
         auto pixels = Vec<u8>::from(header.as_str().as_bytes());
         pixels.reserve(usize(image.width) * usize(image.height) * usize(3));
@@ -57,8 +51,7 @@ class Application {
     }
 
   public:
-    decltype(application_.window()) window{application_.window()};
-    gpu::Renderer &renderer{application_.renderer()};
+    auto snapshot() -> host::RenderSnapshot { return application_.snapshot(); }
     UiSession &session{application_.session()};
 
     auto open(const char *title, Index width, Index height) -> bool {
@@ -71,6 +64,7 @@ class Application {
             report(opened.unwrap_err());
             return false;
         }
+        if (capture_path_.is_some() && application_.request_capture().is_err()) return false;
         session.input().set_navigation([this](EventRouter &router, const InputEvent &input) {
             if (input.type == EventType::KeyDown && input.key == Key::Escape && !input.repeat)
                 application_.request_close();
@@ -95,10 +89,13 @@ class Application {
                 return Ok(empty{});
             },
             [&](const host::FrameEvent &event) -> Result<empty, UiError> {
+                if (event.type == host::FrameEventType::CaptureReady) {
+                    if (event.error.is_some() || event.pixels.is_none() ||
+                        !capture(capture_path_->as_path(), *event.pixels)) return Err(UiError::InvalidValue);
+                    return Ok(empty{});
+                }
                 if (event.type != host::FrameEventType::GpuComplete)
                     return Ok(empty{});
-                if (capture_path_.is_some() && frames == 0 && !capture(capture_path_->as_path()))
-                    return Err(UiError::InvalidValue);
                 presented();
                 ++frames;
                 if (limit && frames >= limit)
@@ -117,8 +114,8 @@ class Application {
             return 1;
         }
         rstd::io::println("GPU completed requests={}, validation errors={}", frames,
-                          renderer.validation_errors());
-        return renderer.validation_errors() ? 1 : 0;
+                          application_.snapshot().validation_errors);
+        return application_.snapshot().validation_errors ? 1 : 0;
     }
     auto run(unsigned limit) -> int {
         return run(limit, [](const SurfaceInfo &) {}, [](const AdvanceResult &) {}, [] {});

@@ -34,6 +34,7 @@ export import :text_edit;
 export import :image;
 export import :image.nine_patch;
 export import :content;
+export import :content_mailbox;
 export import :animation;
 export import :curves;
 export import :state_animation;

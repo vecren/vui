@@ -36,6 +36,8 @@ class X11Connection {
     auto open(const char *name = nullptr) -> Result<empty, X11ConnectionError> {
         if (display_)
             return Err(X11ConnectionError::State);
+        static const bool threaded = ffi::x11::XInitThreads() != 0;
+        if (!threaded) return Err(X11ConnectionError::Connect);
         display_ = ffi::x11::XOpenDisplay(name);
         if (!display_)
             return Err(X11ConnectionError::Connect);

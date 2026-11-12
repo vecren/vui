@@ -46,7 +46,7 @@ class FrameDraw {
 struct FramePass {
     Vec<FrameDraw> draws;
 };
-enum class FrameError { InvalidSurface, InvalidTransform, MissingNode, Limit, InvalidContent, Busy };
+enum class FrameError { InvalidSurface, InvalidTransform, MissingNode, Limit, InvalidContent, Busy, ThreadUnsafe };
 struct ContentSelection {
     Serial source_id{}, source_revision{};
     Option<TextureFrame> frame;
@@ -75,6 +75,15 @@ class FramePlan {
     }
     FramePlan(FramePlan &&) = default;
     auto operator=(FramePlan &&) -> FramePlan & = default;
+    // Only immutable draws are consumed remotely. The producer retains this plan until release.
+    auto concurrent_rendering() const -> bool {
+        for (const auto &pass : data_->passes) for (const auto &draw : pass.draws) {
+            if (draw.is_Text()) for (const auto &font : draw.as_Text().layout.fonts())
+                if (!font.concurrent_rasterization()) return false;
+            if (draw.is_External() && !draw.as_External().frame.concurrent_read()) return false;
+        }
+        return true;
+    }
     auto identity() const -> FrameIdentity { return data_->identity; }
     auto surface() const -> SurfaceInfo { return data_->surface; }
     auto clips() const -> slice<ClipInstance> { return data_->clips.as_slice(); }

@@ -26,6 +26,27 @@ struct WindowDriver {
                 events.redraw, events.close_requested, events.dropped_input, {}, events.minimized, events.suspended};
     }
 };
+inline auto connect_session(Window &window, UiSession &session) -> Result<empty, gpu::Error> {
+    if (session.set_frame_waker(window.frame_waker()).is_err()) {
+        return Err(gpu::Error{gpu::Stage::State});
+    }
+    session.input().set_native_capture(
+        [&window](PointerKind kind, bool enabled) { return window.capture(kind, enabled); });
+    if (session.input().set_native_text_input_state(
+            [&window](Option<TextInputState> state) { return window.set_text_input(rstd::move(state)); }).is_err()) {
+        return Err(gpu::Error{gpu::Stage::State});
+    }
+    if (session.input().set_clipboard(
+            []() -> Result<String, ClipboardError> { return Err(ClipboardError::Unsupported); },
+            [&window](ref<str> text) { return window.write_clipboard(text); }).is_err() ||
+        session.input().set_clipboard_request(
+            [&window](Serial id) { return window.request_clipboard(id); }).is_err() ||
+        session.input().set_clipboard_write_request(
+            [&window](Serial id, Serial activation, ref<str> text) { return window.request_clipboard_write(id, activation, text); }).is_err()) {
+        return Err(gpu::Error{gpu::Stage::State});
+    }
+    return Ok(empty{});
+}
 class Application {
     Window window_;
     gpu::Renderer renderer_;
@@ -56,29 +77,11 @@ class Application {
             window_.close();
             return initialized;
         }
-        if (session_.set_frame_waker(window_.frame_waker()).is_err()) {
+        auto connected = connect_session(window_, session_);
+        if (connected.is_err()) {
             (void)renderer_.shutdown(5'000'000'000);
             window_.close();
-            return Err(gpu::Error{gpu::Stage::State});
-        }
-        session_.input().set_native_capture(
-            [this](PointerKind kind, bool enabled) { return window_.capture(kind, enabled); });
-        if (session_.input().set_native_text_input_state(
-                [this](Option<TextInputState> state) { return window_.set_text_input(rstd::move(state)); }).is_err()) {
-            (void)renderer_.shutdown(5'000'000'000);
-            window_.close();
-            return Err(gpu::Error{gpu::Stage::State});
-        }
-        if (session_.input().set_clipboard(
-                []() -> Result<String, ClipboardError> { return Err(ClipboardError::Unsupported); },
-                [this](ref<str> text) { return window_.write_clipboard(text); }).is_err() ||
-            session_.input().set_clipboard_request(
-                [this](Serial id) { return window_.request_clipboard(id); }).is_err() ||
-            session_.input().set_clipboard_write_request(
-                [this](Serial id, Serial activation, ref<str> text) { return window_.request_clipboard_write(id, activation, text); }).is_err()) {
-            (void)renderer_.shutdown(5'000'000'000);
-            window_.close();
-            return Err(gpu::Error{gpu::Stage::State});
+            return connected;
         }
         opened_ = true;
         return Ok(empty{});

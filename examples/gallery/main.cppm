@@ -178,8 +178,8 @@ int main(int argc, char **argv) {
                 ++animation_samples;
         },
         [&] {
-            cache = app.renderer.text_cache_stats();
-            image_stats = app.renderer.image_cache_stats();
+            cache = app.snapshot().text;
+            image_stats = app.snapshot().images;
         });
     rstd::io::println("animation samples={} completions={} opacity={:.3}..{:.3}", animation_samples,
                       animation_completions, opacity_min, opacity_max);

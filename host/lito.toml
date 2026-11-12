@@ -10,7 +10,7 @@ module = "vui.host"
 archive = "vui-host"
 sources = [
     "src/lib.cppm", "src/display.cppm", "src/frames.cppm", "src/runner.cppm",
-    "src/window.cppm", "src/application.cppm", "src/platform/input_clock.cppm",
+    "src/window.cppm", "src/application.cppm", "src/threaded_frames.cppm", "src/threaded_application.cppm", "src/platform/input_clock.cppm",
     "src/platform/input_queue.cppm",
 ]
 when = [

@@ -5,3 +5,5 @@ export import :frames;
 export import :runner;
 export import :window;
 export import :application;
+export import :threaded_frames;
+export import :threaded_application;
