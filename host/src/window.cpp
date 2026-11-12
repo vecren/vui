@@ -136,6 +136,7 @@ void Window::close() {
         (*impl_->x11)->close_displays();
     }
     if (impl_->wayland.is_some()) {
+        (*impl_->wayland)->clear_frame_signal();
         (void)(*impl_->wayland)->input().set_text_input(None());
         (*impl_->wayland)->input().clipboard().close();
     }
@@ -170,6 +171,22 @@ auto Window::frame_waker() const -> Option<FrameWaker> {
 }
 auto Window::wake_stats() const -> WakeStats {
     return impl_->wake.is_some() ? (*impl_->wake)->snapshot() : WakeStats{0, 0, 0, false, true};
+}
+auto Window::request_frame_signal() -> Result<Serial,FrameSignalError> {
+    if (impl_->wayland.is_some()) {
+        auto &window=**impl_->wayland;
+        if (window.frame_signal_pending()) return Err(FrameSignalError::Busy);
+        auto result=window.request_frame_signal();
+        if (result.is_err()) return Err(FrameSignalError::Failed);
+        return Ok(result.unwrap());
+    }
+    return Err(impl_->x11.is_some() ? FrameSignalError::Unsupported : FrameSignalError::Unavailable);
+}
+auto Window::frame_signal(Serial token) const -> Option<bool> {
+    return impl_->wayland.is_some() ? (*impl_->wayland)->frame_signal(token) : None<bool>();
+}
+auto Window::cancel_frame_signal(Serial token) -> bool {
+    return impl_->wayland.is_some() && (*impl_->wayland)->cancel_frame_signal(token);
 }
 void Window::set_input_tracing(bool enabled) {
     impl_->trace_input = enabled;

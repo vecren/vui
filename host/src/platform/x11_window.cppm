@@ -90,6 +90,10 @@ class X11Window {
         window_ = ffi::x11::XCreateSimpleWindow(native, root, 0, 0, width, height, 0, 0, 0);
         if (!window_)
             return fail(X11WindowError::Window);
+        ffi::x11::XSizeHints hints{};
+        hints.flags = ffi::x11::gravity_hint;
+        hints.win_gravity = ffi::x11::static_gravity;
+        ffi::x11::XSetWMNormalHints(native, window_, &hints);
         protocols_ = ffi::x11::XInternAtom(native, "WM_PROTOCOLS", 0);
         delete_window_ = ffi::x11::XInternAtom(native, "WM_DELETE_WINDOW", 0);
         supported_atom_ = ffi::x11::XInternAtom(native, "_NET_SUPPORTED", 0);
@@ -139,8 +143,11 @@ class X11Window {
         if (!window_) return Err(X11WindowError::State);
         if (width > 32768 || height > 32768) return Err(X11WindowError::InvalidSize);
         ffi::x11::XSizeHints hints{};
+        long supplied{};
+        (void)ffi::x11::XGetWMNormalHints(connection_.display(), window_, &hints, &supplied);
+        hints.flags &= ~ffi::x11::min_size_hint;
         if (width || height) {
-            hints.flags = ffi::x11::min_size_hint;
+            hints.flags |= ffi::x11::min_size_hint;
             hints.min_width = int(width); hints.min_height = int(height);
         }
         ffi::x11::XSetWMNormalHints(connection_.display(), window_, &hints);

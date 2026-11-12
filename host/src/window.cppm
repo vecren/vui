@@ -9,6 +9,7 @@ enum class WindowPositionResult { Requested, Unsupported, Failed };
 enum class WindowMode { Windowed, Fullscreen };
 enum class WindowModeError { Unavailable, Unsupported, InvalidValue, Failed };
 enum class WindowActionError { Unavailable, Unsupported, Failed };
+enum class FrameSignalError { Unavailable, Unsupported, Busy, Failed };
 struct WindowEvents {
     Vec<InputEvent> input;
     SurfaceInfo surface;
@@ -41,6 +42,10 @@ class Window final : public gpu::SurfaceHost {
     auto timing() const -> FrameTiming;
     auto frame_waker() const -> Option<FrameWaker>;
     auto wake_stats() const -> WakeStats;
+    // Wayland signals after the next surface commit; false is pending, true is ready.
+    auto request_frame_signal() -> Result<Serial,FrameSignalError>;
+    auto frame_signal(Serial token) const -> Option<bool>;
+    auto cancel_frame_signal(Serial token) -> bool;
     // Stamps are taken on native queue insertion; toggling does not change queued events.
     void set_input_tracing(bool enabled);
     auto capture(PointerKind kind, bool enabled) -> NativeCaptureResult;

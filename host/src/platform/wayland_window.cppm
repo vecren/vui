@@ -15,6 +15,9 @@ class WaylandWindow {
     friend struct WaylandWindowTest;
     WaylandConnection connection_;
     ffi::wayland::wl_surface *surface_{};
+    ffi::wayland::wl_callback *frame_signal_{};
+    Serial frame_signal_token_{};
+    bool frame_signal_ready_{};
     ffi::xdg_shell::xdg_surface *xdg_{};
     ffi::xdg_shell::xdg_toplevel *toplevel_{};
     rstd::uint32_t width_{}, height_{}, pending_width_{}, pending_height_{};
@@ -80,6 +83,12 @@ class WaylandWindow {
         static_cast<WaylandWindow *>(data)->connection_.outputs().leave(output);
     }
     ffi::wayland::wl_surface_listener surface_output_listener_{enter_output, leave_output};
+    static void frame_done(void *data, ffi::wayland::wl_callback *callback, rstd::uint32_t) {
+        auto &self=*static_cast<WaylandWindow *>(data);
+        ffi::wayland::wl_callback_destroy(callback);
+        self.frame_signal_=nullptr; self.frame_signal_ready_=true;
+    }
+    ffi::wayland::wl_callback_listener frame_listener_{frame_done};
 
     void apply_configure() {
         if (pending_mode_known_ && !fullscreen_ && pending_fullscreen_) {
@@ -196,6 +205,30 @@ class WaylandWindow {
             return Err(WaylandWindowError::Protocol);
         return Ok(empty{});
     }
+    auto request_frame_signal() -> Result<Serial,WaylandWindowError> {
+        if (!surface_ || frame_signal_) return Err(WaylandWindowError::State);
+        auto callback=ffi::wayland::wl_surface_frame(surface_);
+        if (!callback) return Err(WaylandWindowError::Protocol);
+        if (ffi::wayland::wl_callback_add_listener(callback,&frame_listener_,this)) {
+            ffi::wayland::wl_callback_destroy(callback); return Err(WaylandWindowError::Listener);
+        }
+        frame_signal_=callback; frame_signal_token_=new_session(); frame_signal_ready_=false;
+        return Ok(Serial(frame_signal_token_));
+    }
+    auto frame_signal(Serial token) const -> Option<bool> {
+        if (!token || token!=frame_signal_token_) return None();
+        return Some(bool(frame_signal_ready_));
+    }
+    auto frame_signal_pending() const -> bool { return frame_signal_!=nullptr; }
+    auto cancel_frame_signal(Serial token) -> bool {
+        if (!token || token!=frame_signal_token_) return false;
+        clear_frame_signal();
+        return true;
+    }
+    void clear_frame_signal() {
+        if (frame_signal_) ffi::wayland::wl_callback_destroy(frame_signal_);
+        frame_signal_=nullptr; frame_signal_token_=0; frame_signal_ready_=false;
+    }
     auto resize(rstd::uint32_t width, rstd::uint32_t height) -> Result<empty, WaylandWindowError> {
         if (!surface_) return Err(WaylandWindowError::State);
         if (fullscreen_) return Err(WaylandWindowError::State);
@@ -238,6 +271,7 @@ class WaylandWindow {
     }
     void close() {
         connection_.input().close();
+        clear_frame_signal();
         if (fractional_) ffi::wayland_fractional::fractional_destroy(fractional_);
         if (viewport_) ffi::wayland_fractional::viewport_destroy(viewport_);
         fractional_ = nullptr; viewport_ = nullptr;

@@ -17,6 +17,9 @@ inline auto wl_compositor_create_surface(::wl_compositor *c) {
 inline void wl_compositor_destroy(::wl_compositor *c) { ::wl_compositor_destroy(c); }
 inline void wl_surface_destroy(::wl_surface *s) { ::wl_surface_destroy(s); }
 inline void wl_surface_commit(::wl_surface *s) { ::wl_surface_commit(s); }
+inline auto wl_surface_frame(::wl_surface *s) { return ::wl_surface_frame(s); }
+inline auto wl_callback_add_listener(::wl_callback *c, const ::wl_callback_listener *l, void *p) { return ::wl_callback_add_listener(c, l, p); }
+inline void wl_callback_destroy(::wl_callback *c) { ::wl_callback_destroy(c); }
 inline auto wl_surface_add_listener(::wl_surface *s, const ::wl_surface_listener *l, void *p) { return ::wl_surface_add_listener(s, l, p); }
 inline auto wl_surface_get_version(::wl_surface *s) { return ::wl_surface_get_version(s); }
 inline void wl_surface_set_buffer_scale(::wl_surface *s, int32_t scale) { ::wl_surface_set_buffer_scale(s, scale); }
@@ -61,6 +64,8 @@ export module vui.host:ffi.wayland;
 
 export namespace vui::host::ffi::wayland {
 using ::wl_array;
+using ::wl_callback;
+using ::wl_callback_listener;
 using ::wl_compositor;
 using ::wl_compositor_interface;
 using ::wl_display;
@@ -110,6 +115,9 @@ using ::vui_wayland_inline::wl_registry_add_listener;
 using ::vui_wayland_inline::wl_registry_bind;
 using ::vui_wayland_inline::wl_registry_destroy;
 using ::vui_wayland_inline::wl_surface_commit;
+using ::vui_wayland_inline::wl_surface_frame;
+using ::vui_wayland_inline::wl_callback_add_listener;
+using ::vui_wayland_inline::wl_callback_destroy;
 using ::vui_wayland_inline::wl_surface_destroy;
 using ::vui_wayland_inline::wl_surface_add_listener;
 using ::vui_wayland_inline::wl_surface_get_version;

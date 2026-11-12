@@ -120,15 +120,22 @@ class WaylandInput {
         flush_axis();
         InputEvent event; event.type = EventType::DeviceLost; event.device = pointer_device_;
         emit(rstd::move(event));
+        pointer_device_ = new_session();
         pointer_focused_ = false;
         pointer_buttons_ = 0;
         if (wl::wl_pointer_get_version(pointer_) >= wl::pointer_release_version) wl::wl_pointer_release(pointer_);
         else wl::wl_pointer_destroy(pointer_);
         pointer_ = nullptr;
     }
+    void lose_touch() {
+        cancel_contacts();
+        InputEvent event; event.type = EventType::DeviceLost; event.device = touch_device_;
+        emit(rstd::move(event));
+        touch_device_ = new_session();
+    }
     void release_touch() {
         if (!touch_) return;
-        cancel_contacts();
+        lose_touch();
         if (wl::wl_touch_get_version(touch_) >= wl::touch_release_version) wl::wl_touch_release(touch_);
         else wl::wl_touch_destroy(touch_);
         touch_ = nullptr;
