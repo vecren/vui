@@ -61,14 +61,13 @@ class Panel {
         session_.motion().request(motion_.id).unwrap();
     }
     auto label(UiId parent, ref<str> text, Point origin, Scalar size, Color color) -> UiId {
-        auto style = examples::block(0, 0, {0, 0, 0, 0});
-        style.layout.width = None();
-        style.layout.height = None();
-        style.transform = {1, 0, 0, 1, origin.x, origin.y};
-        style.hit_test_visible = false;
+        auto style = NodeStyleBuilder{}
+                         .transform({1, 0, 0, 1, origin.x, origin.y})
+                         .hit_test_visible(false)
+                         .build();
         auto id = ui().append<Text>(parent, style).unwrap();
         ui().set_text(id, text).unwrap();
-        ui().set_text_format(id, {.size = size}).unwrap();
+        ui().set_text_format(id, TextFormatBuilder{}.size(size).build()).unwrap();
         ui().set_text_color(id, color).unwrap();
         return id;
     }
@@ -79,36 +78,41 @@ class Panel {
         ui().set_text_service(Box<TextService>::from_raw(
                                   rstd::move(service).into_raw().template cast<TextService>()))
             .unwrap();
-        auto style = examples::block(640, 520, {.91f, .94f, .97f, 1});
-        style.focusable = true;
+        auto style = NodeStyleBuilder{examples::block(640, 520, {.91f, .94f, .97f, 1})}
+                         .focusable(true)
+                         .build();
         root_ = ui().create<Stack>(style).unwrap();
         label(root_, "跟手交互 / Drag"_str, {32, 100}, 25, {.08f, .15f, .23f, 1});
         label(root_, "拖动把手，松手后继续运动。"_str, {32, 155}, 17, {.25f, .34f, .43f, 1});
         label(root_, "运动中再次抓取；空格展开或收起。"_str, {32, 190}, 17, {.25f, .34f, .43f, 1});
-        auto curtain = examples::block(640, 520, {0, 0, 0, 1});
-        curtain.opacity = 0;
-        curtain.hit_test_visible = false;
+        auto curtain = NodeStyleBuilder{examples::block(640, 520, {0, 0, 0, 1})}
+                           .opacity(0)
+                           .hit_test_visible(false)
+                           .build();
         curtain_ = ui().append<Rectangle>(root_, curtain).unwrap();
-        auto shade = examples::block(640, height_, {.08f, .15f, .23f, 1});
-        shade.transform = {1, 0, 0, 1, 0, 40 - height_};
-        shade.radius = 16;
+        auto shade = NodeStyleBuilder{examples::block(640, height_, {.08f, .15f, .23f, 1})}
+                         .transform({1, 0, 0, 1, 0, 40 - height_})
+                         .radius(16)
+                         .build();
         shade_ = ui().append<Stack>(root_, shade).unwrap();
         label(shade_, "用户定义的面板"_str, {30, 35}, 24, {1, 1, 1, 1});
         label(shade_, "滚动到边缘，再拖动面板。"_str, {30, 83}, 17, {.73f, .84f, .91f, 1});
-        auto viewport = examples::block(580, 168, {0, 0, 0, 0});
-        viewport.transform = {1, 0, 0, 1, 30, 116};
+        auto viewport = NodeStyleBuilder{examples::block(580, 168, {0, 0, 0, 0})}
+                            .transform({1, 0, 0, 1, 30, 116})
+                            .build();
         content_root_ = ui().append<Viewport>(shade_, viewport).unwrap();
-        NodeStyle column;
-        column.layout.gap = 10;
+        auto column = NodeStyleBuilder{}.gap(10).build();
         auto body = ui().append<Column>(content_root_, column).unwrap();
         for (unsigned i{}; i < 5; ++i) {
-            auto tile = examples::block(580, 64, {.16f + .03f * i, .34f, .46f, 1});
-            tile.radius = 12;
+            auto tile = NodeStyleBuilder{examples::block(580, 64, {.16f + .03f * i, .34f, .46f, 1})}
+                            .radius(12)
+                            .build();
             ui().append<Rectangle>(body, tile).unwrap();
         }
-        auto handle = examples::block(64, 5, {.65f, .76f, .84f, 1});
-        handle.transform = {1, 0, 0, 1, 288, height_ - 22};
-        handle.radius = 2.5;
+        auto handle = NodeStyleBuilder{examples::block(64, 5, {.65f, .76f, .84f, 1})}
+                          .transform({1, 0, 0, 1, 288, height_ - 22})
+                          .radius(2.5)
+                          .build();
         handle_ = ui().append<Rectangle>(shade_, handle).unwrap();
     }
     static auto make(UiSession &session) -> rstd::rc::Rc<Panel>;
@@ -126,9 +130,11 @@ class Panel {
         auto style = ui().base_style(root_).unwrap().layout;
         if (style.width != Some(Scalar(surface.logical_size.width)) ||
             style.height != Some(Scalar(surface.logical_size.height))) {
-            style.width = Some(Scalar(surface.logical_size.width));
-            style.height = Some(Scalar(surface.logical_size.height));
-            ui().set_layout(root_, style).unwrap();
+            ui().set_layout(root_, LayoutStyleBuilder{style}
+                                      .width(surface.logical_size.width)
+                                      .height(surface.logical_size.height)
+                                      .build())
+                .unwrap();
         }
         auto height =
             rstd::min(Scalar(340), rstd::cmp::max(Scalar(180), surface.logical_size.height - 40));
@@ -136,13 +142,14 @@ class Panel {
         height_ = height;
         UiId responsive[] = {shade_, curtain_, content_root_};
         for (auto id : responsive) {
-            auto layout = ui().base_style(id).unwrap().layout;
-            layout.width = Some(id == content_root_
-                                    ? rstd::cmp::max(Scalar(0), surface.logical_size.width - 60)
-                                    : surface.logical_size.width);
-            layout.height = Some(id == curtain_ ? surface.logical_size.height
-                                 : id == shade_ ? height_
-                                                : height_ - 172);
+            auto layout = LayoutStyleBuilder{ui().base_style(id).unwrap().layout}
+                              .width(id == content_root_
+                                         ? rstd::cmp::max(Scalar(0), surface.logical_size.width - 60)
+                                         : surface.logical_size.width)
+                              .height(id == curtain_ ? surface.logical_size.height
+                                      : id == shade_ ? height_
+                                                     : height_ - 172)
+                              .build();
             if (layout != ui().base_style(id).unwrap().layout)
                 ui().set_layout(id, layout).unwrap();
         }

@@ -31,7 +31,9 @@ struct SkinnedButton {
     static auto create(UiSession &session, UiId parent, NodeStyle style, ImageRegion frame,
                        NinePatchSpec border, Option<ImageRegion> icon = {})
         -> Result<SkinnedButton, ControlError> {
-        auto created = Button::create(session, style, {}, {.appearance = ButtonAppearance::Custom});
+        auto created = Button::create(
+            session, style, {},
+            ButtonOptionsBuilder{}.appearance(ButtonAppearance::Custom).build());
         if (created.is_err())
             return Err(created.unwrap_err());
         auto id = created.unwrap();

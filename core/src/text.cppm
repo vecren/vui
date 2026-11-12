@@ -31,6 +31,7 @@ using vectext::TextAlignment;
 using vectext::TextAffinity;
 using vectext::TextRequest;
 using vectext::TextFormat;
+using vectext::TextFormatBuilder;
 using vectext::TextSpacing;
 using vectext::TextSpacingUnit;
 using vectext::TextSpacingArithmetic;

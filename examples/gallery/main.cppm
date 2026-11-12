@@ -37,34 +37,37 @@ int main(int argc, char **argv) {
           Box<TextService>::from_raw(rstd::move(service).into_raw().template cast<TextService>()))
         .unwrap();
     auto text_label = [&](UiId parent, ref<str> value, Point position, Scalar size = 16) {
-        NodeStyle style;
-        style.transform = {1, 0, 0, 1, position.x, position.y};
-        style.hit_test_visible = false;
+        auto style = NodeStyleBuilder{}
+                         .transform({1, 0, 0, 1, position.x, position.y})
+                         .hit_test_visible(false)
+                         .build();
         auto label = ui.append<Text>(parent, style).unwrap();
         ui.set_text(label, value).unwrap();
-        ui.set_text_format(label, {.size = size}).unwrap();
+        ui.set_text_format(label, TextFormatBuilder{}.size(size).build()).unwrap();
         ui.set_text_color(label, {0.8f, 0.9f, 1, 1}).unwrap();
         return label;
     };
     auto root = ui.create<Stack>(block(32768, 32768, {0.025f, 0.035f, 0.05f, 1})).unwrap();
-    auto panel_style = block(520, 300, {0.06f, 0.08f, 0.1f, 1}, 16);
-    panel_style.transform = {1, 0, 0, 1, 60, 60};
+    auto panel_style = NodeStyleBuilder{block(520, 300, {0.06f, 0.08f, 0.1f, 1}, 16)}
+                           .transform({1, 0, 0, 1, 60, 60})
+                           .build();
     auto panel = ui.append<Rectangle>(root, panel_style).unwrap();
     (void)panel;
     text_label(root, "拖动色块 · 滚动列表 · Tab 切换焦点"_str, {80, 320}, 16);
     auto multilingual = text_label(root, "Hello 世界\nسلام · café · é"_str, {100, 205}, 22);
-    ui.set_layout(multilingual, {.width = Some(Scalar(260))}).unwrap();
-    auto picture_style = block(120, 80, {0, 0, 0, 0});
-    picture_style.transform = {1, 0, 0, 1, 230, 100};
-    picture_style.hit_test_visible = false;
+    ui.set_layout(multilingual, LayoutStyleBuilder{}.width(260).build()).unwrap();
+    auto picture_style = NodeStyleBuilder{block(120, 80, {0, 0, 0, 0})}
+                             .transform({1, 0, 0, 1, 230, 100})
+                             .hit_test_visible(false)
+                             .build();
     auto picture = ui.append<Image>(root, picture_style).unwrap();
     ui.set_image(picture, Some(make_sample_image())).unwrap();
     text_label(root, "Image · RGBA"_str, {248, 182}, 12);
-    auto tile_style = block(100, 72, {0.05f, 0.4f, 0.7f, 1}, 12);
     Point position{100, 110}, grab;
-    tile_style.transform.tx = position.x;
-    tile_style.transform.ty = position.y;
-    tile_style.focusable = true;
+    auto tile_style = NodeStyleBuilder{block(100, 72, {0.05f, 0.4f, 0.7f, 1}, 12)}
+                          .transform({1, 0, 0, 1, position.x, position.y})
+                          .focusable(true)
+                          .build();
     auto tile = ui.append<Rectangle>(root, tile_style).unwrap();
     ui.mount(root).unwrap();
     pulse(ui, picture, .3);
@@ -118,8 +121,9 @@ int main(int argc, char **argv) {
                     .unwrap();
             })
         .unwrap();
-    auto button_style = block(100, 44, {});
-    button_style.transform = {1, 0, 0, 1, 400, 260};
+    auto button_style = NodeStyleBuilder{block(100, 44, {})}
+                            .transform({1, 0, 0, 1, 400, 260})
+                            .build();
     auto reset_button =
         examples::SkinnedButton::create(session, root, button_style,
                                         ImageRegion::whole(examples::make_button_frame()),
@@ -135,10 +139,12 @@ int main(int argc, char **argv) {
     auto scroll_content = ui.create<Column>().unwrap();
     for (unsigned i = 0; i < 12; ++i) {
         auto item = Button::create(session, block(100, 34, {}),
-                                   {{0.04f, 0.1f + 0.03f * i, 0.25f, 1},
-                                    {0.1f, 0.6f, 0.25f, 1},
-                                    {0.2f, 0.4f, 0.65f, 1},
-                                    3})
+                                   ButtonStyleBuilder{}
+                                       .normal({0.04f, 0.1f + 0.03f * i, 0.25f, 1})
+                                       .pressed({0.1f, 0.6f, 0.25f, 1})
+                                       .focused({0.2f, 0.4f, 0.65f, 1})
+                                       .radius(3)
+                                       .build())
                         .unwrap();
         ui.attach(scroll_content, item).unwrap();
         auto title = rstd::format("项目 {:02}", i + 1);
@@ -151,10 +157,14 @@ int main(int argc, char **argv) {
                     .unwrap();
             }).unwrap());
     }
-    auto scroll_style = block(100, 150, {});
-    scroll_style.transform = {1, 0, 0, 1, 400, 85};
-    scroll_style.clip = {true, {0, 0, 100, 150}, 6};
-    auto scroll = ScrollView::create(session, scroll_content, scroll_style).unwrap();
+    auto scroll_style = NodeStyleBuilder{block(100, 150, {})}
+                            .transform({1, 0, 0, 1, 400, 85})
+                            .clip({true, {0, 0, 100, 150}, 6})
+                            .build();
+    auto scroll = ScrollView::create(
+                      session, scroll_content, scroll_style,
+                      ScrollStyleBuilder{}.line_step(40).wheel_mode(ScrollWheelMode::Direct).build())
+                      .unwrap();
     ui.attach(root, scroll).unwrap();
     rstd::io::println("Drag the tile; Tab selects controls; arrows move the tile. Wheel over "
                       "the right list "

@@ -2,6 +2,7 @@ export module vui;
 export import rstd;
 export import :types;
 export import :node.types;
+export import :style.builder;
 export import :diagnostics;
 export import :display_list;
 export import :composition;

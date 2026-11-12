@@ -2,6 +2,7 @@ export module vui.controls;
 export import vui;
 export import :types;
 export import :button;
+export import :builders;
 export import :scroll_view;
 export import :scrollbar;
 export import :slider;

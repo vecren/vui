@@ -65,25 +65,35 @@ class View {
     }
     auto label(UiId parent, ref<str> text, Scalar size, Point at, bool bold = false,
                Color tint = ink) -> UiId {
-        NodeStyle style;
-        style.transform.tx = at.x;
-        style.transform.ty = at.y;
-        style.hit_test_visible = false;
+        auto style = NodeStyleBuilder{}
+                         .transform({1, 0, 0, 1, at.x, at.y})
+                         .hit_test_visible(false)
+                         .build();
         auto id = ui().append<Text>(parent, style).unwrap();
         ui().set_text(id, text).unwrap();
-        ui().set_text_format(id, {.size = size, .wrap = TextWrap::None, .bold = bold}).unwrap();
+        ui().set_text_format(
+                id, TextFormatBuilder{}.size(size).wrap(TextWrap::None).bold(bold).build())
+            .unwrap();
         ui().set_text_color(id, tint).unwrap();
         return id;
     }
     auto button(ref<str> title, Scalar x) -> UiId {
-        auto style = examples::block(210, 48, {});
-        style.transform = {1, 0, 0, 1, x, 562};
+        auto style = NodeStyleBuilder{}.width(210).height(48).transform({1, 0, 0, 1, x, 562}).build();
         auto id =
-            Button::create(session_, style, {ink, {.01, .025, .05, 1}, {.035, .12, .26, 1}, 10})
+            Button::create(session_, style,
+                           ButtonStyleBuilder{}
+                               .normal(ink)
+                               .pressed({.01, .025, .05, 1})
+                               .focused({.035, .12, .26, 1})
+                               .radius(10)
+                               .build())
                 .unwrap();
         ui().attach(panel_, id).unwrap();
         auto text = label(id, title, 17, {}, true, {1, 1, 1, 1});
-        ui().set_layout(text, {.horizontal = Alignment::Center, .vertical = Alignment::Center})
+        ui().set_layout(text, LayoutStyleBuilder{}
+                                  .horizontal(Alignment::Center)
+                                  .vertical(Alignment::Center)
+                                  .build())
             .unwrap();
         return id;
     }
@@ -99,16 +109,20 @@ class View {
             auto value = game_.board().cells[i];
             if (!value)
                 continue;
-            auto style = examples::block(cell, cell, color(value), 10);
-            style.transform = position(i);
-            style.hit_test_visible = false;
+            auto style = NodeStyleBuilder{examples::block(cell, cell, color(value), 10)}
+                             .transform(position(i))
+                             .hit_test_visible(false)
+                             .build();
             auto tile = ui().append<Stack>(board_, style).unwrap();
             tiles_[i] = Some(tile);
             auto number = rstd::format("{}", value);
             Scalar size = value < 128 ? 40 : value < 1024 ? 34 : value < 16384 ? 28 : 19;
             auto text = label(tile, number.as_str(), size, {}, true,
                               value == 32 || value == 64 || value > 2048 ? Color{1, 1, 1, 1} : ink);
-            ui().set_layout(text, {.horizontal = Alignment::Center, .vertical = Alignment::Center})
+            ui().set_layout(text, LayoutStyleBuilder{}
+                                      .horizontal(Alignment::Center)
+                                      .vertical(Alignment::Center)
+                                      .build())
                 .unwrap();
         }
     }
@@ -219,8 +233,9 @@ class View {
         ui().set_text_service(Box<TextService>::from_raw(
                                   rstd::move(service).into_raw().template cast<TextService>()))
             .unwrap();
-        auto root_style = examples::block(520, 720, background);
-        root_style.focusable = true;
+        auto root_style = NodeStyleBuilder{examples::block(520, 720, background)}
+                              .focusable(true)
+                              .build();
         root_ = ui().create<CustomLayout>(root_style).unwrap();
         ui().install_layout(
                 root_,
@@ -230,13 +245,15 @@ class View {
         label(panel_, "2048"_str, 54, {0, 0}, true);
         label(panel_, "得分"_str, 14, {330, 8});
         score_ = label(panel_, "0"_str, 28, {330, 28}, true);
-        auto style = examples::block(board_size, board_size, {.729, .788, .851, 1}, 16);
-        style.transform.ty = 86;
+        auto style = NodeStyleBuilder{examples::block(board_size, board_size, {.729, .788, .851, 1}, 16)}
+                         .transform({1, 0, 0, 1, 0, 86})
+                         .build();
         board_ = ui().append<Stack>(panel_, style).unwrap();
         for (unsigned i = 0; i < 16; ++i) {
-            auto slot = examples::block(cell, cell, {.82, .87, .92, 1}, 10);
-            slot.transform = position(i);
-            slot.hit_test_visible = false;
+            auto slot = NodeStyleBuilder{examples::block(cell, cell, {.82, .87, .92, 1}, 10)}
+                            .transform(position(i))
+                            .hit_test_visible(false)
+                            .build();
             ui().append<Rectangle>(board_, slot).unwrap();
         }
         message_ = label(panel_, ""_str, 16, {0, 538});
@@ -294,7 +311,8 @@ class View {
         auto size = surface.logical_size;
         if (size.width <= 0 || size.height <= 0)
             return;
-        ui().set_layout(root_, {.width = Some(size.width), .height = Some(size.height)}).unwrap();
+        ui().set_layout(root_, LayoutStyleBuilder{}.width(size.width).height(size.height).build())
+            .unwrap();
     }
 };
 } // namespace game2048
