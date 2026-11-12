@@ -8,7 +8,7 @@ enum class ContentColorSpace { LinearSrgb, Srgb };
 enum class ContentAlpha { Opaque, Premultiplied, Straight };
 enum class ContentOrigin { TopLeft, BottomLeft };
 enum class ContentFormat { Rgba8Unorm, Rgba8Srgb, Bgra8Unorm, Bgra8Srgb, Rgba16Float, R11G11B10Float };
-enum class ContentError { InvalidValue, WrongProducer, StaleFrame, Closed, Limit };
+enum class ContentError { InvalidValue, WrongProducer, StaleFrame, Closed, Limit, Busy };
 struct TextureFrameInfo {
     Serial producer_session{}, frame_version{}, device_epoch{};
     Index width{}, height{};

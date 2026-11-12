@@ -22,6 +22,11 @@ class ThreadedApplication {
         (void)renderer_.shutdown(5'000'000'000);
     }
     auto session() -> UiSession & { return session_; }
+    // Producer contexts obtain a shared device before the renderer thread starts.
+    auto device_session() const -> Result<vrento::vulkan::DeviceSession, gpu::Error> {
+        if (!opened_ || active_) return Err(gpu::Error{gpu::Stage::State});
+        return renderer_.device_session();
+    }
     auto frame_waker() const -> Option<FrameWaker> { return window_.frame_waker(); }
     auto backend() const -> WindowBackend { return window_.backend(); }
     auto resize(Index width, Index height) -> Result<empty, gpu::Error> { return window_.resize(width, height); }

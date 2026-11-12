@@ -21,6 +21,10 @@ class NativeTextureFrame {
         -> Result<TextureFrame, ContentError> {
         if (!view.valid() || !view.permits(false))
             return Err(ContentError::InvalidValue);
+        auto shared = view.share_read();
+        if (shared.is_err()) return Err(shared.unwrap_err().kind == vrento::texture::ErrorKind::Busy
+                                            ? ContentError::Busy : ContentError::InvalidValue);
+        view = rstd::move(shared).unwrap();
         const auto &desc = view.texture().description();
         const auto range = view.description().range;
         if (view.description().dimension != vrento::texture::Dimension::D2 ||
@@ -57,7 +61,7 @@ class NativeTextureFrame {
             info.color_space != ContentColorSpace::Srgb)
             return Err(ContentError::InvalidValue);
         return TextureFrame::make(info,
-                                  NativeTextureFrame(rstd::move(view), info));
+                                  NativeTextureFrame(rstd::move(view), info), true);
     }
 };
 } // namespace vui::gpu
