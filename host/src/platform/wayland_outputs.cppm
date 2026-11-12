@@ -1,6 +1,6 @@
 module vui.host:platform.wayland_outputs;
 import :ffi.wayland;
-import :ffi.wayland_output;
+import vui.host.wayland.wayland_output;
 import :display;
 import rstd;
 

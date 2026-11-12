@@ -1,9 +1,9 @@
 module vui.host:platform.wayland_window;
 import :platform.wayland;
 import :ffi.wayland;
-import :ffi.xdg_shell;
-import :ffi.xdg_decoration;
-import :ffi.wayland_fractional;
+import vui.host.wayland.xdg_shell;
+import vui.host.wayland.xdg_decoration;
+import vui.host.wayland.wayland_fractional;
 import :display;
 import rstd;
 

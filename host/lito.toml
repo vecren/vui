@@ -2,25 +2,53 @@
 name = "vui-host"
 version.workspace = true
 license.workspace = true
+target = { os = ["linux", "windows"] }
 
 [lib]
 name = "vui-host"
 module = "vui.host"
 archive = "vui-host"
-sources = ["src/lib.cppm", "src/display.cppm", "src/frames.cppm", "src/runner.cppm", "src/window.cppm", "src/window.cpp", "src/application.cppm", "src/ffi/linux.cppm", "src/ffi/locale.cppm", "src/ffi/wayland.cppm", "src/ffi/wayland_data.cppm", "src/ffi/wayland_fractional.cppm", "src/ffi/wayland_output.cppm", "src/ffi/xdg_shell.cppm", "src/ffi/xdg_decoration.cppm", "src/ffi/text_input.cppm", "src/ffi/x11.cppm", "src/ffi/xcb.cppm", "src/ffi/xcb_randr.cppm", "src/ffi/xi2.cppm", "src/ffi/xkb.cppm", "src/ffi/vulkan.cppm", "src/platform/input_clock.cppm", "src/platform/input_queue.cppm", "src/platform/keys.cppm", "src/platform/keyboard_text.cppm", "src/platform/wayland_text.cppm", "src/platform/wayland_clipboard.cppm", "src/platform/wayland_outputs.cppm", "src/platform/wayland_input.cppm", "src/platform/wayland.cppm", "src/platform/wayland_window.cppm", "src/platform/x11.cppm", "src/platform/x11_clipboard.cppm", "src/platform/x11_clipboard_owner.cppm", "src/platform/x11_state.cppm", "src/platform/x11_displays.cppm", "src/platform/x11_input.cppm", "src/platform/x11_preedit.cppm", "src/platform/x11_text.cppm", "src/platform/x11_window.cppm"]
+sources = [
+    "src/lib.cppm", "src/display.cppm", "src/frames.cppm", "src/runner.cppm",
+    "src/window.cppm", "src/application.cppm", "src/platform/input_clock.cppm",
+    "src/platform/input_queue.cppm",
+]
+when = [
+    { condition = 'target.os == "linux"', source-groups = ["linux"] },
+    { condition = 'target.os == "windows"', source-groups = ["windows"] },
+]
+
+[source-groups.linux]
+sources = [
+    "src/window.cpp", "src/ffi/linux.cppm", "src/ffi/locale.cppm", "src/ffi/wayland.cppm",
+    "src/ffi/wayland_data.cppm",
+    "src/ffi/x11.cppm", "src/ffi/xcb.cppm", "src/ffi/xcb_randr.cppm", "src/ffi/xi2.cppm",
+    "src/ffi/xkb.cppm", "src/ffi/vulkan.cppm", "src/platform/keys.cppm", "src/platform/keyboard_text.cppm",
+    "src/platform/wayland_text.cppm", "src/platform/wayland_clipboard.cppm", "src/platform/wayland_outputs.cppm",
+    "src/platform/wayland_input.cppm", "src/platform/wayland.cppm", "src/platform/wayland_window.cppm",
+    "src/platform/x11.cppm", "src/platform/x11_clipboard.cppm", "src/platform/x11_clipboard_owner.cppm",
+    "src/platform/x11_state.cppm", "src/platform/x11_displays.cppm", "src/platform/x11_input.cppm",
+    "src/platform/x11_preedit.cppm", "src/platform/x11_text.cppm", "src/platform/x11_window.cppm",
+]
+
+[source-groups.windows]
+sources = ["src/window_win32.cpp", "src/ffi/win32.cppm", "src/ffi/vulkan_win32.cppm", "src/platform/win32_text.cppm", "src/platform/win32_window.cppm"]
+
+[[when]]
+condition = 'target.os == "windows"'
+[when.usage]
+system-libraries = ["user32", "gdi32", "imm32", "vulkan-1"]
 
 [dependencies]
+vui-host-wayland = { path = "wayland", condition = 'target.os == "linux"' }
 vui-render = { workspace = true, pub = true }
 rstd-nostd = { workspace = true, usage = "link" }
 
 [external-dependencies.pkg-config]
-wayland-client = { module = "wayland-client" }
-x11 = { module = "x11" }
-xcb = { module = "xcb" }
-xcb-randr = { module = "xcb-randr" }
-xi = { module = "xi", version = ">= 1.7" }
-xkbcommon = { module = "xkbcommon" }
-vulkan = { module = "vulkan" }
-
-[build-tools.wayland-scanner]
-path = "wayland-scanner"
+wayland-client = { module = "wayland-client", condition = 'target.os == "linux"' }
+x11 = { module = "x11", condition = 'target.os == "linux"' }
+xcb = { module = "xcb", condition = 'target.os == "linux"' }
+xcb-randr = { module = "xcb-randr", condition = 'target.os == "linux"' }
+xi = { module = "xi", version = ">= 1.7", condition = 'target.os == "linux"' }
+xkbcommon = { module = "xkbcommon", condition = 'target.os == "linux"' }
+vulkan = { module = "vulkan", condition = 'target.os == "linux"' }

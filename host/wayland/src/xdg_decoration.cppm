@@ -25,7 +25,7 @@ inline constexpr auto server_side_mode = ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER
 inline constexpr auto client_side_mode = ZXDG_TOPLEVEL_DECORATION_V1_MODE_CLIENT_SIDE;
 }
 
-export module vui.host:ffi.xdg_decoration;
+export module vui.host.wayland.xdg_decoration;
 export namespace vui::host::ffi::xdg_decoration {
 using ::zxdg_decoration_manager_v1;
 using ::zxdg_decoration_manager_v1_interface;

@@ -1,4 +1,4 @@
-local target = lito.target({ kind = "lib", name = "vui-host" })
+local target = lito.target({ kind = "lib", name = "vui-host-wayland" })
 local scanner = lito.tool("wayland-scanner")
 local xml = "protocol/xdg-shell.xml"
 

@@ -325,6 +325,7 @@ class EventRouter {
                        input.type == EventType::PointerLeave || input.type == EventType::TextInputCancelled;
         bool pointer_input = input.type != EventType::KeyDown && input.type != EventType::KeyUp &&
                              input.type != EventType::TextInput && input.type != EventType::TextEditing &&
+                             input.type != EventType::TextTransaction &&
                              input.type != EventType::TextInputCancelled &&
                              input.type != EventType::ClipboardResult &&
                              input.type != EventType::ClipboardWriteResult &&

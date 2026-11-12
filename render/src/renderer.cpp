@@ -419,11 +419,11 @@ struct ScopeBackend {
 auto resolve_items(OwnedFrame &frame, GlyphCache &cache, ImageCache &images, Index max_extent,
                    const vk::DeviceSession &session) -> Result<empty, Error> {
     auto surface = frame.plan.surface();
-    auto raster_scale = std::max(Scalar(frame.extent.width) / surface.logical_size.width,
+    auto raster_scale = rstd::cmp::max(Scalar(frame.extent.width) / surface.logical_size.width,
                                  Scalar(frame.extent.height) / surface.logical_size.height);
     if (!finite(raster_scale) || raster_scale <= 0)
         return Err(Error{Stage::State});
-    auto coverage_scale = std::min(Scalar(frame.extent.width) / surface.logical_size.width,
+    auto coverage_scale = rstd::cmp::min(Scalar(frame.extent.width) / surface.logical_size.width,
                                    Scalar(frame.extent.height) / surface.logical_size.height);
     Serial total{};
     for (usize pass{}; pass < frame.plan.pass_count(); ++pass) {

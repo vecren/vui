@@ -10,7 +10,7 @@ inline auto version(zxdg_output_v1 *output) { return zxdg_output_v1_get_version(
 inline void destroy(zxdg_output_v1 *output) { zxdg_output_v1_destroy(output); }
 inline void destroy_manager(zxdg_output_manager_v1 *manager) { zxdg_output_manager_v1_destroy(manager); }
 }
-export module vui.host:ffi.wayland_output;
+export module vui.host.wayland.wayland_output;
 export namespace vui::host::ffi::wayland_output {
 using ::zxdg_output_manager_v1;
 using ::zxdg_output_manager_v1_interface;

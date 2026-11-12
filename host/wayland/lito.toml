@@ -1,0 +1,20 @@
+[package]
+name = "vui-host-wayland"
+version = "0.1.0"
+license = "MIT OR Apache-2.0"
+target = { os = "linux" }
+
+[lib]
+name = "vui-host-wayland"
+module = "vui.host.wayland"
+archive = "vui-host-wayland"
+sources = [
+    "src/lib.cppm", "src/xdg_shell.cppm", "src/xdg_decoration.cppm", "src/text_input.cppm",
+    "src/wayland_fractional.cppm", "src/wayland_output.cppm",
+]
+
+[external-dependencies.pkg-config]
+wayland-client = { module = "wayland-client" }
+
+[build-tools.wayland-scanner]
+path = "wayland-scanner"

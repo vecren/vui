@@ -45,7 +45,7 @@ inline void xdg_toplevel_set_app_id(::xdg_toplevel *t, const char *id) {
 }
 } // namespace vui_xdg_inline
 
-export module vui.host:ffi.xdg_shell;
+export module vui.host.wayland.xdg_shell;
 
 export namespace vui::host::ffi::xdg_shell {
 using ::xdg_surface;

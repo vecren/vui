@@ -21,7 +21,7 @@ inline void viewport_destroy(wp_viewport *viewport) { wp_viewport_destroy(viewpo
 inline void viewporter_destroy(wp_viewporter *manager) { wp_viewporter_destroy(manager); }
 }
 
-export module vui.host:ffi.wayland_fractional;
+export module vui.host.wayland.wayland_fractional;
 export namespace vui::host::ffi::wayland_fractional {
 using ::wp_fractional_scale_manager_v1;
 using ::wp_fractional_scale_manager_v1_interface;

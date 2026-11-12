@@ -15,7 +15,7 @@ inline void cause(::zwp_text_input_v3 *t, uint32_t value) { ::zwp_text_input_v3_
 inline void rectangle(::zwp_text_input_v3 *t, int32_t x, int32_t y, int32_t w, int32_t h) { ::zwp_text_input_v3_set_cursor_rectangle(t, x, y, w, h); }
 inline void commit(::zwp_text_input_v3 *t) { ::zwp_text_input_v3_commit(t); }
 }
-export module vui.host:ffi.text_input;
+export module vui.host.wayland.text_input;
 export namespace vui::host::ffi::text_input {
 using ::zwp_text_input_manager_v3;
 using ::zwp_text_input_manager_v3_interface;

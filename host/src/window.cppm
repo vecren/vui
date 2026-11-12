@@ -4,7 +4,7 @@ import :display;
 using namespace rstd::prelude;
 
 export namespace vui::host {
-enum class WindowBackend { Automatic, Wayland, X11 };
+enum class WindowBackend { Automatic, Wayland, X11, Win32 };
 enum class WindowPositionResult { Requested, Unsupported, Failed };
 enum class WindowMode { Windowed, Fullscreen };
 enum class WindowModeError { Unavailable, Unsupported, InvalidValue, Failed };
