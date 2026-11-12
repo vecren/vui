@@ -2,6 +2,7 @@ module vui.host:platform.wayland_window;
 import :platform.wayland;
 import :ffi.wayland;
 import :ffi.xdg_shell;
+import :ffi.xdg_decoration;
 import :ffi.wayland_fractional;
 import :display;
 import rstd;
@@ -20,6 +21,8 @@ class WaylandWindow {
     bool frame_signal_ready_{};
     ffi::xdg_shell::xdg_surface *xdg_{};
     ffi::xdg_shell::xdg_toplevel *toplevel_{};
+    ffi::xdg_decoration::zxdg_toplevel_decoration_v1 *decoration_{};
+    rstd::uint32_t decoration_mode_{}, pending_decoration_mode_{};
     rstd::uint32_t width_{}, height_{}, pending_width_{}, pending_height_{};
     rstd::uint32_t minimum_width_{}, minimum_height_{};
     rstd::uint32_t windowed_width_{}, windowed_height_{};
@@ -90,7 +93,14 @@ class WaylandWindow {
     }
     ffi::wayland::wl_callback_listener frame_listener_{frame_done};
 
+    static void decoration_configure(void *data, ffi::xdg_decoration::zxdg_toplevel_decoration_v1 *,
+                                     rstd::uint32_t mode) {
+        static_cast<WaylandWindow *>(data)->pending_decoration_mode_ = mode;
+    }
+    ffi::xdg_decoration::zxdg_toplevel_decoration_v1_listener decoration_listener_{decoration_configure};
+
     void apply_configure() {
+        decoration_mode_ = pending_decoration_mode_;
         if (pending_mode_known_ && !fullscreen_ && pending_fullscreen_) {
             windowed_width_ = width_; windowed_height_ = height_;
         }
@@ -195,6 +205,13 @@ class WaylandWindow {
         if (ffi::xdg_shell::xdg_toplevel_add_listener(toplevel_, &toplevel_listener_, this) != 0)
             return fail(WaylandWindowError::Listener);
         ffi::xdg_shell::xdg_toplevel_set_title(toplevel_, title);
+        if (auto manager = connection_.decoration()) {
+            decoration_ = ffi::xdg_decoration::create(manager, toplevel_);
+            if (!decoration_) return fail(WaylandWindowError::Surface);
+            if (ffi::xdg_decoration::listen(decoration_, &decoration_listener_, this))
+                return fail(WaylandWindowError::Listener);
+            ffi::xdg_decoration::server_side(decoration_);
+        }
         ffi::wayland::wl_surface_commit(surface_);
         return Ok(empty{});
     }
@@ -275,6 +292,8 @@ class WaylandWindow {
         if (fractional_) ffi::wayland_fractional::fractional_destroy(fractional_);
         if (viewport_) ffi::wayland_fractional::viewport_destroy(viewport_);
         fractional_ = nullptr; viewport_ = nullptr;
+        if (decoration_) ffi::xdg_decoration::destroy(decoration_);
+        decoration_ = nullptr; decoration_mode_ = pending_decoration_mode_ = 0;
         if (toplevel_)
             ffi::xdg_shell::xdg_toplevel_destroy(toplevel_);
         if (xdg_)

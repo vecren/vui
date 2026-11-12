@@ -1,6 +1,7 @@
 module vui.host:platform.wayland;
 import :ffi.wayland;
 import :ffi.xdg_shell;
+import :ffi.xdg_decoration;
 import :ffi.wayland_fractional;
 import :platform.wayland_input;
 import :platform.wayland_outputs;
@@ -17,6 +18,8 @@ class WaylandConnection {
     ffi::wayland::wl_registry *registry_{};
     ffi::wayland::wl_compositor *compositor_{};
     ffi::xdg_shell::xdg_wm_base *shell_{};
+    ffi::xdg_decoration::zxdg_decoration_manager_v1 *decoration_{};
+    rstd::uint32_t decoration_name_{};
     ffi::wayland_fractional::wp_fractional_scale_manager_v1 *fractional_{};
     ffi::wayland_fractional::wp_viewporter *viewporter_{};
     rstd::uint32_t fractional_name_{}, viewporter_name_{};
@@ -49,6 +52,13 @@ class WaylandConnection {
                                    self.shell_, &self.shell_listener_, &self) != 0)
                 self.listener_failed_ = true;
         }
+        if (*text == "zxdg_decoration_manager_v1"_str && !self.decoration_) {
+            self.decoration_ = static_cast<ffi::xdg_decoration::zxdg_decoration_manager_v1 *>(
+                ffi::wayland::wl_registry_bind(registry, name,
+                    &ffi::xdg_decoration::zxdg_decoration_manager_v1_interface, 1));
+            if (!self.decoration_) self.listener_failed_ = true;
+            else self.decoration_name_ = name;
+        }
         if (*text == "wl_seat"_str) self.input_.bind(registry, name, version);
         if (*text == "wl_output"_str) self.outputs_.bind(registry, name, version);
         if (*text == "zxdg_output_manager_v1"_str) self.outputs_.bind_manager(registry, name, version);
@@ -70,6 +80,10 @@ class WaylandConnection {
     static void removed(void *data, ffi::wayland::wl_registry *, rstd::uint32_t name) {
         auto &self = *static_cast<WaylandConnection *>(data);
         self.outputs_.remove_manager(name); self.outputs_.remove(name); self.input_.remove(name);
+        if (self.decoration_ && self.decoration_name_ == name) {
+            ffi::xdg_decoration::destroy_manager(self.decoration_);
+            self.decoration_ = nullptr; self.decoration_name_ = 0;
+        }
         if (self.fractional_ && self.fractional_name_ == name) {
             ffi::wayland_fractional::fractional_manager_destroy(self.fractional_); self.fractional_ = nullptr; self.fractional_name_ = 0;
         }
@@ -115,6 +129,7 @@ class WaylandConnection {
         outputs_.close();
         if (fractional_) ffi::wayland_fractional::fractional_manager_destroy(fractional_);
         if (viewporter_) ffi::wayland_fractional::viewporter_destroy(viewporter_);
+        if (decoration_) ffi::xdg_decoration::destroy_manager(decoration_);
         if (shell_)
             ffi::xdg_shell::xdg_wm_base_destroy(shell_);
         if (compositor_)
@@ -124,6 +139,7 @@ class WaylandConnection {
         if (display_)
             ffi::wayland::wl_display_disconnect(display_);
         shell_ = nullptr;
+        decoration_ = nullptr; decoration_name_ = 0;
         fractional_ = nullptr; viewporter_ = nullptr; fractional_name_ = viewporter_name_ = 0;
         compositor_ = nullptr;
         registry_ = nullptr;
@@ -132,6 +148,7 @@ class WaylandConnection {
     auto display() const -> ffi::wayland::wl_display * { return display_; }
     auto compositor() const -> ffi::wayland::wl_compositor * { return compositor_; }
     auto shell() const -> ffi::xdg_shell::xdg_wm_base * { return shell_; }
+    auto decoration() const -> ffi::xdg_decoration::zxdg_decoration_manager_v1 * { return decoration_; }
     auto input() -> WaylandInput & { return input_; }
     auto outputs() -> WaylandOutputs & { return outputs_; }
     auto outputs() const -> const WaylandOutputs & { return outputs_; }
