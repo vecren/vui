@@ -1,6 +1,6 @@
 export module vui:state.targets;
-import :binding;
-import :image;
+import :binding.scope;
+import :image.types;
 using namespace rstd::prelude;
 
 export namespace vui {

@@ -1,0 +1,10 @@
+export module vui:document;
+export import :document.snapshot;
+export import :document.edit;
+export import :document.interface;
+export import :document.animation;
+export import :document.content;
+export import :document.layout;
+export import :document.lifecycle;
+export import :document.text;
+export import :document.tree;

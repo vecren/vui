@@ -1,5 +1,5 @@
 export module vui:motion.sequence;
-import :document;
+import :document.interface;
 using namespace rstd::prelude;
 
 export namespace vui {

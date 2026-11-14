@@ -52,40 +52,10 @@ struct Error {
             *this = Error(other);
         return *this;
     }
-    static auto session(vrento::vulkan::DeviceSessionError cause) -> Error {
-        Stage stage{Stage::State};
-        switch (cause.stage) {
-        case vrento::vulkan::DeviceSessionStage::Invalid: stage = Stage::State; break;
-        case vrento::vulkan::DeviceSessionStage::Instance: stage = Stage::Instance; break;
-        case vrento::vulkan::DeviceSessionStage::Surface: stage = Stage::Surface; break;
-        case vrento::vulkan::DeviceSessionStage::Device: stage = Stage::Device; break;
-        case vrento::vulkan::DeviceSessionStage::Lost: stage = Stage::Lost; break;
-        }
-        Error result{stage, cause.result};
-        if (cause.cause) result.backend = Some(vrento::ErrorDiagnostic::capture(*cause.cause));
-        return result;
-    }
-    static auto graph(vrento::vulkan::GraphExecutionError cause) -> Error {
-        Error result{Stage::Graph, cause.native_result()};
-        auto texture = cause.texture_error();
-        if (texture) result.content = Some(vrento::texture::ErrorSnapshot::capture(**texture));
-        result.graph_error = Some(vrento::vulkan::GraphExecutionErrorSnapshot::capture(cause));
-        return result;
-    }
-    static auto graph(vrento::fg::Error cause) -> Error {
-        return graph(vrento::vulkan::GraphExecutionError{
-            vrento::vulkan::GraphExecutionStage::Graph, cause.pass, cause.resource,
-            vrento::vulkan::GraphExecutionCause::Graph(cause)});
-    }
-    static auto resource(Stage stage, vrento::resource::ResourceError cause) -> Error {
-        auto result = graph(vrento::vulkan::GraphExecutionError{
-            vrento::vulkan::GraphExecutionStage::Prepare,
-            {},
-            {},
-            vrento::vulkan::GraphExecutionCause::Resource(rstd::move(cause))});
-        result.stage = stage;
-        return result;
-    }
+    static auto session(vrento::vulkan::DeviceSessionError cause) -> Error;
+    static auto graph(vrento::vulkan::GraphExecutionError cause) -> Error;
+    static auto graph(vrento::fg::Error cause) -> Error;
+    static auto resource(Stage stage, vrento::resource::ResourceError cause) -> Error;
     static auto texture(Stage stage, vrento::texture::Error cause) -> Error {
         return {stage, VkResult(cause.native), {}, Some(vrento::texture::ErrorSnapshot::capture(cause))};
     }
@@ -252,3 +222,17 @@ class Renderer {
     auto set_text_cache_limits(TextCacheLimits) -> Result<empty, Error>;
 };
 } // namespace vui::gpu
+
+namespace vui::gpu::detail {
+inline constexpr auto format = VK_FORMAT_R8G8B8A8_SRGB;
+struct DrawData {
+    float rect[4], color[4], row0[4], row1[4], params[4], surface[3];
+    float image_edges;
+    float uv[4];
+    float radial[4]{0, 0, 0, 1};
+};
+static_assert(sizeof(DrawData) == 128);
+struct GpuClip {
+    float rect[4], row0[4], row1[4], params[4];
+};
+} // namespace vui::gpu::detail

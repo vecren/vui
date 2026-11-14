@@ -1,5 +1,5 @@
 export module vui:interaction.navigation;
-import :events;
+import :input.router;
 using namespace rstd::prelude;
 
 export namespace vui {

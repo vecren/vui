@@ -1,5 +1,5 @@
 export module vui:image.nine_patch;
-import :image;
+import :image.types;
 using namespace rstd::prelude;
 
 export namespace vui {

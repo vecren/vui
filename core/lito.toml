@@ -7,65 +7,8 @@ license.workspace = true
 name = "vui"
 module = "vui"
 archive = "vui"
-sources = [
-    "src/animation.cppm",
-    "src/curves.cppm",
-    "src/state_animation.cppm",
-    "src/state_animation_motion.cppm",
-    "src/binding/scope.cppm",
-    "src/binding/signal.cppm",
-    "src/composition.cppm",
-    "src/content.cppm",
-    "src/content_mailbox.cppm",
-    "src/diagnostics.cppm",
-    "src/display_list.cppm",
-    "src/document.cppm",
-    "src/document/edit.cppm",
-    "src/endpoint.cppm",
-    "src/frame.cppm",
-    "src/frame_content.cppm",
-    "src/image.cppm",
-    "src/image/nine_patch.cppm",
-    "src/input/hit_test.cppm",
-    "src/input/protocol.cppm",
-    "src/input/router.cppm",
-    "src/input/scopes.cppm",
-    "src/interaction/arena.cppm",
-    "src/interaction/navigation.cppm",
-    "src/interaction/velocity.cppm",
-    "src/layout.cppm",
-    "src/layout/parameters.cppm",
-    "src/layout/protocol.cppm",
-    "src/layout/reference_canvas.cppm",
-    "src/layout/anchor.cppm",
-    "src/lib.cppm",
-    "src/motion/drivers.cppm",
-    "src/motion/dynamics.cppm",
-    "src/motion/properties.cppm",
-    "src/motion/sequence.cppm",
-    "src/node/types.cppm",
-    "src/node/ownership.cppm",
-    "src/node/state.cppm",
-    "src/node/style_patch.cppm",
-    "src/paint/protocol.cppm",
-    "src/session.cppm",
-    "src/update/protocol.cppm",
-    "src/state.cppm",
-    "src/style/builder.cppm",
-    "src/state/targets.cppm",
-    "src/state/bindings.cppm",
-    "src/text.cppm",
-    "src/text_images.cppm",
-    "src/text_edit.cppm",
-    "src/text_edit.cpp",
-    "src/types.cppm",
-    "src/visual.cppm",
-    "src/wakeup.cppm",
-]
-
 
 [dependencies]
 ligraph = { workspace = true }
 vectext = { path = "../../vectext", pub = true }
 rstd-std = { workspace = true, pub = true }
-rstd-nostd = { workspace = true, usage = "link" }

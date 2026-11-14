@@ -1,9 +1,9 @@
-export module vui:events;
-import :input;
+export module vui:input.router;
+import :input.hit_test;
 import :input.protocol;
 import :interaction.arena;
 import :input.scopes;
-import :visual;
+import :scene.visual;
 using namespace rstd::prelude;
 
 export namespace vui {
@@ -44,18 +44,7 @@ class EventContext {
     auto visual(UiId id) const -> const UiVisual *;
     auto completed_content(UiId id, Serial source_id) const -> Result<Option<FrameContent>, FrameError>;
     auto scroll_remaining() const -> Point { return remaining_scroll_; }
-    auto consume_scroll(Point amount) -> Result<empty, InputError> {
-        auto valid = [](Scalar value, Scalar remaining) {
-            return finite(value) && (remaining >= 0 ? value >= 0 && value <= remaining
-                                                    : value <= 0 && value >= remaining);
-        };
-        if (event_.input.type != EventType::Wheel || !valid(amount.x, remaining_scroll_.x) ||
-            !valid(amount.y, remaining_scroll_.y))
-            return Err(InputError::InvalidEvent);
-        remaining_scroll_.x -= amount.x;
-        remaining_scroll_.y -= amount.y;
-        return Ok(empty{});
-    }
+    auto consume_scroll(Point amount) -> Result<empty, InputError>;
     void stop_propagation() { stopped_ = true; }
     void prevent_default() { prevented_ = true; }
     auto default_prevented() const -> bool { return prevented_; }
@@ -153,37 +142,7 @@ class EventRouter {
     Vec<NodeRoutes> node_routes_;
     bool routes_dirty_{true}, prune_requested_{true};
     usize every_sample_{}, motion_handlers_{};
-    void index_routes() {
-        if (!routes_dirty_)
-            return;
-        for (auto &row : node_routes_) {
-            row.behaviors.clear();
-            row.handlers.clear();
-        }
-        every_sample_ = {};
-        motion_handlers_ = {};
-        auto row = [&](UiId id) -> NodeRoutes & {
-            while (node_routes_.len() <= usize(id.slot))
-                node_routes_.push(NodeRoutes{});
-            return node_routes_[usize(id.slot)];
-        };
-        for (usize i{}; i < behaviors_.len(); ++i) {
-            const auto &entry = behaviors_[i];
-            row(entry->target).behaviors.push(usize(i));
-            if ((entry->binding.is_none() || entry->binding->alive()) &&
-                entry->delivery == InputDelivery::EverySample)
-                ++every_sample_;
-        }
-        for (usize i{}; i < handlers_.len(); ++i) {
-            const auto &entry = handlers_[i];
-            row(entry->target).handlers.push(usize(i));
-            if (entry->active && (entry->binding.is_none() || entry->binding->alive()) &&
-                (entry->type == EventType::PointerMove || entry->type == EventType::PointerEnter ||
-                 entry->type == EventType::PointerLeave))
-                ++motion_handlers_;
-        }
-        routes_dirty_ = false;
-    }
+    void index_routes();
     auto node_routes(UiId id) -> NodeRoutes * {
         index_routes();
         return usize(id.slot) < node_routes_.len() ? &node_routes_[usize(id.slot)] : nullptr;
@@ -228,31 +187,8 @@ class EventRouter {
     Option<Box<rstd::dyn<rstd::FnMut<Result<empty, ClipboardError>(Serial, Serial, ref<str>)>>>> clipboard_write_request_;
     struct ClipboardPending { Serial id; UiId target; Serial focus_revision; bool write{}; };
     Vec<ClipboardPending> clipboard_pending_;
-    static void path(const InputSnapshot &update, UiId id, Vec<UiId> &result) {
-        result.clear();
-        auto cursor = Some(id);
-        while (cursor.is_some() && result.len() < usize(256)) {
-            auto node = update.get(*cursor);
-            if (!node) {
-                result.clear();
-                return;
-            }
-            result.push(UiId(*cursor));
-            cursor = node->parent;
-        }
-        if (cursor.is_some() || result.is_empty() || update.root().is_none() ||
-            result[result.len() - usize(1)] != *update.root()) {
-            result.clear();
-            return;
-        }
-        for (usize i{}; i < result.len() / usize(2); ++i)
-            rstd::swap(result[i], result[result.len() - usize(1) - i]);
-    }
-    static auto path(const InputSnapshot &update, UiId id) -> Vec<UiId> {
-        Vec<UiId> result;
-        path(update, id, result);
-        return result;
-    }
+    static void path(const InputSnapshot &update, UiId id, Vec<UiId> &result);
+    static auto path(const InputSnapshot &update, UiId id) -> Vec<UiId>;
     auto eligible(const InputSnapshot &update, UiId id, bool pointer,
                   bool require_focus = true) const -> bool {
         return input_eligible(update, id, pointer, require_focus) &&
@@ -263,400 +199,29 @@ class EventRouter {
         return target.is_some() && scopes_.allows(snapshot, *target, true) ? target : None<UiId>();
     }
     static auto local(const InputSnapshot &update, slice<UiId> route, usize index, Point point)
-        -> Point {
-        for (usize i{}; i <= index; ++i) {
-            auto inverse = update.get(route[i])->properties.transform.inverse();
-            if (inverse.is_none())
-                return {};
-            point = inverse->map(point);
-        }
-        return point;
-    }
-    void refresh_contacts() {
-        contacts_.clear();
-        for (const auto &value : pointers_) {
-            if (!value.buttons && !value.contact)
-                continue;
-            contacts_.push({{value.device, value.id},
-                            value.sequence,
-                            value.position,
-                            value.kind,
-                            value.buttons != 0 || value.contact});
-        }
-    }
-    auto pointer(Index id, DeviceId device = 0) -> Pointer * {
-        for (auto &value : pointers_)
-            if (value.id == id && value.device == device)
-                return &value;
-        return nullptr;
-    }
-    void behavior(EventContext &context, const RoutedEvent &event, bool prevented) {
-        auto type = event.input.type;
-        if (sharing_ && event.phase == RoutePhase::Bubble)
-            for (auto target : shared_targets_)
-                if (target == event.current)
-                    return;
-        bool cleanup = type == EventType::PointerCancel || type == EventType::CaptureLost ||
-                       type == EventType::TextInputCancelled ||
-                       type == EventType::FocusLost || type == EventType::FocusGained ||
-                       type == EventType::PointerUp || type == EventType::KeyUp ||
-                       type == EventType::PointerEnter || type == EventType::PointerLeave;
-        if (event.phase != RoutePhase::Capture && (!prevented || cleanup)) {
-            auto row = node_routes(event.current);
-            if (row)
-                for (auto index : row->behaviors) {
-                    auto &item = behaviors_[index];
-                    ++work_.behaviors_examined;
-                    if (item->target == event.current &&
-                        (item->binding.is_none() || item->binding->alive())) {
-                        if (context.default_prevented() && !cleanup) break;
-                        item->invoke(context, event);
-                    }
-                }
-        }
-    }
+        -> Point;
+    void refresh_contacts();
+    auto pointer(Index id, DeviceId device = 0) -> Pointer *;
+    void behavior(EventContext &context, const RoutedEvent &event, bool prevented);
     void invoke(const InputSnapshot &update, slice<UiId> route, usize index, UiId target,
                 const InputEvent &input, RoutePhase phase, Serial cutoff, bool &stopped,
-                bool &prevented, Point &remaining) {
-        ++work_.routes;
-        RoutedEvent event{input,
-                          target,
-                          route[index],
-                          phase,
-                          local(update, route, index, input.position),
-                          update.revision()};
-        EventContext context(*this, event, stopped, prevented, remaining);
-        bool cleanup = input.type == EventType::PointerCancel ||
-                       input.type == EventType::CaptureLost || input.type == EventType::FocusLost ||
-                       input.type == EventType::PointerLeave || input.type == EventType::TextInputCancelled;
-        bool pointer_input = input.type != EventType::KeyDown && input.type != EventType::KeyUp &&
-                             input.type != EventType::TextInput && input.type != EventType::TextEditing &&
-                             input.type != EventType::TextTransaction &&
-                             input.type != EventType::TextInputCancelled &&
-                             input.type != EventType::ClipboardResult &&
-                             input.type != EventType::ClipboardWriteResult &&
-                             input.type != EventType::FocusGained &&
-                             input.type != EventType::FocusLost;
-        bool allowed = cleanup || scopes_.allows(update, event.current, pointer_input);
-        auto row = node_routes(event.current);
-        if (row)
-            for (auto index : row->handlers) {
-                auto *handler = &*handlers_[index];
-                ++work_.handlers_examined;
-                if (handler->active && (handler->binding.is_none() || handler->binding->alive()) &&
-                    handler->id.value < cutoff && handler->target == event.current &&
-                    handler->type == input.type && handler->phase == phase &&
-                    (allowed || handler->access == ScopeAccess::Global))
-                    handler->invoke(context, event);
-            }
-        if (allowed)
-            behavior(context, event, prevented);
-    }
+                bool &prevented, Point &remaining);
     auto route(const InputSnapshot &update, UiId target, InputEvent input, bool direct = false)
-        -> bool {
-        path(update, target, route_nodes_);
-        auto &nodes = route_nodes_;
-        if (nodes.is_empty())
-            return false;
-        auto cutoff = next_handler_;
-        bool stopped{}, prevented{};
-        auto remaining = input.scroll_delta;
-        auto last = nodes.len() - usize(1);
-        if (!direct)
-            for (usize i{}; i < last && !stopped; ++i)
-                invoke(update, nodes.as_slice(), i, target, input, RoutePhase::Capture, cutoff,
-                       stopped, prevented, remaining);
-        if (!stopped)
-            invoke(update, nodes.as_slice(), last, target, input, RoutePhase::Target, cutoff,
-                   stopped, prevented, remaining);
-        else if (input.type == EventType::KeyUp || input.type == EventType::PointerUp ||
-                 input.type == EventType::PointerCancel) {
-            bool suppressed = true;
-            RoutedEvent event{input,
-                              target,
-                              target,
-                              RoutePhase::Target,
-                              local(update, nodes.as_slice(), last, input.position),
-                              update.revision()};
-            EventContext context(*this, event, stopped, suppressed, remaining);
-            behavior(context, event, true);
-        }
-        if (!direct)
-            for (auto i = last; i > usize() && !stopped; --i)
-                invoke(update, nodes.as_slice(), i - usize(1), target, input, RoutePhase::Bubble,
-                       cutoff, stopped, prevented, remaining);
-        return prevented;
-    }
-    static auto event(EventType type, const Pointer &pointer) -> InputEvent {
-        InputEvent result;
-        result.type = type;
-        result.pointer = pointer.id;
-        result.position = pointer.position;
-        result.pointer_kind = pointer.kind;
-        result.device = pointer.device;
-        result.sequence = pointer.sequence;
-        result.sample_time = pointer.sample_time;
-        return result;
-    }
-    void hover(Pointer &pointer, Option<UiId> target) {
-        if (pointer.hover == target)
-            return;
-        auto old = pointer.hover.is_some() ? path(*update_, *pointer.hover) : Vec<UiId>{};
-        auto next = target.is_some() ? path(*update_, *target) : Vec<UiId>{};
-        usize common{};
-        while (common < old.len() && common < next.len() && old[common] == next[common])
-            ++common;
-        pointer.hover = target;
-        for (auto i = old.len(); i > common; --i)
-            route(*update_, old[i - usize(1)], event(EventType::PointerLeave, pointer), true);
-        for (auto i = common; i < next.len(); ++i)
-            route(*update_, next[i], event(EventType::PointerEnter, pointer), true);
-    }
-    void capture_native(Pointer &pointer, bool enabled) {
-        if (native_capture_.is_none()) {
-            pointer.native_capture = NativeCaptureResult::Unsupported;
-            return;
-        }
-        if (!enabled && pointer.kind == PointerKind::Mouse)
-            for (const auto &other : pointers_)
-                if (other.kind == PointerKind::Mouse && other.capture.is_some())
-                    return;
-        pointer.native_capture = (*native_capture_)->operator()(pointer.kind, enabled);
-    }
-    void release(Pointer &pointer, bool shared = true) {
-        auto owners = shared ? arena_.owners({pointer.device, pointer.id}) : Vec<UiId>{};
-        auto previous = pointer.capture.take();
-        if (previous.is_some())
-            capture_native(pointer, false);
-        if (previous.is_some())
-            route(*update_, *previous, event(EventType::CaptureLost, pointer), true);
-        if (previous.is_some())
-            for (auto target : owners)
-                if (previous != Some(UiId(target)))
-                    route(*update_, target, event(EventType::CaptureLost, pointer), true);
-    }
-    void cancel(Pointer &pointer, CancelReason reason = CancelReason::Explicit) {
-        auto owners = arena_.owners({pointer.device, pointer.id});
-        auto target = pointer.relinquished                ? None<UiId>()
-                      : pointer.capture.is_some()         ? pointer.capture
-                      : pointer.sequence_target.is_some() ? pointer.sequence_target
-                                                          : pointer.hover;
-        auto was_down = pointer.buttons != 0 || pointer.contact;
-        pointer.buttons = 0;
-        pointer.contact = false;
-        refresh_contacts();
-        sharing_ = owners.len() > usize(1);
-        shared_targets_.clear();
-        for (auto value : owners)
-            shared_targets_.push(UiId(value));
-        if (target.is_some() && (was_down || pointer.capture.is_some())) {
-            auto cancelled = event(EventType::PointerCancel, pointer);
-            cancelled.cancel_reason = reason;
-            route(*update_, *target, cancelled);
-            for (auto value : owners)
-                if (target != Some(UiId(value)))
-                    route(*update_, value, cancelled);
-        }
-        sharing_ = false;
-        shared_targets_.clear();
-        release(pointer);
-        if (update_.is_some())
-            arena_.end({pointer.device, pointer.id}, *update_, contacts_.as_slice(), reason);
-        pointer.claimed = false;
-        pointer.relinquished = false;
-        pointer.sequence_target = None();
-    }
-    void change_focus(Option<UiId> target, CancelReason text_reason = CancelReason::FocusLost) {
-        if (focus_ == target)
-            return;
-        if (focus_revision_ == ~Serial{})
-            rstd::panic("vui focus revision exhausted");
-        ++focus_revision_;
-        clipboard_pending_.clear();
-        cancel_text_input(text_reason);
-        auto old = focus_;
-        focus_ = target;
-        if (old.is_some())
-            route(*update_, *old, {EventType::FocusLost}, true);
-        if (target.is_some())
-            route(*update_, *target, {EventType::FocusGained}, true);
-    }
-    void cancel_subtree_inputs(UiId root) {
-        if (!update_.is_some() || !update_->get(root)) return;
-        for (auto &pointer : pointers_) {
-            bool affected = (pointer.capture && input_descendant(*update_, root, *pointer.capture)) ||
-                            (pointer.sequence_target && input_descendant(*update_, root, *pointer.sequence_target));
-            for (auto owner : arena_.owners({pointer.device, pointer.id})) affected |= input_descendant(*update_, root, owner);
-            if (affected) cancel(pointer, CancelReason::Explicit);
-        }
-        if (focus_ && input_descendant(*update_, root, *focus_)) change_focus({}, CancelReason::Explicit);
-    }
-    auto current_text_state() const -> Option<TextInputState> {
-        if (text_request_.is_none() || text_client_.is_none()) return None();
-        for (const auto &entry : surroundings_)
-            if (entry.client == *text_client_)
-                return Some(TextInputState{*text_request_, TextSurrounding(entry.value), entry.cause});
-        return Some(TextInputState{*text_request_});
-    }
-    void notify_text_input(bool force) {
-        if (native_text_state_.is_some()) {
-            auto state = current_text_state();
-            if (!force && ((state.is_none() && delivered_text_state_.is_none()) ||
-                (state.is_some() && delivered_text_state_.is_some() && *state == *delivered_text_state_))) return;
-            delivered_text_state_ = state.is_some() ? Some(TextInputState(*state)) : None<TextInputState>();
-            text_result_ = (*native_text_state_)->operator()(rstd::move(state));
-        } else {
-            delivered_text_state_ = None();
-            text_result_ = native_text_input_.is_some() ? (*native_text_input_)->operator()(text_request_)
-                                                       : NativeTextInputResult::Unsupported;
-        }
-    }
-    void cancel_text_input(CancelReason reason) {
-        if (text_client_.is_none()) return;
-        auto client = *text_client_;
-        text_client_ = None(); text_request_ = None();
-        notify_text_input(true);
-        auto controls = rstd::exchange(controls_, false);
-        InputEvent event; event.type = EventType::TextInputCancelled; event.cancel_reason = reason;
-        route(*update_, client, event, true);
-        controls_ = controls;
-    }
-    void refresh_text_input(bool force = false) {
-        Option<UiId> client;
-        Option<Rect> area;
-        const auto *node = update_.is_some() && focus_.is_some() ? update_->get(*focus_) : nullptr;
-        if (window_focused_ && node && node->text_input_area.is_some() && eligible(*update_, *focus_, false)) {
-            auto matrix = update_->local_to_surface(*focus_);
-            if (matrix.is_ok() && matrix.unwrap().inverse().is_some()) {
-                auto rect = *node->text_input_area;
-                Point points[]{matrix.unwrap().map({rect.x, rect.y}), matrix.unwrap().map({rect.x + rect.width, rect.y}),
-                    matrix.unwrap().map({rect.x, rect.y + rect.height}), matrix.unwrap().map({rect.x + rect.width, rect.y + rect.height})};
-                Scalar left = points[0].x, top = points[0].y, right = left, bottom = top;
-                for (auto point : points) {
-                    left = rstd::cmp::min(left, point.x); top = rstd::cmp::min(top, point.y);
-                    right = rstd::cmp::max(right, point.x); bottom = rstd::cmp::max(bottom, point.y);
-                }
-                Rect mapped{left, top, right - left, bottom - top};
-                if (mapped.valid()) { client = focus_; area = Some(mapped); }
-            }
-        }
-        if (client != text_client_) cancel_text_input(CancelReason::Explicit);
-        if (client.is_none()) return;
-        TextInputRequest request{text_request_.is_some() ? text_request_->session : new_session(), *area};
-        if (!force && text_request_ == Some(request) && native_text_state_.is_none()) return;
-        text_client_ = client; text_request_ = Some(request);
-        notify_text_input(force);
-    }
-    void apply_transfer(const OwnershipChange &change) {
-        auto state = pointer(change.pointer.pointer, change.pointer.device);
-        if (!state)
-            return;
-        if (change.additional) {
-            route(*update_, change.target, event(EventType::CaptureGained, *state), true);
-            return;
-        }
-        auto old = state->capture.is_some() ? state->capture : state->sequence_target;
-        sharing_ = change.previous.len() > usize(1);
-        shared_targets_.clear();
-        for (auto target : change.previous)
-            shared_targets_.push(UiId(target));
-        if (old.is_some() && *old != change.target) {
-            auto cancelled = event(EventType::PointerCancel, *state);
-            cancelled.cancel_reason = CancelReason::Superseded;
-            route(*update_, *old, cancelled);
-        }
-        for (auto target : change.previous)
-            if (old != Some(UiId(target)) && target != change.target) {
-                auto cancelled = event(EventType::PointerCancel, *state);
-                cancelled.cancel_reason = CancelReason::Superseded;
-                route(*update_, target, cancelled);
-                route(*update_, target, event(EventType::CaptureLost, *state), true);
-            }
-        sharing_ = false;
-        shared_targets_.clear();
-        release(*state, false);
-        state->capture = Some(UiId(change.target));
-        state->claimed = true;
-        state->relinquished = false;
-        capture_native(*state, true);
-        route(*update_, change.target, event(EventType::CaptureGained, *state), true);
-    }
-    void drain() {
-        auto releasing = rstd::exchange(releases_, Vec<Vec<PointerKey>>{});
-        for (const auto &pointers : releasing) {
-            bool valid{true};
-            for (auto key : pointers)
-                valid &= arena_.has_stream(key) && pointer(key.pointer, key.device);
-            if (!valid) {
-                failure_ = Some(InputError::InvalidSequence);
-                continue;
-            }
-            for (auto key : pointers) {
-                auto state = pointer(key.pointer, key.device);
-                auto owners = arena_.owners(key);
-                sharing_ = owners.len() > usize(1);
-                shared_targets_.clear();
-                for (auto target : owners)
-                    shared_targets_.push(UiId(target));
-                auto cancelled = event(EventType::PointerCancel, *state);
-                cancelled.cancel_reason = CancelReason::Explicit;
-                if (owners.is_empty() && state->sequence_target.is_some())
-                    route(*update_, *state->sequence_target, cancelled);
-                for (auto target : owners)
-                    route(*update_, target, cancelled);
-                sharing_ = false;
-                shared_targets_.clear();
-                release(*state);
-                arena_.release(key, *update_, contacts_.as_slice());
-                state->claimed = true;
-                state->relinquished = true;
-            }
-        }
-        for (usize i{}; i < commands_.len(); ++i) {
-            auto command = commands_[i];
-            if (command.type == CommandType::CancelSubtree) {
-                cancel_subtree_inputs(*command.target);
-            } else if (command.type == CommandType::Focus) {
-                change_focus(command.target);
-            } else if (command.type == CommandType::RestartText) {
-                if (command.target == text_client_) {
-                    text_request_->session = new_session();
-                    notify_text_input(true);
-                    auto controls = rstd::exchange(controls_, false);
-                    InputEvent event; event.type = EventType::TextInputCancelled; event.cancel_reason = CancelReason::Explicit;
-                    route(*update_, *text_client_, event, true);
-                    controls_ = controls;
-                }
-            } else if (auto *state = pointer(command.pointer, command.device)) {
-                if (command.type == CommandType::Release) {
-                    if (state->capture == command.target)
-                        release(*state);
-                } else if ((state->buttons || state->contact) && state->capture != command.target) {
-                    release(*state);
-                    state->capture = command.target;
-                    capture_native(*state, true);
-                    route(*update_, *command.target, event(EventType::CaptureGained, *state), true);
-                }
-            }
-        }
-        commands_.clear();
-        auto pending = rstd::exchange(transfers_, Vec<Transfer>{});
-        for (auto &transfer : pending) {
-            auto changed = arena_.transfer(transfer.participant, transfer.pointers.as_slice(),
-                                           *update_, contacts_.as_slice());
-            if (changed.is_err()) {
-                failure_ = Some(changed.unwrap_err());
-                continue;
-            }
-            for (const auto &change : changed.unwrap())
-                apply_transfer(change);
-        }
-    }
-    void begin() {
-        busy_ = true;
-        scope_ = Some(document_.acquire_route().unwrap());
-        failure_ = None();
-    }
+        -> bool;
+    static auto event(EventType type, const Pointer &pointer) -> InputEvent;
+    void hover(Pointer &pointer, Option<UiId> target);
+    void capture_native(Pointer &pointer, bool enabled);
+    void release(Pointer &pointer, bool shared = true);
+    void cancel(Pointer &pointer, CancelReason reason = CancelReason::Explicit);
+    void change_focus(Option<UiId> target, CancelReason text_reason = CancelReason::FocusLost);
+    void cancel_subtree_inputs(UiId root);
+    auto current_text_state() const -> Option<TextInputState>;
+    void notify_text_input(bool force);
+    void cancel_text_input(CancelReason reason);
+    void refresh_text_input(bool force = false);
+    void apply_transfer(const OwnershipChange &change);
+    void drain();
+    void begin();
     void dispatch_availability(auto &observers,auto read) {
         for (auto &observer:observers) {
             if (!observer.guard.alive()) continue;
@@ -666,85 +231,10 @@ class EventRouter {
         }
         observers.retain([](const auto &observer){return observer.guard.alive();});
     }
-    auto end() -> Result<empty, InputError> {
-        if (availability_dirty_) {
-            availability_dirty_=false;
-            dispatch_availability(pointer_observers_,[this](UiId id){return pointer_available(id);});
-            dispatch_availability(input_observers_,[this](UiId id){return input_availability(id);});
-        }
-        drain();
-        refresh_text_input();
-        scope_ = None();
-        busy_ = false;
-        if (prune_requested_) {
-            handlers_.retain([&](const auto &handler) {
-                if (!document_.valid(handler->target) && handler->owns_binding &&
-                    handler->binding.is_some())
-                    handler->binding->disconnect();
-                return handler->active && document_.valid(handler->target) &&
-                       (handler->binding.is_none() || handler->binding->alive());
-            });
-            behaviors_.retain([&](const auto &behavior) {
-                if (!document_.valid(behavior->target) && behavior->binding.is_some())
-                    behavior->binding->disconnect();
-                return document_.valid(behavior->target) &&
-                       (behavior->binding.is_none() || behavior->binding->alive());
-            });
-            surroundings_.retain([&](const auto &entry) { return document_.valid(entry.client); });
-            prune_requested_ = false;
-            routes_dirty_ = true;
-        }
-        return failure_.is_some() ? Result<empty, InputError>(Err(*failure_))
-                                  : Result<empty, InputError>(Ok(empty{}));
-    }
-    auto command(Command value) -> Result<empty, InputError> {
-        if (!busy_ && !document_.can_route() && value.type!=CommandType::CancelSubtree)
-            return Err(InputError::Reentrant);
-        if (closed_)
-            return Err(InputError::Unavailable);
-        if (!update_.is_some() || (value.type!=CommandType::CancelSubtree && (!controls_ || !window_focused_)))
-            return Err(InputError::Unavailable);
-        if(value.type==CommandType::CancelSubtree && (!value.target || !update_->get(*value.target)))return Err(InputError::InvalidId);
-        if (value.type!=CommandType::CancelSubtree && value.target.is_some() &&
-            !eligible(*update_, *value.target,
-                      value.type == CommandType::Capture || value.type == CommandType::Release,
-                      true))
-            return Err(InputError::InvalidId);
-        if (value.type == CommandType::Capture || value.type == CommandType::Release) {
-            auto state = pointer(value.pointer, value.device);
-            if (!state ||
-                (value.type == CommandType::Capture && !state->buttons && !state->contact))
-                return Err(InputError::InvalidSequence);
-        }
-        if (commands_.len() >= usize(256)) {
-            failure_ = Some(InputError::Limit);
-            return Err(InputError::Limit);
-        }
-        commands_.push(rstd::move(value));
-        if (!busy_ && document_.can_route()) {
-            begin();
-            return end();
-        }
-        return Ok(empty{});
-    }
-    auto lost_receiver(UiId target) -> bool {
-        auto row = node_routes(target);
-        if (row)
-            for (auto index : row->behaviors) {
-                const auto &entry = behaviors_[index];
-                if (entry->target == target && entry->binding.is_some() &&
-                    !entry->binding->alive()) {
-                    prune_requested_ = true;
-                    return true;
-                }
-            }
-        return false;
-    }
-    auto same_mount(const InputSnapshot &next, UiId id, bool pointer) const -> bool {
-        auto before = update_->get(id), after = next.get(id);
-        return before && after && before->mount_generation == after->mount_generation &&
-               eligible(next, id, pointer);
-    }
+    auto end() -> Result<empty, InputError>;
+    auto command(Command value) -> Result<empty, InputError>;
+    auto lost_receiver(UiId target) -> bool;
+    auto same_mount(const InputSnapshot &next, UiId id, bool pointer) const -> bool;
 
   public:
     class BehaviorEdit {
@@ -806,78 +296,11 @@ class EventRouter {
         behaviors_.reserve(edit.entries_.len());
         return Ok(rstd::move(binding));
     }
-    auto retire_behavior(BehaviorEdit &edit, UiId target, NodeStateKey role) -> Result<empty, InputError> {
-        if (closed_) return Err(InputError::Unavailable);
-        if (busy_ || document_.routing()) return Err(InputError::Reentrant);
-        if (!document_.valid(target)) return Err(InputError::InvalidId);
-        for (const auto &entry : edit.retired_) if (entry.target == target && entry.key == role) return Ok(empty{});
-        edit.retired_.push({target, role}); return Ok(empty{});
-    }
-    auto prepare_behavior_order(BehaviorEdit &edit, UiId target, Vec<NodeStateKey> roles) -> Result<empty, InputError> {
-        if (closed_) return Err(InputError::Unavailable);
-        if (busy_ || document_.routing()) return Err(InputError::Reentrant);
-        if (target.session != document_.session()) return Err(InputError::InvalidId);
-        for (usize i{}; i < roles.len(); ++i) {
-            for (usize j{}; j < i; ++j) if (roles[i] == roles[j]) return Err(InputError::InvalidSequence);
-            bool found{};
-            for (const auto &entry : edit.entries_) found |= entry->target == target && entry->role == roles[i];
-            for (const auto &entry : behaviors_) found |= entry->target == target && entry->role == roles[i] &&
-                (entry->binding.is_none() || entry->binding->alive());
-            for (const auto &entry : edit.retired_) if (entry.target == target && entry.key == roles[i]) found = false;
-            if (!found) return Err(InputError::InvalidId);
-        }
-        edit.orders_.push({target, rstd::move(roles)}); return Ok(empty{});
-    }
-    auto publish_behaviors(BehaviorEdit edit) -> Result<empty, InputError> {
-        if (closed_) return Err(InputError::Unavailable);
-        if (busy_ || !document_.can_route()) return Err(InputError::Reentrant);
-        for (const auto &entry : edit.entries_) if (!document_.valid(entry->target)) return Err(InputError::InvalidId);
-        for (const auto &entry : edit.retired_) if (!document_.valid(entry.target)) return Err(InputError::InvalidId);
-        for (const auto &entry : edit.orders_) if (!document_.valid(entry.target)) return Err(InputError::InvalidId);
-        Option<InputError> failure;
-        if (!edit.retired_.is_empty() && update_.is_some()) {
-            index_routes(); begin();
-            for (usize i{}; i < edit.retired_.len(); ++i) {
-                bool previous{};
-                for (usize j{}; j < i; ++j) previous |= edit.retired_[j].target == edit.retired_[i].target;
-                if (!previous) cancel_subtree_inputs(edit.retired_[i].target);
-            }
-            auto cancelled = end(); if (cancelled.is_err()) failure = Some(cancelled.unwrap_err());
-        }
-        for (const auto &role : edit.retired_)
-            behaviors_.retain([&](const auto &entry) {
-                if (entry->target != role.target || entry->role != role.key) return true;
-                if (entry->binding.is_some()) entry->binding->disconnect(); return false;
-            });
-        for (auto &entry : edit.entries_) behaviors_.push(rstd::move(entry));
-        for (const auto &order : edit.orders_) {
-            usize cursor{};
-            auto selected = [&](const BehaviorEntry &entry) {
-                if (entry.target != order.target) return false;
-                for (auto role : order.roles) if (entry.role == role) return true;
-                return false;
-            };
-            for (auto role : order.roles) {
-                while (cursor < behaviors_.len() && !selected(*behaviors_[cursor])) ++cursor;
-                auto desired = cursor;
-                while (desired < behaviors_.len() && !(behaviors_[desired]->target == order.target && behaviors_[desired]->role == role)) ++desired;
-                if (cursor < behaviors_.len() && desired < behaviors_.len() && cursor != desired) {
-                    auto previous = rstd::move(behaviors_[cursor]); behaviors_[cursor] = rstd::move(behaviors_[desired]); behaviors_[desired] = rstd::move(previous);
-                }
-                ++cursor;
-            }
-        }
-        routes_dirty_ = true; prune_requested_ = true;
-        edit.published_ = true;
-        return failure.is_some() ? Result<empty, InputError>(Err(*failure)) : Result<empty, InputError>(Ok(empty{}));
-    }
+    auto retire_behavior(BehaviorEdit &edit, UiId target, NodeStateKey role) -> Result<empty, InputError>;
+    auto prepare_behavior_order(BehaviorEdit &edit, UiId target, Vec<NodeStateKey> roles) -> Result<empty, InputError>;
+    auto publish_behaviors(BehaviorEdit edit) -> Result<empty, InputError>;
     explicit EventRouter(UiDocument &document) : document_(document) {}
-    ~EventRouter() {
-        if (native_text_input_.is_some() && text_request_.is_some())
-            (*native_text_input_)->operator()(None<TextInputRequest>());
-        if (native_text_state_.is_some() && text_request_.is_some())
-            (*native_text_state_)->operator()(None<TextInputState>());
-    }
+    ~EventRouter();
     void begin_input_batch() {
         if (!busy_)
             prune_requested_ = true;
@@ -1001,18 +424,7 @@ class EventRouter {
                     handler->binding = Some(BindingGuard(guard));
         return result;
     }
-    auto disconnect(ConnectionId id) -> bool {
-        for (auto &handler : handlers_)
-            if (handler->id == id && handler->active) {
-                handler->active = false;
-                routes_dirty_ = true;
-                prune_requested_ = true;
-                if (!busy_)
-                    handlers_.retain([](const auto &item) { return item->active; });
-                return true;
-            }
-        return false;
-    }
+    auto disconnect(ConnectionId id) -> bool;
     template <class F> void set_native_capture(F callback) {
         native_capture_ =
             Some(Box<rstd::dyn<rstd::FnMut<NativeCaptureResult(PointerKind, bool)>>>::make(
@@ -1039,34 +451,13 @@ class EventRouter {
         notify_text_input(true);
         return Ok(empty{});
     }
-    auto clear_native_text_input() -> Result<empty, InputError> {
-        if (busy_ || !document_.can_route()) return Err(InputError::Reentrant);
-        if (native_text_input_.is_some()) (*native_text_input_)->operator()(None<TextInputRequest>());
-        if (native_text_state_.is_some()) (*native_text_state_)->operator()(None<TextInputState>());
-        native_text_input_ = None(); native_text_state_ = None(); delivered_text_state_ = None();
-        text_result_ = NativeTextInputResult::Unsupported;
-        return Ok(empty{});
-    }
+    auto clear_native_text_input() -> Result<empty, InputError>;
     auto text_input_request() const -> Option<TextInputRequest> { return text_request_; }
     auto text_input_state() const -> Option<TextInputState> { return current_text_state(); }
     auto text_input_client() const -> Option<UiId> { return text_client_; }
     auto text_input_result() const -> NativeTextInputResult { return text_result_; }
     auto set_text_input_surrounding(UiId client, TextSurrounding surrounding,
-                                    TextChangeCause cause = TextChangeCause::Other) -> Result<empty, InputError> {
-        if (closed_) return Err(InputError::Unavailable);
-        if (!document_.valid(client)) return Err(InputError::InvalidId);
-        if (!surrounding.valid() || unsigned(cause) > unsigned(TextChangeCause::Other))
-            return Err(InputError::InvalidEvent);
-        SurroundingEntry *found{};
-        for (auto &entry : surroundings_) if (entry.client == client) { found = &entry; break; }
-        if (found && found->value == surrounding) return Ok(empty{});
-        if (!surrounding.present()) surroundings_.retain([&](const auto &entry) { return entry.client != client; });
-        else if (found) { found->value = rstd::move(surrounding); found->cause = cause; }
-        else surroundings_.push({client, rstd::move(surrounding), cause});
-        if (!busy_ && document_.can_route()) { begin(); return end(); }
-        document_.bindings().wake();
-        return Ok(empty{});
-    }
+                                    TextChangeCause cause = TextChangeCause::Other) -> Result<empty, InputError>;
     auto restart_text_input(UiId client) -> Result<empty, InputError> {
         if (text_client_ != Some(client)) return Err(InputError::Unavailable);
         return command({CommandType::RestartText, 0, Some(client)});
@@ -1096,85 +487,19 @@ class EventRouter {
         clipboard_write_request_ = Some(Box<rstd::dyn<rstd::FnMut<Result<empty, ClipboardError>(Serial, Serial, ref<str>)>>>::make(rstd::move(request)));
         return Ok(empty{});
     }
-    auto clear_clipboard() -> Result<empty, InputError> {
-        if (busy_ || !document_.can_route()) return Err(InputError::Reentrant);
-        clipboard_read_ = None(); clipboard_write_ = None(); clipboard_request_ = None(); clipboard_write_request_ = None();
-        clipboard_pending_.clear(); return Ok(empty{});
-    }
-    auto read_clipboard() -> Result<String, ClipboardError> {
-        if (closed_) return Err(ClipboardError::Unavailable);
-        if (clipboard_read_.is_none()) return Err(ClipboardError::Unsupported);
-        return (*clipboard_read_)->operator()();
-    }
-    auto request_clipboard(UiId target) -> Result<Serial, ClipboardError> {
-        if (closed_ || !window_focused_ || focus_ != Some(target)) return Err(ClipboardError::Unavailable);
-        if (clipboard_request_.is_none()) return Err(ClipboardError::Unsupported);
-        if (clipboard_pending_.len() >= usize(32)) return Err(ClipboardError::Limit);
-        auto id = new_session();
-        clipboard_pending_.push({id, target, focus_revision_});
-        auto result = (*clipboard_request_)->operator()(id);
-        if (result.is_err()) {
-            clipboard_pending_.retain([&](const ClipboardPending &pending) { return pending.id != id; });
-            return Err(result.unwrap_err());
-        }
-        return Ok(id);
-    }
-    auto write_clipboard(ref<str> text) -> Result<empty, ClipboardError> {
-        if (closed_) return Err(ClipboardError::Unavailable);
-        if (clipboard_write_.is_none()) return Err(ClipboardError::Unsupported);
-        return (*clipboard_write_)->operator()(text);
-    }
-    auto request_clipboard_write(UiId target, Serial activation, ref<str> text) -> Result<Serial, ClipboardError> {
-        if (closed_ || !window_focused_ || focus_ != Some(target)) return Err(ClipboardError::Unavailable);
-        if (clipboard_write_request_.is_none()) return Err(ClipboardError::Unsupported);
-        if (clipboard_pending_.len() >= usize(32)) return Err(ClipboardError::Limit);
-        auto id = new_session();
-        clipboard_pending_.push({id, target, focus_revision_, true});
-        auto result = (*clipboard_write_request_)->operator()(id, activation, text);
-        if (result.is_err()) {
-            clipboard_pending_.retain([&](const ClipboardPending &pending) { return pending.id != id; });
-            return Err(result.unwrap_err());
-        }
-        return Ok(id);
-    }
-    auto native_capture(Index id, DeviceId device = 0) const -> NativeCaptureResult {
-        for (const auto &pointer : pointers_)
-            if (pointer.id == id && pointer.device == device)
-                return pointer.native_capture;
-        return NativeCaptureResult::Unsupported;
-    }
+    auto clear_clipboard() -> Result<empty, InputError>;
+    auto read_clipboard() -> Result<String, ClipboardError>;
+    auto request_clipboard(UiId target) -> Result<Serial, ClipboardError>;
+    auto write_clipboard(ref<str> text) -> Result<empty, ClipboardError>;
+    auto request_clipboard_write(UiId target, Serial activation, ref<str> text) -> Result<Serial, ClipboardError>;
+    auto native_capture(Index id, DeviceId device = 0) const -> NativeCaptureResult;
     template <class F> void set_navigation(F policy) {
         navigation_ =
             Some(Box<rstd::dyn<rstd::FnMut<void(EventRouter &, const InputEvent &)>>>::make(
                 rstd::move(policy)));
     }
-    auto pointer_available(UiId id) const -> bool {
-        if (closed_ || !window_focused_ || update_.is_none() || !eligible(*update_,id,true)) return false;
-        auto mount=document_.mount_state(id);auto visual=update_->get(id);
-        if (mount.is_err() || !mount->mounted || !visual || visual->mount_generation!=mount->generation) return false;
-        auto cursor=Some(id);
-        for (unsigned depth{};cursor.is_some() && depth<256;++depth) {
-            auto style=document_.resolved_style(*cursor);
-            if (style.is_err() || !style->visible || !style->enabled || !style->hit_test_visible || style->transform.inverse().is_none()) return false;
-            auto relation=document_.parent_relation(*cursor);if (relation.is_err()) return false;
-            if (relation->is_none()) return cursor==update_->root();
-            cursor=Some(UiId((**relation).parent));
-        }
-        return false;
-    }
-    auto input_availability(UiId id) -> InputAvailability {
-        auto mount=document_.mount_state(id);if (mount.is_err()) return {};
-        InputAvailability result{mount->mounted,true,true,window_focused_,pointer_available(id),mount->generation};
-        auto cursor=Some(id);
-        for (unsigned depth{};cursor.is_some() && depth<256;++depth) {
-            auto style=document_.resolved_style(*cursor);if (style.is_err()) return {};
-            result.visible&=style->visible;result.enabled&=style->enabled;
-            auto relation=document_.parent_relation(*cursor);if (relation.is_err()) return {};
-            if (relation->is_none()) return result;
-            cursor=Some(UiId((**relation).parent));
-        }
-        return {};
-    }
+    auto pointer_available(UiId id) const -> bool;
+    auto input_availability(UiId id) -> InputAvailability;
     template <class F> auto on_input_availability_changed(UiId target,F callback) -> Result<Binding,InputError> {
         if (closed_) return Err(InputError::Unavailable);
         if (busy_ || document_.routing()) return Err(InputError::Reentrant);
@@ -1195,79 +520,17 @@ class EventRouter {
         pointer_observers_.push({target,binding.guard(),pointer_available(target),Box<rstd::dyn<rstd::FnMut<void(const bool &)>>>::make([callback=rstd::move(callback)](const bool &value) mutable {callback(value);})});
         return Ok(rstd::move(binding));
     }
-    auto focus_candidates() const -> Vec<UiId> {
-        Vec<UiId> candidates;
-        if (update_.is_some())
-            for (const auto &visual : update_->visuals())
-                if (eligible(*update_, visual.id, false))
-                    candidates.push(UiId(visual.id));
-        return candidates;
-    }
+    auto focus_candidates() const -> Vec<UiId>;
     auto transfer_input(ParticipantId participant, slice<PointerKey> pointers)
-        -> Result<empty, InputError> {
-        if (closed_ || update_.is_none())
-            return Err(InputError::Unavailable);
-        if (!busy_ && !document_.can_route())
-            return Err(InputError::Reentrant);
-        if (transfers_.len() >= usize(256))
-            return Err(InputError::Limit);
-        Transfer transfer{participant, {}};
-        for (auto key : pointers) {
-            auto state = pointer(key.pointer, key.device);
-            if (!state || (!state->buttons && !state->contact))
-                return Err(InputError::InvalidSequence);
-            transfer.pointers.push(PointerKey(key));
-        }
-        transfers_.push(rstd::move(transfer));
-        if (!busy_) {
-            begin();
-            return end();
-        }
-        return Ok(empty{});
-    }
+        -> Result<empty, InputError>;
     auto arena() -> InputArena & { return arena_; }
-    auto release_input(slice<PointerKey> pointers) -> Result<empty, InputError> {
-        if (closed_ || update_.is_none())
-            return Err(InputError::Unavailable);
-        if (!busy_ && !document_.can_route())
-            return Err(InputError::Reentrant);
-        if (releases_.len() >= usize(256))
-            return Err(InputError::Limit);
-        if (pointers.is_empty())
-            return Err(InputError::InvalidSequence);
-        Vec<PointerKey> pending;
-        for (usize i{}; i < pointers.len(); ++i) {
-            auto state = pointer(pointers[i].pointer, pointers[i].device);
-            if (!state || (!state->buttons && !state->contact) || !arena_.has_stream(pointers[i]))
-                return Err(InputError::InvalidSequence);
-            for (usize j{}; j < i; ++j)
-                if (pointers[i] == pointers[j])
-                    return Err(InputError::InvalidSequence);
-            pending.push(PointerKey(pointers[i]));
-        }
-        releases_.push(rstd::move(pending));
-        if (!busy_) {
-            begin();
-            return end();
-        }
-        return Ok(empty{});
-    }
+    auto release_input(slice<PointerKey> pointers) -> Result<empty, InputError>;
     auto work() const -> InputWork { return work_; }
     auto contacts() const -> slice<PointerContact> { return contacts_.as_slice(); }
     auto focused() const -> Option<UiId> { return focus_; }
-    auto cancel_subtree(UiId root) -> Result<empty,InputError> {
-        if(closed_)return Err(InputError::Unavailable);
-        if(!document_.valid(root))return Err(InputError::InvalidId);
-        if(!update_ || !update_->get(root))return Ok(empty{});
-        return command({CommandType::CancelSubtree,0,Some(root)});
-    }
+    auto cancel_subtree(UiId root) -> Result<empty,InputError>;
     auto focus_revision() const -> Serial { return focus_revision_; }
-    auto captured(Index id, DeviceId device = 0) const -> Option<UiId> {
-        for (const auto &state : pointers_)
-            if (state.id == id && state.device == device)
-                return state.capture;
-        return None();
-    }
+    auto captured(Index id, DeviceId device = 0) const -> Option<UiId>;
     auto open_scope(UiId root, InputScopeOptions options, BindingGuard guard)
         -> Result<InputScopeRegistration, InputError> {
         return scopes_.open(root, options, guard);
@@ -1293,463 +556,13 @@ class EventRouter {
     auto request_focus(Option<UiId> target) -> Result<empty, InputError> {
         return command({CommandType::Focus, 0, target});
     }
-    auto synchronize(InputSnapshot update) -> Result<empty, InputError> {
-        if (closed_)
-            return Err(InputError::Unavailable);
-        if (busy_ || !document_.can_route())
-            return Err(InputError::Reentrant);
-        if (update.document() != document_.session() ||
-            (update_.is_some() && update.revision() < update_->revision()))
-            return Err(InputError::InvalidId);
-        if (update_.is_none() || update_->layout_revision() != update.layout_revision())
-            prune_requested_ = true;
-        begin();
-        controls_ = false;
-        auto restore = scopes_.synchronize(update);
-        arena_.set_scope_root(scopes_.pointer_root());
-        if (update_.is_some()) {
-            auto synchronized = arena_.synchronize(*update_, update, contacts_.as_slice());
-            if (synchronized.is_err()) {
-                failure_ = Some(synchronized.unwrap_err());
-                return end();
-            }
-            for (auto &state : pointers_) {
-                bool lost_capture =
-                    state.capture.is_some() &&
-                    (!same_mount(update, *state.capture, true) || lost_receiver(*state.capture) ||
-                     (state.claimed && !state.relinquished &&
-                      !arena_.ownership_alive({state.device, state.id})));
-                if (state.claimed)
-                    for (auto owner : arena_.owners({state.device, state.id}))
-                        lost_capture |= !same_mount(update, owner, true);
-                bool lost_hover = state.hover.is_some() && !same_mount(update, *state.hover, true);
-                bool lost_sequence = state.capture.is_none() && state.sequence_target.is_some() &&
-                                     !same_mount(update, *state.sequence_target, true);
-                if (lost_capture || lost_sequence || (state.capture.is_none() && lost_hover)) {
-                    bool outside = (state.capture.is_some() &&
-                                    !scopes_.allows(update, *state.capture, true)) ||
-                                   (state.sequence_target.is_some() &&
-                                    !scopes_.allows(update, *state.sequence_target, true));
-                    cancel(state, outside ? CancelReason::ScopeChanged
-                                  : state.capture.is_some() && lost_receiver(*state.capture)
-                                      ? CancelReason::ReceiverLost
-                                      : CancelReason::Detached);
-                }
-                if (lost_hover)
-                    hover(state, None());
-            }
-            if (focus_.is_some() && (!same_mount(update, *focus_, false) || lost_receiver(*focus_)))
-                change_focus(None());
-        }
-        pointers_.retain([](const Pointer &pointer) {
-            return pointer.kind != PointerKind::Touch || pointer.contact ||
-                   pointer.capture.is_some();
-        });
-        refresh_contacts();
-        if (prune_requested_)
-            arena_.prune();
-        update_ = Some(rstd::move(update));
-        availability_dirty_=true;
-        controls_ = true;
-        if (window_focused_) {
-            if (restore.is_some())
-                change_focus(scopes_.restore_target(*update_, *restore));
-            scopes_.resolve_focus(*update_, true,
-                                  [&](Option<UiId> target) { change_focus(target); });
-        } else
-            scopes_.resolve_focus(*update_, false, [](Option<UiId>) {});
-        if (window_focused_)
-            for (auto &state : pointers_) {
-                if (state.kind != PointerKind::Touch && state.inside_window) {
-                    auto hit = hit_at(*update_, state.position);
-                    hover(state, hit.is_some() ? Some(*hit) : None<UiId>());
-                }
-            }
-        return end();
-    }
-    auto can_coalesce(const InputEvent &a, const InputEvent &b) -> bool {
-        if (a.type != EventType::PointerMove || b.type != a.type || a.pointer != b.pointer ||
-            a.device != b.device || a.pointer_kind != b.pointer_kind ||
-            a.coordinate_generation != b.coordinate_generation ||
-            a.sample_time.clock != b.sample_time.clock ||
-            b.sample_time.nanoseconds < a.sample_time.nanoseconds ||
-            a.modifiers.shift != b.modifiers.shift || a.modifiers.control != b.modifiers.control ||
-            a.modifiers.alt != b.modifiers.alt || a.modifiers.meta != b.modifiers.meta ||
-            arena_.has_participants())
-            return false;
-        auto state = pointer(a.pointer, a.device);
-        if (!state || state->capture.is_none() || (!state->buttons && !state->contact))
-            return false;
-        if (busy_)
-            return false;
-        auto row = node_routes(*state->capture);
-        if (!row || every_sample_ != usize() || motion_handlers_ != usize())
-            return false;
-        for (auto index : row->behaviors) {
-            const auto &entry = behaviors_[index];
-            if (entry->target == *state->capture &&
-                (entry->binding.is_none() || entry->binding->alive()))
-                return true;
-        }
-        return false;
-    }
+    auto synchronize(InputSnapshot update) -> Result<empty, InputError>;
+    auto can_coalesce(const InputEvent &a, const InputEvent &b) -> bool;
     auto snapshot() const -> Option<InputSnapshot> {
         return update_.is_some() ? Some(InputSnapshot(*update_)) : None<InputSnapshot>();
     }
-    auto completed_content(UiId id, Serial source_id) const -> Result<Option<FrameContent>, FrameError> {
-        auto current = update_ ? update_->get(id) : nullptr;
-        auto completed = completed_frame_ ? completed_frame_->update().get(id) : nullptr;
-        if (!current || !completed || current->mount_generation != completed->mount_generation)
-            return Ok(None<FrameContent>());
-        return completed_frame_->content(id, source_id);
-    }
-    auto dispatch(InputEvent input) -> Result<empty, InputError> {
-        work_ = {};
-        if (closed_)
-            return Err(InputError::Unavailable);
-        if (busy_ || !document_.can_route())
-            return Err(InputError::Reentrant);
-        if (update_.is_none())
-            return Err(InputError::Unavailable);
-        bool pointer_enter = input.type == EventType::WindowPointerEnter;
-        bool pointer_leave = input.type == EventType::WindowPointerLeave;
-        bool pointer_event = pointer_enter ||
-            input.type == EventType::PointerMove || input.type == EventType::PointerDown ||
-            input.type == EventType::PointerUp || input.type == EventType::PointerCancel;
-        bool key_event = input.type == EventType::KeyDown || input.type == EventType::KeyUp;
-        bool transaction_event = input.type == EventType::TextTransaction;
-        bool clipboard_event = input.type == EventType::ClipboardResult;
-        bool clipboard_write_event = input.type == EventType::ClipboardWriteResult;
-        bool text_event = input.type == EventType::TextInput || input.type == EventType::TextEditing || transaction_event;
-        bool wheel_event = input.type == EventType::Wheel;
-        bool device_event = input.type == EventType::DeviceLost;
-        bool reset_event = input.type == EventType::InputReset;
-        bool window_event =
-            input.type == EventType::WindowFocusLost || input.type == EventType::WindowFocusGained;
-        if ((!pointer_event && !pointer_leave && !key_event && !text_event && !clipboard_event && !clipboard_write_event && !window_event && !wheel_event && !device_event && !reset_event) ||
-            (text_event && !transaction_event && (!input.text.present() ||
-                (input.type == EventType::TextInput && input.text.selection().is_some()))) ||
-            (transaction_event && (!input.transaction.get() || input.text.present())) ||
-            (!transaction_event && input.transaction.get()) ||
-            (clipboard_event && (!input.clipboard_request || input.text_session ||
-                (input.clipboard_error.is_some() == input.text.present()) || input.text.selection().is_some() ||
-                (input.clipboard_error.is_some() && unsigned(*input.clipboard_error) > unsigned(ClipboardError::Limit)))) ||
-            (clipboard_write_event && (!input.clipboard_request || input.text.present() || input.text_session ||
-                (input.clipboard_error.is_some() && unsigned(*input.clipboard_error) > unsigned(ClipboardError::Limit)))) ||
-            (!clipboard_event && !clipboard_write_event && (input.clipboard_request || input.clipboard_error.is_some())) ||
-            (!text_event && !clipboard_event && (input.text.present() || input.text_session != 0)) ||
-            ((pointer_event || wheel_event) &&
-             (!finite(input.position.x) || !finite(input.position.y))) ||
-            (wheel_event &&
-             (!finite(input.scroll_delta.x) || !finite(input.scroll_delta.y) ||
-              static_cast<unsigned>(input.scroll_unit) > static_cast<unsigned>(ScrollUnit::Lines))))
-            return Err(InputError::InvalidEvent);
-        if (!window_focused_ && !window_event && !reset_event)
-            return Ok(empty{});
-        if (static_cast<unsigned>(input.button) > static_cast<unsigned>(PointerButton::Forward) ||
-            static_cast<unsigned>(input.pointer_kind) > static_cast<unsigned>(PointerKind::Touch))
-            return Err(InputError::InvalidEvent);
-        unsigned mask = input.button == PointerButton::None
-                            ? 0u
-                            : 1u << (static_cast<unsigned>(input.button) - 1);
-        if ((input.type == EventType::PointerDown || input.type == EventType::PointerUp) && !mask &&
-            input.pointer_kind != PointerKind::Touch)
-            return Err(InputError::InvalidEvent);
-        Pointer *state{};
-        if (pointer_event) {
-            state = pointer(input.pointer, input.device);
-            if (!state) {
-                if (input.type == EventType::PointerUp)
-                    return Ok(empty{});
-                if (input.type == EventType::PointerCancel)
-                    return Ok(empty{});
-                if (pointers_.len() >= usize(32))
-                    return Err(InputError::Limit);
-                pointers_.push({input.pointer,
-                                input.position,
-                                input.pointer_kind,
-                                0,
-                                {},
-                                {},
-                                {},
-                                input.device});
-                state = pointer(input.pointer, input.device);
-            }
-            if (input.type == EventType::PointerDown &&
-                ((state->buttons & mask) || (state->kind == PointerKind::Touch && state->contact)))
-                return Err(InputError::InvalidSequence);
-            if (input.type == EventType::PointerUp && !(state->buttons & mask) &&
-                !(state->kind == PointerKind::Touch && state->contact))
-                return Ok(empty{});
-            if (pointer_enter) {
-                state->inside_window = true;
-                input.type = EventType::PointerMove;
-            }
-        }
-        begin();
-        if (pointer_leave) {
-            auto value = pointer(input.pointer, input.device);
-            if (value) {
-                value->inside_window = false;
-                hover(*value, None());
-            }
-        } else if (reset_event) {
-            availability_dirty_=true;
-            controls_ = false;
-            for (auto &value : pointers_) {
-                cancel(value, CancelReason::InputLost);
-                hover(value, None());
-            }
-            pointers_.clear();
-            change_focus(None(), CancelReason::InputLost);
-            if (input.window_focused.is_some()) window_focused_ = *input.window_focused;
-            controls_ = true;
-        } else if (input.type == EventType::WindowFocusLost) {
-            availability_dirty_=true;
-            controls_ = false;
-            window_focused_ = false;
-            for (auto &value : pointers_) {
-                cancel(value, CancelReason::FocusLost);
-                hover(value, None());
-            }
-            pointers_.clear();
-            change_focus(None());
-            controls_ = true;
-        } else if (input.type == EventType::WindowFocusGained) {
-            availability_dirty_=true;
-            window_focused_ = true;
-            refresh_text_input(true);
-        } else if (device_event) {
-            controls_ = false;
-            for (auto &value : pointers_)
-                if (value.device == input.device) {
-                    cancel(value, CancelReason::DeviceLost);
-                    hover(value, None());
-                }
-            pointers_.retain([&](const Pointer &value) { return value.device != input.device; });
-            controls_ = true;
-        } else if (wheel_event) {
-            auto hit = hit_at(*update_, input.position);
-            if (hit.is_some())
-                route(*update_, *hit, input);
-        } else if (clipboard_event || clipboard_write_event) {
-            Option<UiId> target;
-            for (const auto &pending : clipboard_pending_)
-                if (pending.id == input.clipboard_request && pending.write == clipboard_write_event && pending.focus_revision == focus_revision_ &&
-                    focus_ == Some(pending.target)) { target = Some(UiId(pending.target)); break; }
-            if (target.is_some()) clipboard_pending_.retain([&](const ClipboardPending &pending) { return pending.id != input.clipboard_request; });
-            if (target.is_some()) route(*update_, *target, input, true);
-        } else if (text_event) {
-            if (text_client_.is_some() && text_request_.is_some() &&
-                (input.text_session == 0 || input.text_session == text_request_->session))
-                route(*update_, *text_client_, input);
-        } else if (key_event) {
-            auto target = focus_.is_some() ? focus_ : scopes_.focus_root();
-            bool prevented = target.is_some() && route(*update_, *target, input);
-            if (!prevented && navigation_.is_some())
-                (*navigation_)->operator()(*this, input);
-        } else {
-            state->position = input.position;
-            state->sample_time = input.sample_time;
-            if (input.type == EventType::PointerCancel) {
-                controls_ = false;
-                cancel(*state, input.cancel_reason == CancelReason::None ? CancelReason::Native
-                                                                         : input.cancel_reason);
-                hover(*state, None());
-                controls_ = true;
-            } else {
-                auto hit = (state->kind == PointerKind::Touch && input.type != EventType::PointerDown) ||
-                                   !state->inside_window
-                               ? None<UiId>()
-                               : hit_at(*update_, input.position);
-                if (state->kind != PointerKind::Touch)
-                    hover(*state, hit.is_some() ? Some(*hit) : None<UiId>());
-                bool starting =
-                    input.type == EventType::PointerDown && !state->buttons && !state->contact;
-                if (starting) {
-                    if (next_sequence_ == ~Serial{}) {
-                        failure_ = Some(InputError::Limit);
-                        return end();
-                    }
-                    state->sequence = next_sequence_++;
-                    state->sequence_target = hit.is_some() ? Some(UiId(*hit)) : None<UiId>();
-                    state->claimed = false;
-                    state->relinquished = hit.is_none() && scopes_.pointer_root().is_some();
-                }
-                if (input.type == EventType::PointerDown) {
-                    if (state->kind == PointerKind::Touch)
-                        state->contact = true;
-                    else
-                        state->buttons |= mask;
-                }
-                input.sequence = state->sequence;
-                refresh_contacts();
-                if ((state->buttons || state->contact) && !state->relinquished &&
-                    (state->sequence_target.is_some() || arena_.has_global_participants())) {
-                    auto claims = arena_.process({input, state->sequence_target.is_some()
-                                                             ? *state->sequence_target
-                                                             : UiId{}},
-                                                 *update_, contacts_.as_slice());
-                    auto observed = arena_.work();
-                    work_.observations += observed.observations;
-                    work_.claims += observed.claims;
-                    if (claims.is_err()) {
-                        failure_ = Some(claims.unwrap_err());
-                        return end();
-                    }
-                    for (const auto &change : claims.unwrap()) {
-                        if (starting) {
-                            auto affected = pointer(change.pointer.pointer, change.pointer.device);
-                            if (!affected)
-                                continue;
-                            if (change.additional) {
-                                route(*update_, change.target,
-                                      event(EventType::CaptureGained, *affected), true);
-                                continue;
-                            }
-                            release(*affected, false);
-                            affected->capture = Some(UiId(change.target));
-                            affected->claimed = true;
-                            capture_native(*affected, true);
-                            route(*update_, change.target,
-                                  event(EventType::CaptureGained, *affected), true);
-                        } else
-                            apply_transfer(change);
-                    }
-                }
-                owner_targets_.clear();
-                if (state->claimed)
-                    arena_.owners({state->device, state->id}, owner_targets_);
-                auto &owners = owner_targets_;
-                if (!owners.is_empty()) {
-                    sharing_ = owners.len() > usize(1);
-                    shared_targets_.clear();
-                    for (auto target : owners)
-                        shared_targets_.push(UiId(target));
-                    for (auto target : owners)
-                        route(*update_, target, input);
-                    sharing_ = false;
-                    shared_targets_.clear();
-                } else if (!state->relinquished) {
-                    auto target = state->capture.is_some() ? state->capture
-                                  : (state->kind == PointerKind::Touch || state->buttons)
-                                      ? state->sequence_target
-                                      : state->hover;
-                    if (target.is_some())
-                        route(*update_, *target, input);
-                }
-                drain();
-                if (input.type == EventType::PointerUp) {
-                    state->buttons &= ~mask;
-                    if (state->kind == PointerKind::Touch)
-                        state->contact = false;
-                    if (!state->buttons && !state->contact) {
-                        controls_ = false;
-                        release(*state);
-                        controls_ = true;
-                        arena_.end({state->device, state->id}, *update_, contacts_.as_slice());
-                        state->sequence_target = None();
-                        state->claimed = false;
-                    }
-                }
-            }
-            if (state->kind == PointerKind::Touch &&
-                (input.type == EventType::PointerUp || input.type == EventType::PointerCancel)) {
-                hover(*state, None());
-                pointers_.retain([&](const Pointer &value) {
-                    return value.id != input.pointer || value.device != input.device;
-                });
-            }
-        }
-        refresh_contacts();
-        return end();
-    }
-    auto close() -> Result<empty, InputError> {
-        if (closed_)
-            return Ok(empty{});
-        if (busy_ || !document_.can_route())
-            return Err(InputError::Reentrant);
-        if (update_.is_some()) {
-            begin();
-            controls_ = false;
-            window_focused_ = false;
-            availability_dirty_=true;
-            for (auto &pointer : pointers_) {
-                cancel(pointer, CancelReason::Closed);
-                hover(pointer, None());
-            }
-            pointers_.clear();
-            change_focus(None(), CancelReason::Closed);
-            auto result = end();
-            if (result.is_err())
-                return result;
-        }
-        closed_ = true;
-        for (auto &observer:pointer_observers_) observer.guard.disconnect();
-        pointer_observers_.clear();
-        for (auto &observer:input_observers_) observer.guard.disconnect();
-        input_observers_.clear();
-        for (const auto &handler : handlers_)
-            if (handler->owns_binding && handler->binding.is_some())
-                handler->binding->disconnect();
-        for (const auto &behavior : behaviors_)
-            if (behavior->binding.is_some())
-                behavior->binding->disconnect();
-        handlers_.clear();
-        behaviors_.clear();
-        scopes_.close();
-        arena_.close();
-        contacts_.clear();
-        pointers_.clear();
-        surroundings_.clear();
-        clipboard_pending_.clear();
-        delivered_text_state_ = None();
-        update_ = None();
-        completed_frame_ = None();
-        return Ok(empty{});
-    }
+    auto completed_content(UiId id, Serial source_id) const -> Result<Option<FrameContent>, FrameError>;
+    auto dispatch(InputEvent input) -> Result<empty, InputError>;
+    auto close() -> Result<empty, InputError>;
 };
-inline auto EventContext::document() -> UiDocument & { return router_.document_; }
-inline auto EventContext::restart_text_input() -> Result<empty, InputError> { return router_.restart_text_input(event_.current); }
-inline auto EventContext::read_clipboard() -> Result<String, ClipboardError> { return router_.read_clipboard(); }
-inline auto EventContext::request_clipboard() -> Result<Serial, ClipboardError> { return router_.request_clipboard(event_.current); }
-inline auto EventContext::request_clipboard_write(ref<str> text) -> Result<Serial, ClipboardError> {
-    return router_.request_clipboard_write(event_.current, event_.input.activation, text);
-}
-inline auto EventContext::write_clipboard(ref<str> text) -> Result<empty, ClipboardError> { return router_.write_clipboard(text); }
-inline auto EventContext::visual(UiId id) const -> const UiVisual * {
-    return router_.update_->get(id);
-}
-inline auto EventContext::completed_content(UiId id, Serial source_id) const -> Result<Option<FrameContent>, FrameError> {
-    return router_.completed_content(id, source_id);
-}
-inline auto EventContext::hit_within() const -> bool {
-    auto hit = HitTest::target_at(*router_.update_, event_.input.position);
-    if (hit.is_none())
-        return false;
-    auto cursor = hit;
-    for (unsigned depth{}; cursor.is_some() && depth < 256; ++depth) {
-        if (*cursor == event_.current)
-            return true;
-        cursor = router_.update_->get(*cursor)->parent;
-    }
-    return false;
-}
-inline auto EventContext::capture_pointer() -> Result<empty, InputError> {
-    return router_.command({EventRouter::CommandType::Capture,
-                            event_.input.pointer,
-                            Some(UiId(event_.current)),
-                            {},
-                            event_.input.device});
-}
-inline auto EventContext::release_pointer() -> Result<empty, InputError> {
-    return router_.command({EventRouter::CommandType::Release,
-                            event_.input.pointer,
-                            Some(UiId(event_.current)),
-                            {},
-                            event_.input.device});
-}
-inline auto EventContext::focus() -> Result<empty, InputError> {
-    return router_.request_focus(Some(UiId(event_.current)));
-}
 } // namespace vui

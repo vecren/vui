@@ -19,7 +19,6 @@ vui-host = { path = "host" }
 vui-image = { path = "image" }
 vui-compose = { path = "compose" }
 rstd-std = { version = "0.1.5" }
-rstd-nostd = { version = "0.1.5" }
 vrento = { version = "0.1.0" }
 vectext = { version = "0.1.0" }
 ligraph = { version = "0.1.0" }

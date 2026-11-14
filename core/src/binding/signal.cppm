@@ -1,5 +1,5 @@
-export module vui:signal;
-import :binding;
+export module vui:binding.signal;
+import :binding.scope;
 using namespace rstd::prelude;
 
 export namespace vui {

@@ -1,6 +1,6 @@
 export module vui:node.ownership;
 import :types;
-import :binding;
+import :binding.scope;
 using namespace rstd::prelude;
 
 export namespace vui {

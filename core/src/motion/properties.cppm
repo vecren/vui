@@ -1,6 +1,6 @@
 export module vui:motion.properties;
-import :animation;
-import :binding;
+import :animation.types;
+import :binding.scope;
 using namespace rstd::prelude;
 
 export namespace vui {

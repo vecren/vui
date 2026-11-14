@@ -1,6 +1,6 @@
 export module vui:style.builder;
 import :node.types;
-import :layout;
+import :layout.types;
 using namespace rstd::prelude;
 
 export namespace vui {

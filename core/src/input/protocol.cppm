@@ -1,6 +1,6 @@
 export module vui:input.protocol;
 import :diagnostics;
-import :text;
+import :text.types;
 using namespace rstd::prelude;
 using namespace rstd::literals;
 

@@ -1,5 +1,5 @@
-export module vui:binding;
-import :wakeup;
+export module vui:binding.scope;
+import :runtime.wakeup;
 using namespace rstd::prelude;
 
 export namespace vui {

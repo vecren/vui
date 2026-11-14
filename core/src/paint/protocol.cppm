@@ -1,5 +1,5 @@
 export module vui:paint.protocol;
-import :display_list;
+import :paint.display_list;
 import :node.types;
 using namespace rstd::prelude;
 

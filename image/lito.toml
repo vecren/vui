@@ -7,8 +7,6 @@ license.workspace = true
 name = "vui-image"
 module = "vui.image"
 archive = "vui-image"
-sources = ["src/lib.cppm", "src/reader.cppm", "src/file.cppm", "src/detail/stb.cppm"]
 
 [dependencies]
 vui = { workspace = true, pub = true }
-rstd-nostd = { workspace = true, usage = "link" }

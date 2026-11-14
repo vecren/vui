@@ -7,9 +7,7 @@ license.workspace = true
 name = "vui-compose"
 module = "vui.compose"
 archive = "vui-compose"
-sources = ["src/lib.cppm", "src/types.cppm", "src/element.cppm", "src/behavior.cppm", "src/runtime.cppm", "src/inputs.cppm", "src/compiler.cppm", "src/callables.cppm", "src/lifecycle.cppm", "src/latest.cppm", "src/animation.cppm", "src/controls.cppm"]
 
 [dependencies]
 vui = { workspace = true, pub = true }
 vui-controls = { workspace = true, pub = true }
-rstd-nostd = { workspace = true, usage = "link" }

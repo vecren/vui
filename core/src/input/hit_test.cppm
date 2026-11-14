@@ -1,5 +1,5 @@
-export module vui:input;
-import :document;
+export module vui:input.hit_test;
+import :document.interface;
 using namespace rstd::prelude;
 
 export namespace vui {

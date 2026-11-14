@@ -9,11 +9,7 @@ struct ScrollMotionOptions {
     bool enabled{}, inertia{true};
     ScrollMovement movement{ScrollMovement::Clamped};
     Scalar threshold{8}, deceleration_rate{.135}, elasticity{.1}, rubber_scale{1};
-    auto valid() const -> bool {
-        return (movement==ScrollMovement::Clamped || movement==ScrollMovement::Elastic) &&
-            finite(threshold) && threshold>=0 && threshold<=1048576 && finite(deceleration_rate) && deceleration_rate>=0 && deceleration_rate<=1 &&
-            finite(elasticity) && elasticity>=.001 && elasticity<=60 && finite(rubber_scale) && rubber_scale>=0 && rubber_scale<=10;
-    }
+    auto valid() const -> bool;
 };
 struct ScrollStyle {
     friend auto operator==(const ScrollStyle &, const ScrollStyle &) -> bool = default;

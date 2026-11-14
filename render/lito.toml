@@ -12,7 +12,6 @@ archive = "vui-render"
 lito-spirv = { version = "0.1.0" }
 vui = { workspace = true, pub = true }
 vrento = { workspace = true, pub = true }
-rstd-nostd = { workspace = true, usage = "link" }
 
 [build-tools.glslang]
 path = "glslangValidator"

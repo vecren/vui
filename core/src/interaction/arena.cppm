@@ -1,5 +1,5 @@
 export module vui:interaction.arena;
-import :document;
+import :document.interface;
 import :input.protocol;
 import :input.scopes;
 using namespace rstd::prelude;

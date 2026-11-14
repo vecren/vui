@@ -15,136 +15,27 @@ class Win32Text {
     rstd::uint32_t placement_dpi_{};
     bool focused_{}, composing_{}, preedit_{}, cancelling_{};
 
-    static auto read(win::HIMC context, unsigned kind) -> Option<Vec<u16>> {
-        auto bytes = win::ImmGetCompositionStringW(context, kind, nullptr, 0);
-        if (bytes < 0 || bytes > 65536 || bytes % sizeof(wchar_t)) return None();
-        Vec<wchar_t> buffer;
-        buffer.resize(usize(bytes / sizeof(wchar_t)), wchar_t{});
-        if (bytes && win::ImmGetCompositionStringW(context, kind, buffer.as_mut_slice().as_raw_ptr(),
-                                                   unsigned(bytes)) != bytes) return None();
-        Vec<u16> result;
-        for (auto value : buffer) result.push(u16(value));
-        return Some(rstd::move(result));
-    }
-    static auto text(slice<u16> units) -> Option<TextInput> {
-        auto native = rstd::os::windows::ffi::OsStringExt::from_wide(units);
-        auto decoded = rstd::move(native).into_string();
-        if (decoded.is_err()) return None();
-        auto value = TextInput::create(decoded->as_str());
-        return value.is_ok() ? Some(rstd::move(value).unwrap()) : None<TextInput>();
-    }
-    static auto cursor(slice<u16> units, long offset) -> Option<Index> {
-        if (offset < 0 || usize(offset) > units.len()) return None();
-        auto prefix = slice<u16>::from_raw_parts(units.as_raw_ptr(), usize(offset));
-        auto native = rstd::os::windows::ffi::OsStringExt::from_wide(prefix);
-        auto decoded = rstd::move(native).into_string();
-        if (decoded.is_err() || decoded->len() > usize(~Index{})) return None();
-        return Some(Index(decoded->len().to_primitive()));
-    }
-    void publish(TextInputTransaction value) {
-        if (!focused_ || state_.is_none()) return;
-        auto transaction = TextTransaction::create(rstd::move(value));
-        if (transaction.is_err()) return;
-        InputEvent event; event.type = EventType::TextTransaction;
-        event.text_session = state_->request.session;
-        event.transaction = rstd::move(transaction).unwrap();
-        emit_(sink_, rstd::move(event));
-    }
-    void clear_preedit() {
-        if (!preedit_) return;
-        TextInputTransaction value;
-        value.preedit = TextInput::create(""_str).unwrap();
-        publish(rstd::move(value));
-        preedit_ = false;
-    }
-    void cancel(win::HWND window) {
-        if (state_.is_none() && !composing_ && !preedit_) return;
-        clear_preedit(); composing_ = false;
-        cancelling_ = true;
-        auto context = win::ImmGetContext(window);
-        if (context) {
-            win::ImmNotifyIME(context, win::ime_cancel, win::ime_cancel_composition, 0);
-            win::ImmReleaseContext(window, context);
-        }
-        cancelling_ = false;
-    }
-    static auto position_valid(Rect area, rstd::uint32_t dpi) -> bool {
-        auto scale = Scalar(dpi ? dpi : 96) / Scalar(96);
-        auto x = area.x * scale, y = area.y * scale, right = (area.x + area.width) * scale;
-        auto bottom = (area.y + area.height) * scale;
-        return finite(x) && finite(y) && finite(right) && finite(bottom) &&
-               x >= -32768 && y >= -32768 && right <= 32767 && bottom <= 32767;
-    }
-    auto place(win::HWND window, Rect area, rstd::uint32_t dpi) -> NativeTextInputResult {
-        auto scale = Scalar(dpi ? dpi : 96) / Scalar(96);
-        auto x = area.x * scale, y = area.y * scale, right = (area.x + area.width) * scale;
-        auto bottom = (area.y + area.height) * scale;
-        if (!position_valid(area, dpi)) return NativeTextInputResult::Failed;
-        auto context = win::ImmGetContext(window);
-        if (!context) return NativeTextInputResult::Unsupported;
-        win::COMPOSITIONFORM composition{};
-        composition.dwStyle = win::ime_composition_point;
-        composition.ptCurrentPos = {long(x), long(bottom)};
-        win::CANDIDATEFORM candidate{};
-        candidate.dwStyle = win::ime_candidate_exclude;
-        candidate.ptCurrentPos = {long(x), long(bottom)};
-        candidate.rcArea = {long(x), long(y), long(right), long(bottom)};
-        auto result = win::ImmSetCompositionWindow(context, &composition) &&
-                      win::ImmSetCandidateWindow(context, &candidate);
-        win::ImmReleaseContext(window, context);
-        return result ? NativeTextInputResult::Succeeded : NativeTextInputResult::Failed;
-    }
+    static auto read(win::HIMC context, unsigned kind) -> Option<Vec<u16>>;
+    static auto text(slice<u16> units) -> Option<TextInput>;
+    static auto cursor(slice<u16> units, long offset) -> Option<Index>;
+    void publish(TextInputTransaction value);
+    void clear_preedit();
+    void cancel(win::HWND window);
+    static auto position_valid(Rect area, rstd::uint32_t dpi) -> bool;
+    auto place(win::HWND window, Rect area, rstd::uint32_t dpi) -> NativeTextInputResult;
 
   public:
     Win32Text(void *sink, void (*emit)(void *, InputEvent)) : sink_(sink), emit_(emit) {}
     static auto transaction(Option<slice<u16>> result, Option<slice<u16>> preedit,
-                            long position, bool previous_preedit) -> Option<TextInputTransaction> {
-        if (result.is_none() && preedit.is_none()) return None();
-        TextInputTransaction value;
-        if (result.is_some()) {
-            auto decoded = text(*result);
-            if (decoded.is_none()) return None();
-            value.commit = rstd::move(decoded).unwrap();
-        }
-        if (preedit.is_some()) {
-            auto decoded = text(*preedit);
-            auto caret = position == -1 ? Some(Index(0)) : cursor(*preedit, position);
-            if (decoded.is_none() || caret.is_none()) return None();
-            value.preedit = rstd::move(decoded).unwrap();
-            value.preedit_cursor = Some(TextPreeditCursor{*caret, *caret, position != -1, false});
-        } else if (result.is_some() && previous_preedit) {
-            value.preedit = TextInput::create(""_str).unwrap();
-        }
-        return Some(rstd::move(value));
-    }
+                            long position, bool previous_preedit) -> Option<TextInputTransaction>;
     auto session() const -> Option<Serial> {
         return state_.is_some() ? Some(Serial(state_->request.session)) : None<Serial>();
     }
     auto composing() const -> bool { return composing_; }
     auto accepts_text() const -> bool { return focused_ && state_.is_some() && !composing_ && !cancelling_; }
     auto set_state(win::HWND window, Option<TextInputState> value, rstd::uint32_t dpi)
-        -> NativeTextInputResult {
-        if (value.is_some() && !position_valid(value->request.area, dpi))
-            return NativeTextInputResult::Failed;
-        auto next = value.is_some() ? Some(Serial(value->request.session)) : None<Serial>();
-        auto outcome = NativeTextInputResult::Succeeded;
-        if (value.is_some() && (state_.is_none() || session() != next ||
-            state_->request.area != value->request.area || placement_dpi_ != dpi)) {
-            outcome = place(window, value->request.area, dpi);
-            if (outcome == NativeTextInputResult::Failed) return outcome;
-            placement_dpi_ = outcome == NativeTextInputResult::Succeeded ? dpi : 0;
-        }
-        if (session() != next) cancel(window);
-        state_ = rstd::move(value);
-        if (state_.is_none()) placement_dpi_ = 0;
-        return outcome;
-    }
-    void focus(win::HWND window, bool focused, rstd::uint32_t dpi) {
-        if (focused_ && !focused) cancel(window);
-        focused_ = focused;
-        if (focused && state_.is_some())
-            placement_dpi_ = place(window, state_->request.area, dpi) == NativeTextInputResult::Succeeded ? dpi : 0;
-    }
+        -> NativeTextInputResult;
+    void focus(win::HWND window, bool focused, rstd::uint32_t dpi);
     void reposition(win::HWND window, rstd::uint32_t dpi) {
         if (state_.is_some())
             placement_dpi_ = place(window, state_->request.area, dpi) == NativeTextInputResult::Succeeded ? dpi : 0;
@@ -153,32 +44,6 @@ class Win32Text {
     void end() { clear_preedit(); composing_ = false; }
     void close(win::HWND window) { cancel(window); state_ = None(); placement_dpi_ = 0; focused_ = false; }
 
-    auto compose(win::HWND window, win::LPARAM flags) -> bool {
-        if (cancelling_) return true;
-        if (!focused_ || state_.is_none()) return false;
-        if (!composing_) return true;
-        auto context = win::ImmGetContext(window);
-        if (!context) { clear_preedit(); composing_ = false; return true; }
-        auto has_result = (flags & win::ime_result) != 0;
-        auto has_preedit = (flags & win::ime_preedit_updates) != 0;
-        auto result = has_result ? read(context, win::ime_result) : None<Vec<u16>>();
-        auto preedit = has_preedit ? read(context, win::ime_preedit) : None<Vec<u16>>();
-        auto position = has_preedit ? win::ImmGetCompositionStringW(context, win::ime_cursor, nullptr, 0) : -1;
-        win::ImmReleaseContext(window, context);
-        if ((has_result && result.is_none()) || (has_preedit && preedit.is_none())) {
-            clear_preedit(); composing_ = false; return true;
-        }
-        if (!has_result && !has_preedit) {
-            if (!(flags & win::ime_all_updates)) clear_preedit();
-            return true;
-        }
-        auto value = transaction(has_result ? Some(result->as_slice()) : None<slice<u16>>(),
-                                 has_preedit ? Some(preedit->as_slice()) : None<slice<u16>>(),
-                                 position, preedit_);
-        if (value.is_none()) { clear_preedit(); return true; }
-        if (value->preedit.present()) preedit_ = !value->preedit.text()->is_empty();
-        publish(rstd::move(value).unwrap());
-        return true;
-    }
+    auto compose(win::HWND window, win::LPARAM flags) -> bool;
 };
 }

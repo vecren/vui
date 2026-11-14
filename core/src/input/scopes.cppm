@@ -1,5 +1,5 @@
 export module vui:input.scopes;
-import :document;
+import :document.interface;
 import :input.protocol;
 using namespace rstd::prelude;
 

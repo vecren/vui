@@ -19,6 +19,44 @@ namespace vui::gpu {
 namespace rg = ::vrento::vulkan;
 namespace vk = ::vrento::vulkan;
 namespace tex = ::vrento::texture;
+
+auto Error::session(vrento::vulkan::DeviceSessionError cause) -> Error {
+    Stage stage{Stage::State};
+    switch (cause.stage) {
+    case vrento::vulkan::DeviceSessionStage::Invalid: stage = Stage::State; break;
+    case vrento::vulkan::DeviceSessionStage::Instance: stage = Stage::Instance; break;
+    case vrento::vulkan::DeviceSessionStage::Surface: stage = Stage::Surface; break;
+    case vrento::vulkan::DeviceSessionStage::Device: stage = Stage::Device; break;
+    case vrento::vulkan::DeviceSessionStage::Lost: stage = Stage::Lost; break;
+    }
+    Error result{stage, cause.result};
+    if (cause.cause) result.backend = Some(vrento::ErrorDiagnostic::capture(*cause.cause));
+    return result;
+}
+
+auto Error::graph(vrento::vulkan::GraphExecutionError cause) -> Error {
+    Error result{Stage::Graph, cause.native_result()};
+    auto texture = cause.texture_error();
+    if (texture) result.content = Some(vrento::texture::ErrorSnapshot::capture(**texture));
+    result.graph_error = Some(vrento::vulkan::GraphExecutionErrorSnapshot::capture(cause));
+    return result;
+}
+
+auto Error::graph(vrento::fg::Error cause) -> Error {
+    return graph(vrento::vulkan::GraphExecutionError{
+        vrento::vulkan::GraphExecutionStage::Graph, cause.pass, cause.resource,
+        vrento::vulkan::GraphExecutionCause::Graph(cause)});
+}
+
+auto Error::resource(Stage stage, vrento::resource::ResourceError cause) -> Error {
+    auto result = graph(vrento::vulkan::GraphExecutionError{
+        vrento::vulkan::GraphExecutionStage::Prepare,
+        {},
+        {},
+        vrento::vulkan::GraphExecutionCause::Resource(rstd::move(cause))});
+    result.stage = stage;
+    return result;
+}
 namespace {
 using CpuSample = vui::CpuTimer;
 enum class DrawKind { Rectangle, Composite, Glyph, Image, External };

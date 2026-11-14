@@ -1,6 +1,6 @@
 export module vui:node.types;
-import :composition;
-import :layout;
+import :scene.composition;
+import :layout.types;
 using namespace rstd::prelude;
 export namespace vui {
 enum class LayoutKind { Leaf, Row, Column, Stack, Viewport, Text, Image, Custom, Scene, Item };

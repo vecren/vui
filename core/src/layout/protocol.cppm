@@ -1,6 +1,6 @@
 export module vui:layout.protocol;
-import :layout;
-import :text;
+import :layout.types;
+import :text.types;
 using namespace rstd::prelude;
 
 export namespace vui {

@@ -3,8 +3,8 @@ import :node.types;
 import :node.ownership;
 import :node.state;
 import :node.style_patch;
-import :text;
-import :image;
+import :text.types;
+import :image.types;
 using namespace rstd::prelude;
 using namespace rstd::literals;
 

@@ -1,6 +1,6 @@
 export module vui:state.bindings;
-import :state;
-import :document;
+import :state.graph;
+import :document.interface;
 using namespace rstd::prelude;
 
 export namespace vui {
