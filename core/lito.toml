@@ -42,6 +42,7 @@ sources = [
     "src/motion/drivers.cppm",
     "src/motion/dynamics.cppm",
     "src/motion/properties.cppm",
+    "src/motion/sequence.cppm",
     "src/node/types.cppm",
     "src/node/ownership.cppm",
     "src/node/state.cppm",

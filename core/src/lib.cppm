@@ -48,5 +48,6 @@ export import :state_animation_motion;
 export import :motion.properties;
 export import :motion.drivers;
 export import :motion.dynamics;
+export import :motion.sequence;
 export import :layout;
 export import :wakeup;

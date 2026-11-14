@@ -1,5 +1,6 @@
 export module vui.compose:element;
 import :types;
+import :behavior;
 using namespace rstd::prelude;
 using namespace rstd::literals;
 
@@ -30,7 +31,7 @@ struct AdapterFunction {
         : type(rstd::any::TypeId::of<T>()), value(Box<rstd::dyn<ElementAdapter>>::make(rstd::move(config))) {}
 };
 enum class ElementKind { Native, Fragment, Component, Custom };
-enum class ModifierKind { Style, Gap, Padding, Format, Color, Reference };
+enum class ModifierKind { Style, Gap, Padding, Format, Color, Reference, Behavior };
 struct ElementModifier {
     ModifierKind kind;
     NodeStyle style;
@@ -38,15 +39,17 @@ struct ElementModifier {
     Option<UiTextValue> text;
     Color color;
     Option<NodeRef> reference;
+    Option<BehaviorDeclaration> behavior;
     explicit ElementModifier(ModifierKind value) : kind(value) {}
     ElementModifier(const ElementModifier &other)
         : kind(other.kind), style(other.style), scalar(other.scalar),
           text(other.text.is_some() ? Some(UiTextValue(*other.text)) : None<UiTextValue>()),
-          color(other.color), reference(other.reference.is_some() ? Some(NodeRef(*other.reference)) : None<NodeRef>()) {}
+          color(other.color), reference(other.reference.is_some() ? Some(NodeRef(*other.reference)) : None<NodeRef>()),
+          behavior(other.behavior.is_some() ? Some(BehaviorDeclaration(*other.behavior)) : None<BehaviorDeclaration>()) {}
     ElementModifier(ElementModifier &&) = default;
     auto operator=(ElementModifier other) -> ElementModifier & {
         kind = other.kind; style = other.style; scalar = other.scalar; text = rstd::move(other.text);
-        color = other.color; reference = rstd::move(other.reference); return *this;
+        color = other.color; reference = rstd::move(other.reference); behavior = rstd::move(other.behavior); return *this;
     }
 };
 struct ElementData;
@@ -79,6 +82,14 @@ class [[clang::annotate("vui.compose.element.v1")]] Element {
     auto identity(CallIdentity) && -> Element;
     auto reference(NodeRef) const & -> Element;
     auto reference(NodeRef) && -> Element;
+    auto behavior(BehaviorDeclaration) const & -> Element;
+    auto behavior(BehaviorDeclaration) && -> Element;
+    template <class T> auto behavior(Key key, T value) const & -> Element {
+        return behavior(BehaviorDeclaration(rstd::move(key), rstd::move(value)));
+    }
+    template <class T> auto behavior(Key key, T value) && -> Element {
+        return rstd::move(*this).behavior(BehaviorDeclaration(rstd::move(key), rstd::move(value)));
+    }
 };
 struct ElementData {
     ElementKind kind{ElementKind::Fragment};
@@ -87,6 +98,7 @@ struct ElementData {
     Option<Key> key;
     Option<CallIdentity> identity;
     Vec<ElementModifier> modifiers;
+    Vec<BehaviorDeclaration> behaviors;
     Option<UiTextValue> text;
     Option<UiImageValue> image;
     Vec<Element> children;
@@ -111,6 +123,7 @@ struct ElementData {
                                      source.fit, source.sampling, source.tint, source.radial});
         }
         for (const auto &modifier : other.modifiers) modifiers.push(ElementModifier(modifier));
+        for (const auto &behavior : other.behaviors) behaviors.push(BehaviorDeclaration(behavior));
         for (const auto &child : other.children) children.push(Element(child));
     }
 };
@@ -132,6 +145,7 @@ inline auto Element::color(Color value) const & -> Element { return copy().color
 inline auto Element::key(Key value) const & -> Element { return copy().key(rstd::move(value)); }
 inline auto Element::identity(CallIdentity value) const & -> Element { return copy().identity(rstd::move(value)); }
 inline auto Element::reference(NodeRef value) const & -> Element { return copy().reference(rstd::move(value)); }
+inline auto Element::behavior(BehaviorDeclaration value) const & -> Element { return copy().behavior(rstd::move(value)); }
 inline auto Element::style(NodeStyle value) && -> Element {
     auto next = rstd::move(*this).owned();
     if (next.data_->kind == ElementKind::Component || next.data_->kind == ElementKind::Fragment) {
@@ -177,6 +191,14 @@ inline auto Element::reference(NodeRef value) && -> Element {
     if (next.data_->kind == ElementKind::Component || next.data_->kind == ElementKind::Fragment) {
         auto modifier = ElementModifier(ModifierKind::Reference); modifier.reference = Some(rstd::move(value)); next.data_.get()->modifiers.push(rstd::move(modifier));
     } else next.data_.get()->reference = Some(rstd::move(value));
+    return next;
+}
+inline auto Element::behavior(BehaviorDeclaration value) && -> Element {
+    auto next = rstd::move(*this).owned();
+    if (next.data_->kind == ElementKind::Component || next.data_->kind == ElementKind::Fragment) {
+        auto modifier = ElementModifier(ModifierKind::Behavior); modifier.behavior = Some(rstd::move(value));
+        next.data_.get()->modifiers.push(rstd::move(modifier));
+    } else next.data_.get()->behaviors.push(rstd::move(value));
     return next;
 }
 inline auto native(LayoutKind kind, Vec<Element> children = {}, rstd::source_location source = rstd::source_location::current()) -> Element {
@@ -241,6 +263,7 @@ inline auto apply_modifiers(Element value, const Vec<ElementModifier> &modifiers
                 error.operation = String::make("component reference conflicts with its root reference"_str); return Err(rstd::move(error));
             }
             value = rstd::move(value).reference(*modifier.reference); break;
+        case ModifierKind::Behavior: value = rstd::move(value).behavior(BehaviorDeclaration(*modifier.behavior)); break;
         }
         if (value.data().invalid) {
             auto error = ComposeError(ComposeStage::Type);

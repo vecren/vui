@@ -20,8 +20,8 @@ class View {
     struct Model {
         Vec<Tile> tiles;
         uint64_t score{};
-        Serial tile_epoch{};
-        bool won{}, over{}, pop_pending{};
+        Option<AnimationGate> ready;
+        bool won{}, over{}, busy{};
     };
     UiSession &session_;
     Binding lifetime_{session_.document().bindings().make()};
@@ -33,13 +33,58 @@ class View {
     UiId root_;
     Vec<Tile> tiles_;
     MoveResult move_;
-    unsigned pending_{};
-    Serial generation_{}, next_tile_{1}, tile_epoch_{};
-    bool busy_{}, continued_{}, pop_pending_{};
+    Option<rstd::rc::Rc<AnimationScope>> animations_;
+    AnimationRun movement_;
+    Option<AnimationSequenceError> animation_error_;
+    Option<AnimationGate> ready_;
+    cx::NodeRef input_;
+    Serial next_tile_{1};
+    bool busy_{}, continued_{};
     static constexpr Scalar cell = 96, gap = 12, board_size = 444;
     static constexpr Color ink{.019, .045, .095, 1};
     static constexpr Color background{.933, .953, .973, 1};
 
+    struct GameInput {
+        cx::Latest<bool> enabled;
+        cx::Latest<cx::Action<void(Direction)>> on_move;
+        BindingGuard lifetime;
+        void handle(EventContext &context, const RoutedEvent &event) {
+            if (!lifetime.alive()) return;
+            if (event.input.type == EventType::PointerDown && event.target == event.current) {
+                context.focus().unwrap();
+                return;
+            }
+            if (event.input.type != EventType::KeyDown) return;
+            Direction direction;
+            switch (event.input.key) {
+            case Key::Left: direction = Direction::Left; break;
+            case Key::Right: direction = Direction::Right; break;
+            case Key::Up: direction = Direction::Up; break;
+            case Key::Down: direction = Direction::Down; break;
+            default: return;
+            }
+            context.prevent_default(); context.stop_propagation();
+            if (event.input.repeat) return;
+            context.document().defer(event.current, lifetime,
+                [enabled = enabled, callback = on_move, direction](UiDocument &) -> Result<empty, UiError> {
+                    auto active = enabled.get(); auto current = callback.get();
+                    if (active.is_ok() && active.unwrap().value() && current.is_ok()) current.unwrap().value()(direction);
+                    return Ok(empty{});
+                }).unwrap();
+        }
+    };
+    struct GameInputDescriptor {
+        using State = GameInput;
+        cx::Latest<bool> enabled;
+        cx::Latest<cx::Action<void(Direction)>> on_move;
+        BindingGuard lifetime;
+        auto create() const -> State { return {enabled, on_move, lifetime}; }
+        void update(State &state, cx::BehaviorContext &) const { state.enabled = enabled; state.on_move = on_move; }
+        auto attach(State &, cx::BehaviorContext &context, rstd::rc::Weak<State>) const -> cx::EffectLease {
+            context.session().input().focus_when_ready(context.target(), None<ScopeId>(), context.document().lifetime()).unwrap();
+            return {};
+        }
+    };
     auto ui() -> UiDocument & { return session_.document(); }
     static auto position(unsigned index, Scalar scale = 1) -> Transform {
         auto inset = cell * (1 - scale) / 2;
@@ -102,6 +147,18 @@ class View {
         if (observed.is_err()) return Err(observed.unwrap_err());
         auto snapshot = observed.unwrap();
         const auto &model = *snapshot.value();
+        auto animated = cx::animation_scope();
+        if (animated.is_err()) return Err(animated.unwrap_err());
+        auto animations = animated.unwrap();
+        auto installed = cx::effect({}, [owner, animations](cx::CommittedContext &) -> cx::EffectLease {
+            owner->animations_ = Some(rstd::rc::Rc<AnimationScope>(animations));
+            return {};
+        });
+        if (installed.is_err()) return Err(installed.unwrap_err());
+        auto enabled = cx::latest(!model.busy && !model.over && !model.won);
+        if (enabled.is_err()) return Err(enabled.unwrap_err());
+        auto on_move = cx::latest(cx::Action<void(Direction)>([owner](Direction direction) { owner->move(direction); }));
+        if (on_move.is_err()) return Err(on_move.unwrap_err());
         Vec<cx::Element> cells;
         for (unsigned i{}; i < 16; ++i)
             cells.push(cx::native(LayoutKind::Leaf).style(NodeStyleBuilder{
@@ -110,9 +167,13 @@ class View {
         auto score = rstd::format("{}", model.score);
         auto message = model.over ? "没有可移动的方块了，再来一局吧。"_str
             : model.won ? "合成了 2048！还想挑战更大的数字吗？"_str : "合并相同数字，向 2048 前进。"_str;
-        auto effect = cx::effect(cx::EffectKeys{cx::Key{model.tile_epoch}},
-            [owner, pop = model.pop_pending](cx::CommittedContext &) -> cx::ComposeResult<cx::EffectLease> {
-                if (pop) owner->start_pop();
+        auto effect = cx::effect(cx::EffectKeys{cx::Key{model.ready.is_some() ? model.ready->id() : 0}},
+            [ready = model.ready.is_some() ? Some(AnimationGate(*model.ready)) : None<AnimationGate>()]
+            (cx::CommittedContext &) -> cx::ComposeResult<cx::EffectLease> {
+                if (ready.is_some()) {
+                    auto signaled = ready->signal();
+                    if (signaled.is_err()) return Err(cx::ComposeError(cx::ComposeStage::Effect, signaled.unwrap_err().ui));
+                }
                 return Ok(cx::EffectLease{});
             });
         if (effect.is_err()) return Err(effect.unwrap_err());
@@ -126,10 +187,11 @@ class View {
             button("重新开始"_str, 0, [owner] { owner->restart(); }),
             button("继续挑战"_str, 234, [owner] {
                 owner->continued_ = true; owner->update_status();
-                owner->session_.input().focus_when_ready(owner->root_, None<ScopeId>(), owner->lifetime_.guard()).unwrap();
+                owner->session_.input().focus_when_ready(owner->input_.id().unwrap(), None<ScopeId>(), owner->lifetime_.guard()).unwrap();
             }, model.won),
             label("方向键移动 · Tab 切换按钮 · Esc 退出"_str, 14, {0, 628}),
-        }).style(examples::block(board_size, 650, {0, 0, 0, 0})));
+        }).style(NodeStyleBuilder{examples::block(board_size, 650, {0, 0, 0, 0})}.focusable(true).build())
+            .reference(owner->input_).behavior(cx::Key{1}, GameInputDescriptor{enabled.unwrap(), on_move.unwrap(), owner->lifetime_.guard()}));
     }
     void reset_tiles() {
         tiles_.clear();
@@ -140,34 +202,23 @@ class View {
         Model next;
         for (auto tile : tiles_) next.tiles.push(rstd::move(tile));
         next.score = game_.board().score;
-        next.tile_epoch = tile_epoch_;
+        if (ready_.is_some()) next.ready = Some(AnimationGate(*ready_));
         next.won = game_.reached_2048() && !continued_;
         next.over = !game_.can_move();
-        next.pop_pending = pop_pending_;
+        next.busy = busy_;
         model_.set(rstd::rc::make_rc<Model>(rstd::move(next))).unwrap();
     }
-    void watch(AnimationId animation, bool sliding) {
-        ++pending_;
-        auto generation = generation_;
-        ui().on_animation_end(animation, lifetime_.guard(),
-            [this, generation, sliding](auto &, const AnimationEvent &event) {
-                if (generation != generation_ || event.reason != AnimationEndReason::Finished) return;
-                if (--pending_) return;
-                if (sliding) settle(); else { busy_ = false; update_status(); }
-            }).unwrap();
-    }
-    void start_pop() {
-        pop_pending_ = false;
+    auto pop_group() -> AnimationGroup {
+        AnimationGroup group;
         for (const auto &tile : tiles_) {
             if (!move_.merged[tile.cell] && tile.cell != move_.spawned.cell) continue;
-            auto id = tile.node.id().unwrap();
-            ui().set_transform(id, position(tile.cell, move_.merged[tile.cell] ? 1.12 : .3)).unwrap();
-            watch(ui().animate_transform(id, position(tile.cell),
-                {120'000'000, AnimationEasing::EaseInOut, AnimationEndPolicy::CommitFinal}).unwrap(), false);
+            group.push(AnimationTrack::transform(tile.node.id().unwrap(), position(tile.cell),
+                {120'000'000, AnimationEasing::EaseInOut, AnimationEndPolicy::CommitFinal},
+                Some(position(tile.cell, move_.merged[tile.cell] ? 1.12 : .3))));
         }
-        if (!pending_) { busy_ = false; update_status(); }
+        return group;
     }
-    void settle() {
+    void settle(AnimationGate ready) {
         bool occupied[16]{};
         Vec<Tile> next;
         for (unsigned i{}; i < move_.count; ++i) {
@@ -179,67 +230,73 @@ class View {
             }
         }
         next.push(Tile{next_tile_++, move_.spawned.value, move_.spawned.cell, {}});
-        tiles_ = rstd::move(next); pop_pending_ = true; ++tile_epoch_; update_status();
+        tiles_ = rstd::move(next); ready_ = Some(rstd::move(ready)); update_status();
     }
     void move(Direction direction) {
         if (busy_ || !game_.can_move() || (game_.reached_2048() && !continued_)) return;
         move_ = game_.move(direction); if (!move_.changed) return;
         busy_ = true;
+        auto owner = cx::borrow(*this);
+        AnimationGroup sliding;
         for (unsigned i{}; i < move_.count; ++i) {
             auto movement = move_.movements[i];
             if (movement.from == movement.to) continue;
             for (const auto &tile : tiles_) if (tile.cell == movement.from) {
-                watch(ui().animate_transform(tile.node.id().unwrap(), position(movement.to),
-                    {130'000'000, AnimationEasing::EaseInOut, AnimationEndPolicy::CommitFinal}).unwrap(), true);
+                sliding.push(AnimationTrack::transform(tile.node.id().unwrap(), position(movement.to),
+                    {130'000'000, AnimationEasing::EaseInOut, AnimationEndPolicy::CommitFinal}));
                 break;
             }
         }
-        if (!pending_) settle();
+        AnimationGate committed;
+        AnimationSequence sequence;
+        sequence.parallel(rstd::move(sliding));
+        sequence.then([owner, committed](UiDocument &) -> AnimationSequenceResult<empty> {
+            owner->settle(committed); return Ok(empty{});
+        });
+        sequence.wait(committed);
+        sequence.parallel([owner](UiDocument &) -> AnimationSequenceResult<AnimationGroup> {
+            return Ok(owner->pop_group());
+        });
+        movement_ = (*animations_).get()->play(rstd::move(sequence), [owner](const AnimationRunResult &result) {
+            if (!owner->lifetime_.alive()) return;
+            owner->busy_ = false;
+            owner->animation_error_ = result.error;
+            if (result.reason != AnimationRunEndReason::Finished && result.reason != AnimationRunEndReason::ScopeClosed) {
+                owner->ready_ = None();
+                owner->reset_tiles();
+            }
+            if (result.reason != AnimationRunEndReason::ScopeClosed) owner->update_status();
+        }).unwrap();
+        update_status();
     }
     void restart() {
-        ++generation_; ++tile_epoch_; pending_ = 0; busy_ = continued_ = pop_pending_ = false;
+        movement_.cancel().unwrap(); ready_ = None(); animation_error_ = None(); busy_ = continued_ = false;
         game_.restart(); reset_tiles(); update_status();
-    }
-    void key(EventContext &context, const RoutedEvent &event) {
-        Direction direction;
-        switch (event.input.key) {
-        case Key::Left: direction = Direction::Left; break;
-        case Key::Right: direction = Direction::Right; break;
-        case Key::Up: direction = Direction::Up; break;
-        case Key::Down: direction = Direction::Down; break;
-        default: return;
-        }
-        context.prevent_default(); context.stop_propagation();
-        if (!event.input.repeat)
-            ui().defer(root_, lifetime_.guard(), [this, direction](auto &) -> Result<empty, UiError> {
-                move(direction); return Ok(empty{});
-            }).unwrap();
     }
   public:
     View(UiSession &session, Game game) : session_(session), game_(game) {
         auto service = Box<vectext::SystemTextService>::make();
         ui().set_text_service(Box<TextService>::from_raw(rstd::move(service).into_raw().template cast<TextService>())).unwrap();
-        root_ = ui().create<CustomLayout>(NodeStyleBuilder{examples::block(520, 720, background)}.focusable(true).build()).unwrap();
+        root_ = ui().create<CustomLayout>(examples::block(520, 720, background)).unwrap();
         ui().install_layout(root_, ReferenceCanvas{{500, 700}, CanvasFit::Contain, {.5, .5}, true, Some(Scalar(1.2))}).unwrap();
         ui().mount(root_).unwrap(); reset_tiles(); update_status();
         composition_ = Some(cx::Composition::create(session_, root_).unwrap());
         composition_->set_content(content(cx::borrow(*this), model_.value())).unwrap();
-        const RoutePhase phases[]{RoutePhase::Target, RoutePhase::Capture};
-        for (auto phase : phases)
-            session_.input().on(root_, EventType::KeyDown, lifetime_.guard(),
-                [this](auto &context, const auto &event) { key(context, event); }, phase).unwrap();
-        session_.input().on(root_, EventType::PointerDown, lifetime_.guard(), [this](auto &, const auto &) {
-            session_.input().request_focus(Some(root_)).unwrap();
-        }).unwrap();
         resize({{520, 720}, 1, 1});
-        session_.input().focus_when_ready(root_, None<ScopeId>(), lifetime_.guard()).unwrap();
+    }
+    ~View() {
+        lifetime_.disconnect();
+        if (animations_.is_some()) (*animations_).get()->close();
     }
     View(const View &) = delete;
     auto operator=(const View &) -> View & = delete;
     auto game() const -> const Game & { return game_; }
     auto busy() const -> bool { return busy_; }
     auto last_result() const -> Option<cx::ComposeResult<cx::CommitReport>> { return composition_->last_result(); }
-    auto check() -> Result<empty, UiError> { return examples::composition_status(*composition_); }
+    auto check() -> Result<empty, UiError> {
+        if (animation_error_.is_some()) return Err(animation_error_->ui.unwrap_or(UiError::InvalidValue));
+        return examples::composition_status(*composition_);
+    }
     void resize(const SurfaceInfo &surface) {
         auto size = surface.logical_size;
         if (size.width > 0 && size.height > 0)

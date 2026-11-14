@@ -481,6 +481,16 @@ class EventRouter {
         if (target.is_some())
             route(*update_, *target, {EventType::FocusGained}, true);
     }
+    void cancel_subtree_inputs(UiId root) {
+        if (!update_.is_some() || !update_->get(root)) return;
+        for (auto &pointer : pointers_) {
+            bool affected = (pointer.capture && input_descendant(*update_, root, *pointer.capture)) ||
+                            (pointer.sequence_target && input_descendant(*update_, root, *pointer.sequence_target));
+            for (auto owner : arena_.owners({pointer.device, pointer.id})) affected |= input_descendant(*update_, root, owner);
+            if (affected) cancel(pointer, CancelReason::Explicit);
+        }
+        if (focus_ && input_descendant(*update_, root, *focus_)) change_focus({}, CancelReason::Explicit);
+    }
     auto current_text_state() const -> Option<TextInputState> {
         if (text_request_.is_none() || text_client_.is_none()) return None();
         for (const auto &entry : surroundings_)
@@ -605,12 +615,7 @@ class EventRouter {
         for (usize i{}; i < commands_.len(); ++i) {
             auto command = commands_[i];
             if (command.type == CommandType::CancelSubtree) {
-                for(auto &pointer:pointers_){
-                    bool affected=(pointer.capture && input_descendant(*update_,*command.target,*pointer.capture)) || (pointer.sequence_target && input_descendant(*update_,*command.target,*pointer.sequence_target));
-                    for(auto owner:arena_.owners({pointer.device,pointer.id}))affected|=input_descendant(*update_,*command.target,owner);
-                    if(affected)cancel(pointer,CancelReason::Explicit);
-                }
-                if(focus_ && input_descendant(*update_,*command.target,*focus_))change_focus({},CancelReason::Explicit);
+                cancel_subtree_inputs(*command.target);
             } else if (command.type == CommandType::Focus) {
                 change_focus(command.target);
             } else if (command.type == CommandType::RestartText) {
@@ -743,12 +748,19 @@ class EventRouter {
 
   public:
     class BehaviorEdit {
+        struct Role { UiId target; NodeStateKey key; };
+        struct Order { UiId target; Vec<NodeStateKey> roles; };
         Vec<Box<BehaviorEntry>> entries_;
+        Vec<BindingGuard> bindings_;
+        Vec<Role> retired_;
+        Vec<Order> orders_;
+        bool published_{};
         friend class EventRouter;
       public:
         BehaviorEdit() = default;
         BehaviorEdit(const BehaviorEdit &) = delete;
         BehaviorEdit(BehaviorEdit &&) = default;
+        ~BehaviorEdit() { if (!published_) for (auto &binding : bindings_) binding.disconnect(); }
     };
     template <class T> requires rstd::Impled<T, vui::Behavior>
     auto prepare_behavior(BehaviorEdit &edit, const UiDocument::PreparedEdit &document, UiNodeRef ref, NodeStateKey role = {})
@@ -766,9 +778,98 @@ class EventRouter {
         behaviors_.reserve(edit.entries_.len());
         return Ok(empty{});
     }
-    void publish_behaviors(BehaviorEdit edit) {
+    template <class T> requires rstd::Impled<T, vui::Behavior>
+    auto prepare_bind_behavior(BehaviorEdit &edit, const UiDocument::PreparedEdit &document, UiNodeRef ref,
+                               rstd::rc::Weak<T> receiver, InputDelivery delivery = InputDelivery::EverySample, NodeStateKey role = {})
+        -> Result<Binding, InputError> {
+        if (closed_) return Err(InputError::Unavailable);
+        if (busy_ || document_.routing()) return Err(InputError::Reentrant);
+        auto target = document.id(ref);
+        if (target.session != document_.session() || receiver.expired()) return Err(InputError::InvalidId);
+        for (const auto &entry : behaviors_) if (entry->target == target && entry->role == role &&
+            (entry->binding.is_none() || entry->binding->alive())) return Err(InputError::InvalidSequence);
+        for (const auto &entry : edit.entries_) if (entry->target == target && entry->role == role) return Err(InputError::InvalidSequence);
+        if (behaviors_.len() + edit.entries_.len() >= usize(65536)) return Err(InputError::Limit);
+        auto binding = document_.bindings().make(receiver);
+        struct Entry : BehaviorEntry {
+            rstd::rc::Weak<T> receiver;
+            Entry(UiId id, rstd::rc::Weak<T> value, BindingGuard guard, NodeStateKey key, InputDelivery delivery)
+                : BehaviorEntry(id, key), receiver(rstd::move(value)) { this->binding = Some(rstd::move(guard)); this->delivery = delivery; }
+            void invoke(EventContext &context, const RoutedEvent &event) override {
+                auto value = receiver.upgrade();
+                if (this->binding->alive() && value.is_some()) rstd::as<vui::Behavior>(*value->get()).handle(context, event);
+            }
+        };
+        auto entry = Box<Entry>::make(target, rstd::move(receiver), binding.guard(), role, delivery);
+        edit.entries_.push(Box<BehaviorEntry>::from_raw(rstd::move(entry).into_raw().template cast<BehaviorEntry>()));
+        edit.bindings_.push(binding.guard());
+        behaviors_.reserve(edit.entries_.len());
+        return Ok(rstd::move(binding));
+    }
+    auto retire_behavior(BehaviorEdit &edit, UiId target, NodeStateKey role) -> Result<empty, InputError> {
+        if (closed_) return Err(InputError::Unavailable);
+        if (busy_ || document_.routing()) return Err(InputError::Reentrant);
+        if (!document_.valid(target)) return Err(InputError::InvalidId);
+        for (const auto &entry : edit.retired_) if (entry.target == target && entry.key == role) return Ok(empty{});
+        edit.retired_.push({target, role}); return Ok(empty{});
+    }
+    auto prepare_behavior_order(BehaviorEdit &edit, UiId target, Vec<NodeStateKey> roles) -> Result<empty, InputError> {
+        if (closed_) return Err(InputError::Unavailable);
+        if (busy_ || document_.routing()) return Err(InputError::Reentrant);
+        if (target.session != document_.session()) return Err(InputError::InvalidId);
+        for (usize i{}; i < roles.len(); ++i) {
+            for (usize j{}; j < i; ++j) if (roles[i] == roles[j]) return Err(InputError::InvalidSequence);
+            bool found{};
+            for (const auto &entry : edit.entries_) found |= entry->target == target && entry->role == roles[i];
+            for (const auto &entry : behaviors_) found |= entry->target == target && entry->role == roles[i] &&
+                (entry->binding.is_none() || entry->binding->alive());
+            for (const auto &entry : edit.retired_) if (entry.target == target && entry.key == roles[i]) found = false;
+            if (!found) return Err(InputError::InvalidId);
+        }
+        edit.orders_.push({target, rstd::move(roles)}); return Ok(empty{});
+    }
+    auto publish_behaviors(BehaviorEdit edit) -> Result<empty, InputError> {
+        if (closed_) return Err(InputError::Unavailable);
+        if (busy_ || !document_.can_route()) return Err(InputError::Reentrant);
+        for (const auto &entry : edit.entries_) if (!document_.valid(entry->target)) return Err(InputError::InvalidId);
+        for (const auto &entry : edit.retired_) if (!document_.valid(entry.target)) return Err(InputError::InvalidId);
+        for (const auto &entry : edit.orders_) if (!document_.valid(entry.target)) return Err(InputError::InvalidId);
+        Option<InputError> failure;
+        if (!edit.retired_.is_empty() && update_.is_some()) {
+            index_routes(); begin();
+            for (usize i{}; i < edit.retired_.len(); ++i) {
+                bool previous{};
+                for (usize j{}; j < i; ++j) previous |= edit.retired_[j].target == edit.retired_[i].target;
+                if (!previous) cancel_subtree_inputs(edit.retired_[i].target);
+            }
+            auto cancelled = end(); if (cancelled.is_err()) failure = Some(cancelled.unwrap_err());
+        }
+        for (const auto &role : edit.retired_)
+            behaviors_.retain([&](const auto &entry) {
+                if (entry->target != role.target || entry->role != role.key) return true;
+                if (entry->binding.is_some()) entry->binding->disconnect(); return false;
+            });
         for (auto &entry : edit.entries_) behaviors_.push(rstd::move(entry));
+        for (const auto &order : edit.orders_) {
+            usize cursor{};
+            auto selected = [&](const BehaviorEntry &entry) {
+                if (entry.target != order.target) return false;
+                for (auto role : order.roles) if (entry.role == role) return true;
+                return false;
+            };
+            for (auto role : order.roles) {
+                while (cursor < behaviors_.len() && !selected(*behaviors_[cursor])) ++cursor;
+                auto desired = cursor;
+                while (desired < behaviors_.len() && !(behaviors_[desired]->target == order.target && behaviors_[desired]->role == role)) ++desired;
+                if (cursor < behaviors_.len() && desired < behaviors_.len() && cursor != desired) {
+                    auto previous = rstd::move(behaviors_[cursor]); behaviors_[cursor] = rstd::move(behaviors_[desired]); behaviors_[desired] = rstd::move(previous);
+                }
+                ++cursor;
+            }
+        }
         routes_dirty_ = true; prune_requested_ = true;
+        edit.published_ = true;
+        return failure.is_some() ? Result<empty, InputError>(Err(*failure)) : Result<empty, InputError>(Ok(empty{}));
     }
     explicit EventRouter(UiDocument &document) : document_(document) {}
     ~EventRouter() {

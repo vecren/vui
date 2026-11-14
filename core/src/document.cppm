@@ -769,8 +769,7 @@ class UiDocument {
             }
         }
     }
-    static auto effective_style(const Node &node) -> NodeStyle {
-        auto result = node.style;
+    static auto effective_style(const Node &node, NodeStyle result) -> NodeStyle {
         if (node.animated.transform.is_some())
             result.transform = *node.animated.transform;
         if (node.animated.opacity.is_some())
@@ -783,6 +782,7 @@ class UiDocument {
             result.background = *node.animated.background;
         return result;
     }
+    static auto effective_style(const Node &node) -> NodeStyle { return effective_style(node, node.style); }
     static auto property_index(PresentationProperty property) -> unsigned {
         return static_cast<unsigned>(property);
     }
@@ -821,9 +821,11 @@ class UiDocument {
             return Err(UiError::PropertyOwned);
         return Ok(rstd::move(value));
     }
-    void style_changed(UiId id, Node &node, const NodeStyle &before) {
-        const auto &after = node.style;
-        if (before == after) return;
+    void style_changed(UiId id, Node &node, const NodeStyle &base) {
+        if (base == node.style) return;
+        auto before = effective_style(node, base);
+        auto after = effective_style(node);
+        if (before == after) { changed(false); return; }
         if (before.background != after.background || before.radius != after.radius || before.layout.padding != after.layout.padding)
             node.paint_dirty = true;
         if (before.layout != after.layout) {
@@ -2210,6 +2212,7 @@ class UiDocument {
     auto can_route() const -> bool {
         return !routing_ && !draining_ && !animation_dispatching_ && !layout_active_ && !painting_ && !evaluating_ && !editing_;
     }
+    auto can_animate() const -> bool { return !layout_active_ && !painting_ && !evaluating_ && !editing_; }
     auto acquire_route() -> Result<RouteScope, UiError> {
         if (!can_route())
             return Err(UiError::Routing);

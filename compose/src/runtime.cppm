@@ -126,6 +126,22 @@ template <class T> struct NativeValue final : NativePayload {
     explicit NativeValue(rstd::rc::Rc<T> source) : value(rstd::move(source)) {}
     auto type() const -> rstd::any::TypeId override { return rstd::any::TypeId::of<T>(); }
 };
+struct AttachedBehaviorSlot {
+    Key key;
+    NodeStateKey role{rstd::any::TypeId::of<AttachedBehaviorSlot>(), new_session()};
+    rstd::rc::Rc<AttachedBehaviorState> state;
+    rstd::rc::Rc<AttachedBehaviorConfig> config;
+    Option<Binding> input;
+    Option<EffectLease> lease;
+    bool attempted{};
+    AttachedBehaviorSlot(Key name, rstd::rc::Rc<AttachedBehaviorState> value, rstd::rc::Rc<AttachedBehaviorConfig> descriptor)
+        : key(rstd::move(name)), state(rstd::move(value)), config(rstd::move(descriptor)) {}
+    void close() { if (input.is_some()) input->disconnect(); lease = None(); }
+};
+struct AttachedBehaviorDraft {
+    rstd::rc::Rc<AttachedBehaviorSlot> slot;
+    rstd::rc::Rc<AttachedBehaviorConfig> config;
+};
 struct ComposeInstance {
     Element element;
     Option<Element> output;
@@ -134,6 +150,7 @@ struct ComposeInstance {
     Vec<rstd::rc::Rc<NativePayload>> native;
     Vec<rstd::rc::Rc<ComposeInstance>> children;
     Vec<rstd::rc::Rc<EffectSlot>> mounts;
+    Vec<rstd::rc::Rc<AttachedBehaviorSlot>> attached;
     bool owns_children{};
     rstd::rc::Rc<NodeLink> link{rstd::rc::make_rc<NodeLink>()};
 };
@@ -154,6 +171,7 @@ struct ComposeDraft {
     Option<UiNodeRef> node;
     Option<UiId> resolved;
     Vec<rstd::rc::Rc<EffectSlot>> mounts;
+    Vec<AttachedBehaviorDraft> attached;
     usize position{};
     bool fresh{}, reused{}, owns_children{};
 };
@@ -170,6 +188,7 @@ class ComposeBuild {
     UiEditBatch edit;
     Vec<Observation> observations;
     Vec<rstd::rc::Rc<ComposeInstance>> retired;
+    Vec<rstd::rc::Rc<AttachedBehaviorSlot>> retired_behaviors;
     Vec<Box<rstd::dyn<rstd::FnMut<ComposeResult<empty>(CommittedContext &)>>>> actions;
     Vec<Box<rstd::dyn<rstd::FnMut<ComposeResult<empty>(UiDocument::PreparedEdit &)>>>> preparers;
     Vec<Box<rstd::dyn<rstd::FnMut<Result<empty, InputError>(EventRouter &, EventRouter::BehaviorEdit &, const UiDocument::PreparedEdit &)>>>> behaviors;
@@ -194,6 +213,7 @@ class ComposeBuild {
     static auto dirty(const ComposeInstance &instance) -> bool {
         if (instance.scope && instance.scope->dirty) return true;
         for (const auto &mount : instance.mounts) if (!mount->attempted) return true;
+        for (const auto &behavior : instance.attached) if (!behavior->attempted) return true;
         for (const auto &child : instance.children) if (dirty(*child.get())) return true;
         return false;
     }
@@ -235,6 +255,10 @@ class CompositionContext {
     };
     CompositionContext(ComposeBuild &build, ScopeDraft &draft) : build_(build), draft_(draft) {}
     CompositionContext(const CompositionContext &) = delete;
+    auto session() -> UiSession & { return build_.session; }
+    template <class F> void on_commit(F action) {
+        build_.actions.push(Box<rstd::dyn<rstd::FnMut<ComposeResult<empty>(CommittedContext &)>>>::make(rstd::move(action)));
+    }
     auto identity(Serial site) -> CallIdentity {
         auto value = CallIdentity(site);
         for (const auto &group : groups_) value.groups.push(Key(group));
@@ -526,6 +550,62 @@ auto ComposeBuild::reconcile(Element value, rstd::rc::Rc<ComposeInstance> previo
     }
     for (usize i{}; i < used.len(); ++i) if (!used[i]) retire(draft.instance->children[i].clone());
     if (data.kind == ElementKind::Native || data.kind == ElementKind::Custom) {
+        Vec<NodeStateKey> input_order;
+        for (usize i{}; i < data.behaviors.len(); ++i) {
+            const auto &declaration = data.behaviors[i];
+            for (usize j{}; j < i; ++j)
+                if (declaration.key == data.behaviors[j].key) return Err(ComposeError(ComposeStage::Key));
+            rstd::rc::Rc<AttachedBehaviorSlot> slot;
+            for (const auto &previous : draft.instance->attached) if (previous->key == declaration.key) {
+                if (previous->config->type() != declaration.config->type()) return Err(ComposeError(ComposeStage::Type));
+                slot = previous.clone(); break;
+            }
+            auto created = !slot;
+            {
+                auto reading = session.document().acquire_read();
+                if (reading.is_err()) return Err(ComposeError(ComposeStage::Prepare, Some(reading.unwrap_err())));
+                auto guard = reading.unwrap();
+                if (created) {
+                    auto made = declaration.config->create(); if (made.is_err()) return Err(made.unwrap_err());
+                    slot = rstd::rc::make_rc<AttachedBehaviorSlot>(Key(declaration.key), made.unwrap(), declaration.config.clone());
+                }
+                auto valid = declaration.config->validate(*slot.get()->state.get());
+                if (valid.is_err()) return Err(valid.unwrap_err());
+            }
+            if (declaration.config->input()) {
+                input_order.push(NodeStateKey(slot->role));
+                if (created) {
+                    if (draft.node.is_none()) draft.node = Some(edit.existing(*draft.instance->id));
+                    behaviors.push(Box<rstd::dyn<rstd::FnMut<Result<empty, InputError>(EventRouter &, EventRouter::BehaviorEdit &, const UiDocument::PreparedEdit &)>>>::make(
+                        [slot = slot.clone(), node = *draft.node](EventRouter &input, EventRouter::BehaviorEdit &edit, const UiDocument::PreparedEdit &document) mutable {
+                            auto binding = slot->config->prepare_input(input, edit, document, node, slot->role, *slot.get()->state.get());
+                            if (binding.is_err()) return Result<empty, InputError>(Err(binding.unwrap_err()));
+                            slot.get()->input = Some(binding.unwrap()); return Result<empty, InputError>(Ok(empty{}));
+                        }));
+                }
+            }
+            draft.attached.push({rstd::move(slot), declaration.config.clone()});
+        }
+        for (const auto &previous : draft.instance->attached) {
+            bool retained{};
+            for (const auto &next : draft.attached) retained |= next.slot.get() == previous.get();
+            if (retained) continue;
+            retired_behaviors.push(previous.clone());
+            if (previous->input.is_some()) {
+                auto target = *draft.instance->id; auto role = previous->role;
+                behaviors.push(Box<rstd::dyn<rstd::FnMut<Result<empty, InputError>(EventRouter &, EventRouter::BehaviorEdit &, const UiDocument::PreparedEdit &)>>>::make(
+                    [target, role](EventRouter &input, EventRouter::BehaviorEdit &edit, const UiDocument::PreparedEdit &) {
+                        return input.retire_behavior(edit, target, role);
+                    }));
+            }
+        }
+        if (!input_order.is_empty()) {
+            if (draft.node.is_none()) draft.node = Some(edit.existing(*draft.instance->id));
+            behaviors.push(Box<rstd::dyn<rstd::FnMut<Result<empty, InputError>(EventRouter &, EventRouter::BehaviorEdit &, const UiDocument::PreparedEdit &)>>>::make(
+                [node = *draft.node, order = rstd::move(input_order)](EventRouter &input, EventRouter::BehaviorEdit &edit, const UiDocument::PreparedEdit &document) mutable {
+                    return input.prepare_behavior_order(edit, document.id(node), rstd::move(order));
+                }));
+        }
         if (!draft.owns_children) {
             if (draft.node.is_none()) draft.node = Some(edit.existing(*draft.instance->id));
             auto kind = session.document().node_kind(edit, *draft.node);
@@ -555,6 +635,8 @@ class CompositionRuntime {
     static void cleanup(const rstd::rc::Rc<ComposeInstance> &instance) {
         auto value = instance.clone();
         for (auto &child : value.get()->children) cleanup(child);
+        for (usize i = value->attached.len(); i > usize(); --i) value.get()->attached[i - usize(1)].get()->close();
+        value.get()->attached.clear();
         if (value->scope) {
             auto &scope = *value.get()->scope.get(); scope.alive = false;
             for (usize i = scope.effects.len(); i > usize(); --i) scope.effects[i - usize(1)].get()->lease = None();
@@ -635,6 +717,11 @@ class CompositionRuntime {
             if (old_link.get() != next_link.get()) { old_link.get()->active = false; old_link.get()->alive = false; }
         }
         instance.element = draft.element; instance.native = rstd::move(draft.native);
+        instance.attached.clear();
+        for (auto &behavior : draft.attached) {
+            behavior.slot.get()->config = behavior.config.clone();
+            instance.attached.push(behavior.slot.clone());
+        }
         if (draft.output.is_some()) instance.output = Some(Element(*draft.output));
         if (draft.fresh) instance.mounts = rstd::move(draft.mounts);
         instance.owns_children = draft.owns_children;
@@ -650,6 +737,24 @@ class CompositionRuntime {
     }
     void activate(ComposeDraft &draft, CommittedContext &context) {
         if (draft.reused || signal->closed) return;
+        for (const auto &behavior : draft.attached) {
+            if (signal->closed) return;
+            auto slot = behavior.slot.clone();
+            BehaviorContext attached(context.session(), *draft.instance->id, slot->role);
+            auto report = [&](ComposeError error) {
+                error.stage = ComposeStage::Effect; error.node = draft.instance->id;
+                if (!error.source.line()) error.source = draft.element.data().source;
+                if (error.path.is_empty()) error.path = slot->key.label();
+                signal.get()->report(rstd::move(error));
+            };
+            auto updated = behavior.config->update(*slot.get()->state.get(), attached);
+            if (updated.is_err()) { slot.get()->attempted = true; report(updated.unwrap_err()); continue; }
+            if (slot->attempted) continue;
+            slot.get()->attempted = true;
+            auto started = behavior.config->attach(*slot.get()->state.get(), attached);
+            if (started.is_ok()) slot.get()->lease = Some(started.unwrap());
+            else report(started.unwrap_err());
+        }
         if (draft.scope.is_some())
             for (auto &effect : draft.instance.get()->scope.get()->effects) {
                 if (signal->closed) return;
@@ -743,7 +848,12 @@ class CompositionRuntime {
         signal.get()->published = true; signal.get()->committed_revision = report.revision;
         commit(*draft.get(), old); root_ = draft.get()->instance.clone();
         for (auto &observation : build.observations) observation.batch.publish();
-        session.input().publish_behaviors(rstd::move(behaviors));
+        auto input_published = session.input().publish_behaviors(rstd::move(behaviors));
+        if (input_published.is_err()) {
+            ComposeError error(ComposeStage::Input); error.input = Some(input_published.unwrap_err()); signal.get()->report(rstd::move(error));
+        }
+        for (usize i = build.retired_behaviors.len(); i > usize(); --i) build.retired_behaviors[i - usize(1)].get()->close();
+        build.retired_behaviors.clear();
         build.observations.clear();
         for (auto id : report.retired) {
             auto cancelled = session.input().cancel_subtree(id);
@@ -817,6 +927,8 @@ class CompositionRuntime {
                         slot.get()->attempted = false; instance.scope.get()->dirty = true;
                     }
             for (auto &slot : instance.mounts)
+                if (slot->attempted && slot->lease.is_none()) slot.get()->attempted = false;
+            for (auto &slot : instance.attached)
                 if (slot->attempted && slot->lease.is_none()) slot.get()->attempted = false;
             for (auto &child : instance.children) self(self, *child.get());
         };
