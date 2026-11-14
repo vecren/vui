@@ -1,6 +1,9 @@
 export module vui:document;
 import :composition;
 import :node.types;
+import :node.ownership;
+import :node.state;
+import :node.style_patch;
 import :animation;
 import :layout;
 import :diagnostics;
@@ -393,32 +396,6 @@ class UiDocument {
             text.source = format.source;
             text.line_breaks=format.line_breaks;text.whitespace=format.whitespace;
     }
-    static auto merge_style(NodeStyle current, const NodeStyle &before, const NodeStyle &value) -> NodeStyle {
-        if (before.layout.width != value.layout.width) current.layout.width = value.layout.width;
-        if (before.layout.height != value.layout.height) current.layout.height = value.layout.height;
-        if (before.layout.gap != value.layout.gap) current.layout.gap = value.layout.gap;
-        if (before.layout.padding != value.layout.padding) current.layout.padding = value.layout.padding;
-        if (before.layout.min_width != value.layout.min_width) current.layout.min_width = value.layout.min_width;
-        if (before.layout.min_height != value.layout.min_height) current.layout.min_height = value.layout.min_height;
-        if (before.layout.max_width != value.layout.max_width) current.layout.max_width = value.layout.max_width;
-        if (before.layout.max_height != value.layout.max_height) current.layout.max_height = value.layout.max_height;
-        if (before.layout.horizontal != value.layout.horizontal) current.layout.horizontal = value.layout.horizontal;
-        if (before.layout.vertical != value.layout.vertical) current.layout.vertical = value.layout.vertical;
-        if (before.background != value.background) current.background = value.background;
-        if (before.radius != value.radius) current.radius = value.radius;
-        if (before.transform != value.transform) current.transform = value.transform;
-        if (before.clip != value.clip) current.clip = value.clip;
-        if (before.opacity != value.opacity) current.opacity = value.opacity;
-        if (before.visible != value.visible) current.visible = value.visible;
-        if (before.hit_test_visible != value.hit_test_visible) current.hit_test_visible = value.hit_test_visible;
-        if (before.enabled != value.enabled) current.enabled = value.enabled;
-        if (before.focusable != value.focusable) current.focusable = value.focusable;
-        if (before.hit_self != value.hit_self) current.hit_self = value.hit_self;
-        if (before.text_input_area != value.text_input_area) current.text_input_area = value.text_input_area;
-        if (before.content_tint != value.content_tint) current.content_tint = value.content_tint;
-        if (before.paint_color != value.paint_color) current.paint_color = value.paint_color;
-        return current;
-    }
     static auto text_format(const TextContent &text) -> TextFormat {
         TextFormat result; result.family = text.family.as_str(); result.language = text.language.as_str();
         result.size = text.size;
@@ -519,8 +496,8 @@ class UiDocument {
         bool paint_dirty{true};
         DisplayList content;
         Serial mount_generation{1}, relation_generation{1};
-        Option<Box<State>> state;
-        Option<BindingGuard> children_owner;
+        Vec<UiNodeStateSlot> states;
+        Option<UiTreePermit> children_owner;
         Option<Box<ViewportLayout>> viewport;
         Option<Box<TextContent>> text;
         Option<Box<ImageContent>> image;
@@ -529,6 +506,9 @@ class UiDocument {
         rstd::rc::Weak<PropertyLeaseState> property_owner[static_cast<unsigned>(PresentationProperty::Count)];
         rstd::rc::Weak<UiValueWriterState> value_writer[3];
         Node(LayoutKind value, NodeStyle properties) : kind(value), style(properties) {}
+        Node(Node &&) = default;
+        auto operator=(Node &&) -> Node & = default;
+        ~Node() { while (!states.is_empty()) (void)states.pop(); }
     };
     struct Slot {
         Serial generation{1};
@@ -810,6 +790,50 @@ class UiDocument {
         auto owner = node.property_owner[property_index(property)].upgrade();
         return owner.is_some() && owner->get()->active && owner->get()->owner.alive() &&
                (owner->get()->driver.is_none() || owner->get()->driver->alive());
+    }
+    auto children_access(UiId id, const UiTreeAccess &access) -> Result<empty, UiError> {
+        auto node = resolve(id);
+        if (!node) return Err(UiError::InvalidId);
+        if (!access.valid(session_) || (node->children_owner.is_some() && node->children_owner->alive() && !access.allows(*node->children_owner)))
+            return Err(UiError::PropertyOwned);
+        return Ok(empty{});
+    }
+    auto relation_access(UiId id, const UiTreeAccess &access) -> Result<empty, UiError> {
+        auto node = resolve(id);
+        if (!node) return Err(UiError::InvalidId);
+        if (!access.valid(session_)) return Err(UiError::PropertyOwned);
+        return node->parent.is_some() ? children_access(*node->parent, access) : Result<empty, UiError>(Ok(empty{}));
+    }
+    auto validate_style(Node &node, const NodeStylePatch &patch) -> Result<NodeStyle, UiError> {
+        if (!patch.valid()) return Err(UiError::InvalidValue);
+        auto value = patch.apply(node.style);
+        if (!value.valid() || (node.viewport.is_some() && value.clip.enabled)) return Err(UiError::InvalidValue);
+        const auto &old = node.style;
+        if ((value.layout.width != old.layout.width && property_occupied(node, PresentationProperty::Width)) ||
+            (value.layout.height != old.layout.height && property_occupied(node, PresentationProperty::Height)) ||
+            (value.transform != old.transform && property_occupied(node, PresentationProperty::Transform)) ||
+            (value.opacity != old.opacity && property_occupied(node, PresentationProperty::Opacity)) ||
+            ((value.background != old.background || value.radius != old.radius) && property_occupied(node, PresentationProperty::Background)) ||
+            (value.clip != old.clip && property_occupied(node, PresentationProperty::Clip)) ||
+            (value.content_tint != old.content_tint && property_occupied(node, PresentationProperty::ContentTint)) ||
+            (value.paint_color != old.paint_color && property_occupied(node, PresentationProperty::PaintColor)) ||
+            (value.visible != old.visible && (property_occupied(node, PresentationProperty::Visible) || value_occupied(node, UiValueProperty::Visible))))
+            return Err(UiError::PropertyOwned);
+        return Ok(rstd::move(value));
+    }
+    void style_changed(UiId id, Node &node, const NodeStyle &before) {
+        const auto &after = node.style;
+        if (before == after) return;
+        if (before.background != after.background || before.radius != after.radius || before.layout.padding != after.layout.padding)
+            node.paint_dirty = true;
+        if (before.layout != after.layout) {
+            auto dimensions = before.layout;
+            dimensions.horizontal = after.layout.horizontal; dimensions.vertical = after.layout.vertical;
+            if (dimensions == after.layout && before.layout.horizontal != Alignment::Stretch && after.layout.horizontal != Alignment::Stretch &&
+                before.layout.vertical != Alignment::Stretch && after.layout.vertical != Alignment::Stretch) {
+                dirty_arrange(id); layout_dirty_ = true; changed(false, Some(id));
+            } else changed(true, Some(id));
+        } else changed(false, Some(id));
     }
     void revoke_property(Node &node, PresentationProperty property) {
         auto owner = node.property_owner[property_index(property)].upgrade();
@@ -1774,14 +1798,19 @@ class UiDocument {
             Vec<UiId> children;
             Option<UiId> parent;
             bool relation_changed{}, children_changed{}, created{}, updated{};
-            Option<Box<State>> state;
-            Option<Box<UiStatePatch>> patch;
-            Option<rstd::any::TypeId> state_type;
+            Vec<UiNodeStateSlot> states;
+            Vec<UiNodeStateUpdate> patches;
+            struct StateType { NodeStateKey key; rstd::any::TypeId type; };
+            Vec<StateType> state_types;
+            Option<UiTreePermit> children_owner;
+            Option<NodeStyle> previous_style;
             Option<ScrollAxes> axes;
         };
         struct Retirement final : UiEditRetirement { Vec<Entry> entries; };
         Serial session_{}, base_{}, batch_{};
         BindingGuard lifetime_;
+        UiTreeAccess access_;
+        UiDocument *document_{};
         Vec<Entry> entries_;
         Vec<UiId> retired_;
         usize slots_{};
@@ -1795,7 +1824,11 @@ class UiDocument {
         auto operator=(PreparedEdit &&) -> PreparedEdit & = default;
         auto id(UiNodeRef ref) const -> UiId { return ref.batch == batch_ && ref.index < entries_.len() ? entries_[ref.index].id : UiId{}; }
         auto retired() const -> slice<UiId> { return retired_.as_slice(); }
-        auto state_type(UiNodeRef ref) const -> Option<rstd::any::TypeId> { return ref.batch == batch_ && ref.index < entries_.len() ? entries_[ref.index].state_type : None<rstd::any::TypeId>(); }
+        auto state_type(UiNodeRef ref, NodeStateKey key = {}) const -> Option<rstd::any::TypeId> {
+            if (ref.batch == batch_ && ref.index < entries_.len())
+                for (const auto &state : entries_[ref.index].state_types) if (state.key == key) return Some(rstd::any::TypeId(state.type));
+            return None();
+        }
         auto children(UiNodeRef ref) const -> slice<UiId> { return ref.batch == batch_ && ref.index < entries_.len() ? entries_[ref.index].children.as_slice() : slice<UiId>{}; }
         auto viewport_axes(UiId id, ScrollAxes value) -> Result<empty, UiError> {
             for (auto &entry : entries_) if (entry.id == id) {
@@ -1804,15 +1837,26 @@ class UiDocument {
             }
             return Err(UiError::InvalidId);
         }
-        template <class T> auto state(UiNodeRef ref, T value) -> Result<empty, UiError> {
+        template <class T> auto state(UiNodeRef ref, T value, NodeStateKey key = {}) -> Result<empty, UiError> {
+            if (!lifetime_.alive()) return Err(UiError::Cancelled);
             if (ref.batch != batch_ || ref.index >= entries_.len()) return Err(UiError::InvalidId);
             auto &entry = entries_[ref.index];
-            if (entry.state_type.is_some()) return Err(UiError::InvalidValue);
+            if (state_type(ref, key).is_some()) return Err(UiError::InvalidValue);
+            auto node = entry.fresh.is_some() ? &*entry.fresh : document_->resolve(entry.id);
+            if (!node) return Err(UiError::InvalidId);
+            node->states.reserve(entry.states.len() + usize(1));
             auto stored = Box<UiStoredState<T>>::make(rstd::move(value));
-            entry.state = Some(Box<UiNodeState>::from_raw(rstd::move(stored).into_raw().template cast<UiNodeState>()));
-            entry.state_type = Some(rstd::any::TypeId::of<T>()); return Ok(empty{});
+            entry.states.push({key, Box<UiNodeState>::from_raw(rstd::move(stored).into_raw().template cast<UiNodeState>())});
+            entry.state_types.push({key, rstd::any::TypeId::of<T>()}); return Ok(empty{});
         }
     };
+    auto node_kind(const UiEditBatch &edit, UiNodeRef ref) -> Result<LayoutKind, UiError> {
+        if (ref.batch != edit.owner_ || ref.index >= edit.entries_.len()) return Err(UiError::InvalidId);
+        const auto &entry = edit.entries_[ref.index];
+        if (entry.existing.is_none()) return Ok(entry.kind);
+        auto node = resolve(*entry.existing);
+        return node ? Result<LayoutKind, UiError>(Ok(node->kind)) : Result<LayoutKind, UiError>(Err(UiError::InvalidId));
+    }
     auto prepare(UiEditBatch edit) -> Result<PreparedEdit, UiEditError> {
         Option<UiNodeRef> active_ref;
         auto operation = UiEditOperation::Handle;
@@ -1821,12 +1865,16 @@ class UiDocument {
         };
         if (!can_route()) return fail(UiError::Routing);
         if (edit.error_.is_some()) return fail(*edit.error_);
+        if (!edit.access_.valid(session_)) return fail(UiError::PropertyOwned);
         PreparedEdit result;
         result.batch_ = edit.owner_;
+        result.document_ = this;
         result.session_ = session_; result.base_ = revision_; result.lifetime_ = lifetime();
         for (auto id : edit.removed_) {
             if (!valid(id)) return fail(UiError::InvalidId);
             if (root_ == Some(id)) return fail(UiError::Root);
+            auto allowed = relation_access(id, edit.access_);
+            if (allowed.is_err()) return fail(allowed.unwrap_err());
             for (auto previous : result.retired_) {
                 if (is_descendant(previous, id).unwrap() || is_descendant(id, previous).unwrap())
                     return fail(UiError::InvalidValue);
@@ -1870,7 +1918,7 @@ class UiDocument {
                                next_slot < slots_.len() ? slots_[next_slot].generation : 1};
                 ++next_slot;
                 if (unsigned(entry.kind) > unsigned(LayoutKind::Item)) return fail(UiError::InvalidValue);
-                prepared.fresh = Some(Node(entry.kind, entry.style.unwrap_or(NodeStyle{})));
+                prepared.fresh = Some(Node(entry.kind, NodeStyle{}));
                 if (entry.kind == LayoutKind::Viewport) prepared.fresh->viewport = Some(Box<ViewportLayout>::make());
                 if (entry.kind == LayoutKind::Text) prepared.fresh->text = Some(Box<TextContent>::make());
                 if (entry.kind == LayoutKind::Image) prepared.fresh->image = Some(Box<ImageContent>::make());
@@ -1879,32 +1927,36 @@ class UiDocument {
             auto node = entry.existing.is_some() ? resolve(prepared.id) : &*prepared.fresh;
             if (entry.style.is_some()) {
                 operation = UiEditOperation::Style;
-                auto style = entry.before_style.is_some() ? merge_style(node->style, *entry.before_style, *entry.style) : *entry.style;
-                if (!style.valid() || (entry.kind == LayoutKind::Viewport && style.clip.enabled))
-                    return fail(UiError::InvalidValue);
+                auto checked = validate_style(*node, *entry.style);
+                if (checked.is_err()) return fail(checked.unwrap_err());
+                auto style = checked.unwrap();
                 auto &old = node->style;
-                if ((style.layout.width != old.layout.width && property_occupied(*node, PresentationProperty::Width)) ||
-                    (style.layout.height != old.layout.height && property_occupied(*node, PresentationProperty::Height)) ||
-                    (style.transform != old.transform && property_occupied(*node, PresentationProperty::Transform)) ||
-                    (style.opacity != old.opacity && property_occupied(*node, PresentationProperty::Opacity)) ||
-                    (style.background != old.background && property_occupied(*node, PresentationProperty::Background)))
-                    return fail(UiError::PropertyOwned);
                 if (entry.existing.is_none() || old != style) prepared.style = Some(style);
             }
-            if (entry.state.is_some()) {
+            for (auto &state : entry.states) {
                 operation = UiEditOperation::State;
-                if (node->state.is_some()) return fail(UiError::InvalidValue);
-                prepared.state = rstd::move(entry.state);
+                if (node_state(node->states, state.key)) return fail(UiError::InvalidValue);
+                prepared.states.push(rstd::move(state));
             }
-            if (entry.patch.is_some()) {
+            for (auto &patch : entry.patches) {
                 operation = UiEditOperation::State;
-                auto state = prepared.state.is_some() ? &**prepared.state
-                    : node->state.is_some() ? &**node->state : nullptr;
-                if (!state || state->type() != (**entry.patch).type()) return fail(UiError::InvalidValue);
-                prepared.patch = rstd::move(entry.patch);
+                auto state = node_state(prepared.states, patch.key);
+                if (!state) state = node_state(node->states, patch.key);
+                if (!state || state->type() != patch.value->type()) return fail(UiError::InvalidValue);
+                prepared.patches.push(rstd::move(patch));
             }
-            if (prepared.state.is_some()) prepared.state_type = Some((**prepared.state).type());
-            else if (node->state.is_some()) prepared.state_type = Some((**node->state).type());
+            for (const auto &state : node->states) prepared.state_types.push({state.key, state.value->type()});
+            for (const auto &state : prepared.states) prepared.state_types.push({state.key, state.value->type()});
+            if (entry.children_owner.is_some()) {
+                operation = UiEditOperation::Children;
+                auto permit = *entry.children_owner;
+                if (!accepts_children(node->kind) || !permit.alive() || permit.document() != session_)
+                    return fail(UiError::PropertyOwned);
+                if (node->children_owner.is_some() && node->children_owner->alive() && !permit.same_owner(*node->children_owner))
+                    return fail(UiError::PropertyOwned);
+                if (node->children_owner.is_none() || !permit.same_owner(*node->children_owner))
+                    prepared.children_owner = Some(rstd::move(permit));
+            }
             if (entry.text.is_some()) {
                 operation = UiEditOperation::Text;
                 auto &value = *entry.text; auto format = value.format();
@@ -1974,6 +2026,11 @@ class UiDocument {
             active_ref = Some(UiNodeRef{edit.owner_, i}); operation = UiEditOperation::Children;
             auto &source = edit.entries_[i]; auto &entry = result.entries_[i];
             if (source.children.is_none()) continue;
+            if (source.existing.is_some()) {
+                auto allowed = children_access(entry.id, edit.access_);
+                if (allowed.is_err()) return fail(allowed.unwrap_err());
+            }
+            if (source.children_owner.is_some() && !edit.access_.allows(*source.children_owner)) return fail(UiError::PropertyOwned);
             if ((source.kind == LayoutKind::Leaf || source.kind == LayoutKind::Text || source.kind == LayoutKind::Image || source.kind == LayoutKind::Scene) && !source.children->is_empty())
                 return fail(UiError::MissingChild);
             if (source.kind == LayoutKind::Viewport && source.children->len() > usize(1)) return fail(UiError::InvalidValue);
@@ -1987,6 +2044,10 @@ class UiDocument {
             for (auto ref : *source.children) {
                 if (ref.batch != edit.owner_ || ref.index >= result.entries_.len()) return fail(UiError::InvalidId);
                 auto &child = result.entries_[ref.index];
+                if (!child.created && child.parent != Some(entry.id)) {
+                    auto allowed = relation_access(child.id, edit.access_);
+                    if (allowed.is_err()) return fail(allowed.unwrap_err());
+                }
                 if (root_ == Some(child.id)) return fail(UiError::Root);
                 for (auto id : entry.children) if (id == child.id) return fail(UiError::InvalidValue);
                 if (child.parent.is_some() && *child.parent != entry.id) {
@@ -2025,18 +2086,24 @@ class UiDocument {
                 entry.relation_changed = entry.parent.is_some();
                 entry.children_changed = !entry.children.is_empty();
             }
+            auto node = entry.fresh.is_some() ? &*entry.fresh : resolve(entry.id);
+            node->states.reserve(entry.states.len());
         }
         result.slots_ = next_slot > slots_.len() ? next_slot : slots_.len();
         slots_.reserve(result.slots_ - slots_.len());
         input_changes_.reserve(result.entries_.len() + result.retired_.len());
         animation_completions_.reserve(animations_.len());
         result.retirement_ = Some(Box<typename PreparedEdit::Retirement>::make());
+        result.access_ = rstd::move(edit.access_);
         return Ok(rstd::move(result));
     }
     auto publish(PreparedEdit edit) -> Result<UiCommitReport, UiError> {
         if (!can_route()) return Err(UiError::Routing);
         if (!edit.lifetime_.alive() || edit.session_ != session_ || edit.base_ != revision_)
             return Err(UiError::StaleBase);
+        if (!edit.access_.valid(session_)) return Err(UiError::PropertyOwned);
+        for (const auto &entry : edit.entries_)
+            if (entry.children_owner.is_some() && !entry.children_owner->alive()) return Err(UiError::PropertyOwned);
         editing_ = true;
         struct Guard { bool &value; ~Guard() { value = false; } } guard{editing_};
         UiCommitReport report;
@@ -2047,12 +2114,13 @@ class UiDocument {
             }
         for (auto &entry : edit.entries_) {
             auto node = resolve(entry.id);
-            entry.updated = entry.style.is_some() || entry.text.is_some() || entry.image.is_some() || entry.state.is_some() || entry.patch.is_some() || entry.axes.is_some() || entry.children_changed || entry.relation_changed;
-            if (entry.style.is_some()) { node->style = *entry.style; node->paint_dirty = true; }
+            entry.updated = entry.style.is_some() || entry.text.is_some() || entry.image.is_some() || !entry.states.is_empty() || !entry.patches.is_empty() || entry.children_owner.is_some() || entry.axes.is_some() || entry.children_changed || entry.relation_changed;
+            if (entry.style.is_some()) { entry.previous_style = Some(node->style); node->style = *entry.style; }
             if (entry.text.is_some()) { auto previous = rstd::move(node->text); node->text = rstd::move(entry.text); entry.text = rstd::move(previous); node->paint_dirty = true; }
             if (entry.image.is_some()) { auto previous = rstd::move(node->image); node->image = rstd::move(entry.image); entry.image = rstd::move(previous); node->paint_dirty = true; }
-            if (entry.state.is_some()) node->state = rstd::move(entry.state);
-            if (entry.patch.is_some()) (**entry.patch).publish(**node->state);
+            for (auto &state : entry.states) node->states.push(rstd::move(state));
+            for (auto &patch : entry.patches) patch.value->publish(*node_state(node->states, patch.key));
+            if (entry.children_owner.is_some()) node->children_owner = Some(UiTreePermit(*entry.children_owner));
             if (entry.axes.is_some()) (*node->viewport)->axes = *entry.axes;
             if (entry.relation_changed) { ++node->relation_generation; node->parent = entry.parent; }
             if (entry.children_changed) node->children = rstd::move(entry.children);
@@ -2062,7 +2130,10 @@ class UiDocument {
         }
         for (auto &entry : edit.entries_) {
             if (entry.relation_changed && !entry.created) remount(entry.id);
-            if (entry.updated) { changed(true, Some(entry.id)); if (!entry.created) ++report.updated; }
+            if (entry.previous_style.is_some()) style_changed(entry.id, *resolve(entry.id), *entry.previous_style);
+            if (entry.created || !entry.states.is_empty() || !entry.patches.is_empty() || entry.children_owner.is_some() || entry.text.is_some() || entry.image.is_some() || entry.axes.is_some() || entry.children_changed || entry.relation_changed)
+                changed(true, Some(entry.id));
+            if (entry.updated && !entry.created) ++report.updated;
         }
         for (auto id : edit.retired_) changed(true, Some(id));
         report.retired = rstd::move(edit.retired_); report.revision = revision_;
@@ -2092,14 +2163,33 @@ class UiDocument {
     auto operator=(const UiDocument &) -> UiDocument & = delete;
     auto session() const -> Serial { return session_; }
     auto bindings() -> BindingRegistry & { return bindings_; }
-    auto claim_children(UiId id) -> Result<Binding, UiError> {
+    auto make_tree_owner() -> UiTreeOwner { return UiTreeOwner(session_, bindings_.make()); }
+    auto claim_children(UiId id, const UiTreeOwner &owner) -> Result<empty, UiError> {
         if (!can_route()) return Err(UiError::Routing);
         auto node = resolve(id);
         if (!node) return Err(UiError::InvalidId);
-        if (node->kind == LayoutKind::Leaf || node->kind == LayoutKind::Text || node->kind == LayoutKind::Image || node->kind == LayoutKind::Scene ||
-            !node->children.is_empty() || (node->children_owner.is_some() && node->children_owner->alive()))
+        auto permit = owner.permit();
+        if (!accepts_children(node->kind) || !permit.alive() || permit.document() != session_ ||
+            (node->children_owner.is_some() && node->children_owner->alive() && !permit.same_owner(*node->children_owner)))
             return Err(UiError::PropertyOwned);
-        auto binding = bindings_.make(); node->children_owner = Some(binding.guard()); return Ok(rstd::move(binding));
+        if (node->children_owner.is_some() && permit.same_owner(*node->children_owner)) return Ok(empty{});
+        node->children_owner = Some(rstd::move(permit)); changed(false); return Ok(empty{});
+    }
+    auto claim_children(UiId id) -> Result<UiTreeOwner, UiError> {
+        auto node = resolve(id);
+        if (!node) return Err(UiError::InvalidId);
+        if (!node->children.is_empty()) return Err(UiError::PropertyOwned);
+        auto owner = make_tree_owner();
+        auto claimed = claim_children(id, owner); if (claimed.is_err()) return Err(claimed.unwrap_err());
+        return Ok(rstd::move(owner));
+    }
+    auto release_children(UiId id, const UiTreeOwner &owner) -> Result<empty, UiError> {
+        if (!can_route()) return Err(UiError::Routing);
+        auto node = resolve(id);
+        if (!node) return Err(UiError::InvalidId);
+        if (!owner.alive() || owner.permit().document() != session_ || !node->children_owner.is_some() || !owner.permit().same_owner(*node->children_owner))
+            return Err(UiError::PropertyOwned);
+        node->children_owner = None(); changed(false); return Ok(empty{});
     }
     auto lifetime() const -> BindingGuard { return lease_owner_.guard(); }
     auto paint_diagnostics() const -> slice<PaintDiagnostic> {
@@ -2210,25 +2300,25 @@ class UiDocument {
         const auto &slot = slots_[usize(id.slot)];
         return slot.generation == id.generation && slot.node.is_some();
     }
-    template <class T> auto attach_state(UiId id, T value) -> Result<empty, UiError> {
+    template <class T> auto attach_state(UiId id, T value, NodeStateKey key = {}) -> Result<empty, UiError> {
         if (routing_ || (layout_active_ || painting_ || evaluating_ || editing_))
             return Err(UiError::Routing);
         auto node = resolve(id);
         if (!node)
             return Err(UiError::InvalidId);
-        if (node->state.is_some())
+        if (node_state(node->states, key))
             return Err(UiError::InvalidValue);
         auto state = Box<StoredState<T>>::make(rstd::move(value));
-        node->state =
-            Some(Box<State>::from_raw(rstd::move(state).into_raw().template cast<State>()));
+        node->states.push({key, Box<State>::from_raw(rstd::move(state).into_raw().template cast<State>())});
         changed(false, Some(id));
         return Ok(empty{});
     }
-    template <class T> auto state(UiId id) -> T * {
+    template <class T> auto state(UiId id, NodeStateKey key = {}) -> T * {
         auto node = resolve(id);
-        if (!node || node->state.is_none() || (**node->state).type() != rstd::any::TypeId::of<T>())
+        auto state = node ? node_state(node->states, key) : nullptr;
+        if (!state || state->type() != rstd::any::TypeId::of<T>())
             return nullptr;
-        return &static_cast<StoredState<T> &>(**node->state).value;
+        return &static_cast<StoredState<T> &>(*state).value;
     }
     template <class T> auto create(NodeStyle style = {}) -> Result<UiId, UiError> {
         if (routing_ || (layout_active_ || painting_ || evaluating_ || editing_))
@@ -2281,14 +2371,15 @@ class UiDocument {
             return Err(UiError::InvalidId);
         return Ok(UiRelation{parent, child, c->relation_generation});
     }
-    auto attach(UiId parent, UiId child) -> Result<empty, UiError> {
+    auto attach(UiId parent, UiId child, const UiTreeAccess &access = {}) -> Result<empty, UiError> {
         if (routing_ || (layout_active_ || painting_ || evaluating_ || editing_))
             return Err(UiError::Routing);
         auto p = resolve(parent), c = resolve(child);
         if (!p || !c)
             return Err(UiError::InvalidId);
-        if (p->kind == LayoutKind::Leaf || p->kind == LayoutKind::Text ||
-            p->kind == LayoutKind::Image || p->kind == LayoutKind::Scene)
+        auto target_access = children_access(parent, access); if (target_access.is_err()) return target_access;
+        auto source_access = relation_access(child, access); if (source_access.is_err()) return source_access;
+        if (!accepts_children(p->kind))
             return Err(UiError::MissingChild);
         if (p->kind == LayoutKind::Viewport && !p->children.is_empty() &&
             p->children[usize()] != child)
@@ -2331,14 +2422,15 @@ class UiDocument {
         notify_targets();
         return Ok(empty{});
     }
-    template <class T> auto append(UiId parent, NodeStyle style = {}) -> Result<UiId, UiError> {
+    template <class T> auto append(UiId parent, NodeStyle style = {}, const UiTreeAccess &access = {}) -> Result<UiId, UiError> {
         if (!valid(parent))
             return Err(UiError::InvalidId);
+        auto allowed = children_access(parent, access); if (allowed.is_err()) return Err(allowed.unwrap_err());
         auto result = create<T>(style);
         if (result.is_err())
             return result;
         auto id = result.unwrap();
-        auto attached = attach(parent, id);
+        auto attached = attach(parent, id, access);
         if (attached.is_err()) {
             erase(id);
             return Err(attached.unwrap_err());
@@ -2364,12 +2456,13 @@ class UiDocument {
         notify_targets();
         return Ok(empty{});
     }
-    auto detach(UiId id) -> Result<empty, UiError> {
+    auto detach(UiId id, const UiTreeAccess &access = {}) -> Result<empty, UiError> {
         if (routing_ || (layout_active_ || painting_ || evaluating_ || editing_))
             return Err(UiError::Routing);
         auto node = resolve(id);
         if (!node)
             return Err(UiError::InvalidId);
+        auto allowed = relation_access(id, access); if (allowed.is_err()) return allowed;
         remount(id);
         if (node->parent.is_some()) {
             ++node->relation_generation;
@@ -2383,20 +2476,21 @@ class UiDocument {
         notify_targets();
         return Ok(empty{});
     }
-    auto destroy(UiId id) -> Result<empty, UiError> {
-        auto result = detach(id);
+    auto destroy(UiId id, const UiTreeAccess &access = {}) -> Result<empty, UiError> {
+        auto result = detach(id, access);
         if (result.is_err())
             return result;
         erase(id);
         notify_targets();
         return Ok(empty{});
     }
-    auto reorder(UiId parent, UiId child, usize destination) -> Result<empty, UiError> {
+    auto reorder(UiId parent, UiId child, usize destination, const UiTreeAccess &access = {}) -> Result<empty, UiError> {
         if (routing_ || (layout_active_ || painting_ || evaluating_ || editing_))
             return Err(UiError::Routing);
         auto node = resolve(parent);
         if (!node)
             return Err(UiError::InvalidId);
+        auto allowed = children_access(parent, access); if (allowed.is_err()) return allowed;
         if (destination >= node->children.len())
             return Err(UiError::MissingChild);
         usize index{};
@@ -3188,27 +3282,28 @@ class UiDocument {
     }
     template <class T>
         requires rstd::Impled<T, Layout>
-    auto attach_layout(UiId id) -> Result<empty, UiError> {
-        if (!state<T>(id))
+    auto attach_layout(UiId id, NodeStateKey role = {}) -> Result<empty, UiError> {
+        if (!state<T>(id, role))
             return Err(UiError::InvalidId);
         struct Adapter {
             UiDocument *document;
             UiId id;
+            NodeStateKey role;
             auto measure(LayoutMeasureContext &context, LayoutConstraints c)
                 -> Result<Size, UiError> {
-                auto receiver = document->state<T>(id);
+                auto receiver = document->state<T>(id, role);
                 if (!receiver)
                     return Err(UiError::Cancelled);
                 return rstd::as<Layout>(*receiver).measure(context, c);
             }
             auto arrange(LayoutArrangeContext &context, Size size) -> Result<empty, UiError> {
-                auto receiver = document->state<T>(id);
+                auto receiver = document->state<T>(id, role);
                 if (!receiver)
                     return Err(UiError::Cancelled);
                 return rstd::as<Layout>(*receiver).arrange(context, size);
             }
         };
-        return install_layout(id, Adapter{this, id});
+        return install_layout(id, Adapter{this, id, role});
     }
     template <class T>
         requires rstd::Impled<T, Layout>
@@ -3252,20 +3347,21 @@ class UiDocument {
     }
     template <class T>
         requires rstd::Impled<T, Paint>
-    auto attach_paint(UiId id) -> Result<empty, UiError> {
-        if (!state<T>(id))
+    auto attach_paint(UiId id, NodeStateKey role = {}) -> Result<empty, UiError> {
+        if (!state<T>(id, role))
             return Err(UiError::InvalidId);
         struct Adapter {
             UiDocument *document;
             UiId id;
+            NodeStateKey role;
             auto paint(PaintContext &context) -> Result<empty, UiError> {
-                auto receiver = document->state<T>(id);
+                auto receiver = document->state<T>(id, role);
                 if (!receiver)
                     return Err(UiError::Cancelled);
                 return rstd::as<Paint>(*receiver).paint(context);
             }
         };
-        return install_paint(id, Adapter{this, id});
+        return install_paint(id, Adapter{this, id, role});
     }
     template <class T>
         requires rstd::Impled<T, Paint>
@@ -3299,189 +3395,55 @@ class UiDocument {
     auto layout_diagnostics() const -> slice<LayoutDiagnostic> {
         return layout_diagnostics_.as_slice();
     }
-    auto set_layout(UiId id, LayoutStyle value) -> Result<empty, UiError> {
-        if ((layout_active_ || painting_ || evaluating_ || editing_))
-            return Err(UiError::Routing);
-        auto node = resolve(id);
-        if (!node)
-            return Err(UiError::InvalidId);
-        if ((property_occupied(*node, PresentationProperty::Width) &&
-             value.width != node->style.layout.width) ||
-            (property_occupied(*node, PresentationProperty::Height) &&
-             value.height != node->style.layout.height))
-            return Err(UiError::PropertyOwned);
-        if (!value.valid())
-            return Err(UiError::InvalidValue);
-        auto before = effective_style(*node);
-        if (node->style.layout.padding != value.padding)
-            node->paint_dirty = true;
-        node->style.layout = value;
-        auto after = effective_style(*node).layout;
-        if (before.layout != after) {
-            auto dimensions = before.layout;
-            dimensions.horizontal = after.horizontal;
-            dimensions.vertical = after.vertical;
-            if (dimensions == after && before.layout.horizontal != Alignment::Stretch &&
-                after.horizontal != Alignment::Stretch &&
-                before.layout.vertical != Alignment::Stretch &&
-                after.vertical != Alignment::Stretch) {
-                dirty_arrange(id);
-                layout_dirty_ = true;
-                changed(false);
-            } else
-                changed(true, Some(id));
-        }
+    auto patch_style(UiId id, const NodeStylePatch &patch) -> Result<empty, UiError> {
+        if (layout_active_ || painting_ || evaluating_ || editing_) return Err(UiError::Routing);
+        auto node = resolve(id); if (!node) return Err(UiError::InvalidId);
+        auto checked = validate_style(*node, patch); if (checked.is_err()) return Err(checked.unwrap_err());
+        auto before = node->style; node->style = checked.unwrap(); style_changed(id, *node, before);
         return Ok(empty{});
+    }
+    auto set_layout(UiId id, LayoutStyle value) -> Result<empty, UiError> {
+        return patch_style(id, NodeStylePatch::layout(rstd::move(value)));
     }
     auto set_background(UiId id, Color value, Scalar radius = 0) -> Result<empty, UiError> {
-        if ((layout_active_ || painting_ || evaluating_ || editing_))
-            return Err(UiError::Routing);
-        auto node = resolve(id);
-        if (!node)
-            return Err(UiError::InvalidId);
-        if (property_occupied(*node, PresentationProperty::Background))
-            return Err(UiError::PropertyOwned);
-        if (!value.valid() || !finite(radius) || radius < 0)
-            return Err(UiError::InvalidValue);
-        auto before = effective_style(*node);
-        node->style.background = value;
-        node->style.radius = radius;
-        auto after = effective_style(*node);
-        if (before.background != after.background || before.radius != after.radius) {
-            node->paint_dirty = true;
-            changed(false, Some(id));
-        }
-        return Ok(empty{});
+        NodeStyle style; style.background = value; style.radius = radius;
+        return patch_style(id, NodeStylePatch::select(style, {NodeStyleField::Background, NodeStyleField::Radius}));
     }
     auto set_transform(UiId id, Transform value) -> Result<empty, UiError> {
-        if ((layout_active_ || painting_ || evaluating_ || editing_))
-            return Err(UiError::Routing);
-        auto node = resolve(id);
-        if (!node)
-            return Err(UiError::InvalidId);
-        if (property_occupied(*node, PresentationProperty::Transform))
-            return Err(UiError::PropertyOwned);
-        if (!value.valid())
-            return Err(UiError::InvalidValue);
-        auto before = effective_style(*node).transform;
-        node->style.transform = value;
-        if (before != effective_style(*node).transform)
-            changed(false, Some(id));
-        return Ok(empty{});
+        NodeStyle style; style.transform = value;
+        return patch_style(id, NodeStylePatch::select(style, {NodeStyleField::Transform}));
     }
     auto set_opacity(UiId id, Scalar value) -> Result<empty, UiError> {
-        if ((layout_active_ || painting_ || evaluating_ || editing_))
-            return Err(UiError::Routing);
-        auto node = resolve(id);
-        if (!node)
-            return Err(UiError::InvalidId);
-        if (property_occupied(*node, PresentationProperty::Opacity))
-            return Err(UiError::PropertyOwned);
-        if (!finite(value) || value < 0 || value > 1)
-            return Err(UiError::InvalidValue);
-        auto before = effective_style(*node).opacity;
-        node->style.opacity = value;
-        if (before != effective_style(*node).opacity)
-            changed(false, Some(id));
-        return Ok(empty{});
+        NodeStyle style; style.opacity = value;
+        return patch_style(id, NodeStylePatch::select(style, {NodeStyleField::Opacity}));
     }
     auto set_content_tint(UiId id, Color value) -> Result<empty, UiError> {
-        if (layout_active_ || painting_ || evaluating_ || editing_)
-            return Err(UiError::Routing);
-        auto node = resolve(id);
-        if (!node)
-            return Err(UiError::InvalidId);
-        if (property_occupied(*node, PresentationProperty::ContentTint))
-            return Err(UiError::PropertyOwned);
-        if (!value.valid())
-            return Err(UiError::InvalidValue);
-        if (node->style.content_tint != value) {
-            node->style.content_tint = value;
-            changed(false, Some(id));
-        }
-        return Ok(empty{});
+        NodeStyle style; style.content_tint = value;
+        return patch_style(id, NodeStylePatch::select(style, {NodeStyleField::ContentTint}));
     }
     auto set_paint_color(UiId id, Color value) -> Result<empty, UiError> {
-        if (layout_active_ || painting_ || evaluating_ || editing_)
-            return Err(UiError::Routing);
-        auto node = resolve(id);
-        if (!node)
-            return Err(UiError::InvalidId);
-        if (property_occupied(*node, PresentationProperty::PaintColor))
-            return Err(UiError::PropertyOwned);
-        if (!value.valid())
-            return Err(UiError::InvalidValue);
-        if (node->style.paint_color != value) {
-            node->style.paint_color = value;
-            changed(false, Some(id));
-        }
-        return Ok(empty{});
+        NodeStyle style; style.paint_color = value;
+        return patch_style(id, NodeStylePatch::select(style, {NodeStyleField::PaintColor}));
     }
     auto set_clip(UiId id, Clip value) -> Result<empty, UiError> {
-        if ((layout_active_ || painting_ || evaluating_ || editing_))
-            return Err(UiError::Routing);
-        auto node = resolve(id);
-        if (!node)
-            return Err(UiError::InvalidId);
-        if (property_occupied(*node, PresentationProperty::Clip))
-            return Err(UiError::PropertyOwned);
-        if (!value.valid() || (node->viewport.is_some() && value.enabled))
-            return Err(UiError::InvalidValue);
-        if (node->style.clip != value) {
-            node->style.clip = value;
-            changed(false);
-        }
-        return Ok(empty{});
+        NodeStyle style; style.clip = value;
+        return patch_style(id, NodeStylePatch::select(style, {NodeStyleField::Clip}));
     }
     auto set_visible(UiId id, bool value) -> Result<empty, UiError> {
-        if ((layout_active_ || painting_ || evaluating_ || editing_))
-            return Err(UiError::Routing);
-        auto node = resolve(id);
-        if (!node)
-            return Err(UiError::InvalidId);
-        if (value_occupied(*node, UiValueProperty::Visible) || property_occupied(*node, PresentationProperty::Visible))
-            return Err(UiError::PropertyOwned);
-        write_visible(id, *node, value);
-        return Ok(empty{});
+        NodeStyle style; style.visible = value;
+        return patch_style(id, NodeStylePatch::select(style, {NodeStyleField::Visible}));
     }
     auto set_hit_self(UiId id, bool value) -> Result<empty, UiError> {
-        if (layout_active_ || painting_ || evaluating_ || editing_)
-            return Err(UiError::Routing);
-        auto node = resolve(id);
-        if (!node)
-            return Err(UiError::InvalidId);
-        if (node->style.hit_self != value) {
-            node->style.hit_self = value;
-            changed(false, Some(id));
-        }
-        return Ok(empty{});
+        NodeStyle style; style.hit_self = value;
+        return patch_style(id, NodeStylePatch::select(style, {NodeStyleField::HitSelf}));
     }
     auto set_text_input_area(UiId id, Option<Rect> area) -> Result<empty, UiError> {
-        if (layout_active_ || painting_ || evaluating_ || editing_) return Err(UiError::Routing);
-        auto node = resolve(id);
-        if (!node) return Err(UiError::InvalidId);
-        if (area.is_some() && !area->valid()) return Err(UiError::InvalidValue);
-        if (node->style.text_input_area != area) {
-            node->style.text_input_area = area;
-            changed(false, Some(id));
-        }
-        return Ok(empty{});
+        NodeStyle style; style.text_input_area = area;
+        return patch_style(id, NodeStylePatch::select(style, {NodeStyleField::TextInputArea}));
     }
-    auto set_interaction(UiId id, bool hit_test_visible, bool enabled, bool focusable)
-        -> Result<empty, UiError> {
-        if ((layout_active_ || painting_ || evaluating_ || editing_))
-            return Err(UiError::Routing);
-        auto node = resolve(id);
-        if (!node)
-            return Err(UiError::InvalidId);
-        if (node->style.hit_test_visible != hit_test_visible || node->style.enabled != enabled ||
-            node->style.focusable != focusable) {
-            node->style.hit_test_visible = hit_test_visible;
-            node->style.enabled = enabled;
-            node->style.focusable = focusable;
-            changed(false, Some(id));
-        }
-        return Ok(empty{});
+    auto set_interaction(UiId id, bool hit_test_visible, bool enabled, bool focusable) -> Result<empty, UiError> {
+        NodeStyle style; style.hit_test_visible = hit_test_visible; style.enabled = enabled; style.focusable = focusable;
+        return patch_style(id, NodeStylePatch::select(style, {NodeStyleField::HitTestVisible, NodeStyleField::Enabled, NodeStyleField::Focusable}));
     }
     auto set_viewport_axes(UiId id, ScrollAxes axes) -> Result<empty, UiError> {
         if ((layout_active_ || painting_ || evaluating_ || editing_))

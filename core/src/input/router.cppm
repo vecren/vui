@@ -78,16 +78,17 @@ class EventRouter {
     friend class UiSession;
     struct BehaviorEntry {
         UiId target;
-        explicit BehaviorEntry(UiId id) : target(id) {}
+        NodeStateKey role;
+        explicit BehaviorEntry(UiId id, NodeStateKey key = {}) : target(id), role(key) {}
         Option<BindingGuard> binding;
         InputDelivery delivery{InputDelivery::EverySample};
         virtual ~BehaviorEntry() = default;
         virtual void invoke(EventContext &, const RoutedEvent &) = 0;
     };
     template <class T> struct NodeBehavior : BehaviorEntry {
-        explicit NodeBehavior(UiId id) : BehaviorEntry(id) {}
+        NodeBehavior(UiId id, NodeStateKey key) : BehaviorEntry(id, key) {}
         void invoke(EventContext &context, const RoutedEvent &event) override {
-            if (auto state = context.document().template state<T>(this->target))
+            if (auto state = context.document().template state<T>(this->target, this->role))
                 rstd::as<vui::Behavior>(*state).handle(context, event);
         }
     };
@@ -308,8 +309,8 @@ class EventRouter {
                     ++work_.behaviors_examined;
                     if (item->target == event.current &&
                         (item->binding.is_none() || item->binding->alive())) {
+                        if (context.default_prevented() && !cleanup) break;
                         item->invoke(context, event);
-                        break;
                     }
                 }
         }
@@ -750,17 +751,17 @@ class EventRouter {
         BehaviorEdit(BehaviorEdit &&) = default;
     };
     template <class T> requires rstd::Impled<T, vui::Behavior>
-    auto prepare_behavior(BehaviorEdit &edit, const UiDocument::PreparedEdit &document, UiNodeRef ref)
+    auto prepare_behavior(BehaviorEdit &edit, const UiDocument::PreparedEdit &document, UiNodeRef ref, NodeStateKey role = {})
         -> Result<empty, InputError> {
         if (closed_) return Err(InputError::Unavailable);
         if (busy_ || document_.routing()) return Err(InputError::Reentrant);
         auto target = document.id(ref);
-        if (target.session != document_.session() || document.state_type(ref) != Some(rstd::any::TypeId::of<T>()))
+        if (target.session != document_.session() || document.state_type(ref, role) != Some(rstd::any::TypeId::of<T>()))
             return Err(InputError::InvalidId);
-        for (const auto &entry : behaviors_) if (entry->target == target) return Err(InputError::InvalidSequence);
-        for (const auto &entry : edit.entries_) if (entry->target == target) return Err(InputError::InvalidSequence);
+        for (const auto &entry : behaviors_) if (entry->target == target && entry->role == role && (entry->binding.is_none() || entry->binding->alive())) return Err(InputError::InvalidSequence);
+        for (const auto &entry : edit.entries_) if (entry->target == target && entry->role == role) return Err(InputError::InvalidSequence);
         if (behaviors_.len() + edit.entries_.len() >= usize(65536)) return Err(InputError::Limit);
-        auto entry = Box<NodeBehavior<T>>::make(target);
+        auto entry = Box<NodeBehavior<T>>::make(target, role);
         edit.entries_.push(Box<BehaviorEntry>::from_raw(rstd::move(entry).into_raw().template cast<BehaviorEntry>()));
         behaviors_.reserve(edit.entries_.len());
         return Ok(empty{});
@@ -784,21 +785,21 @@ class EventRouter {
     auto operator=(const EventRouter &) -> EventRouter & = delete;
     template <class T>
         requires rstd::Impled<T, vui::Behavior>
-    auto attach_behavior(UiId target) -> Result<empty, InputError> {
+    auto attach_behavior(UiId target, NodeStateKey role = {}) -> Result<empty, InputError> {
         if (closed_)
             return Err(InputError::Unavailable);
         if (busy_ || document_.routing())
             return Err(InputError::Reentrant);
-        if (!document_.state<T>(target))
+        if (!document_.state<T>(target, role))
             return Err(InputError::InvalidId);
         routes_dirty_ = true;
         prune_requested_ = true;
         for (const auto &behavior : behaviors_)
-            if (behavior->target == target)
+            if (behavior->target == target && behavior->role == role && (behavior->binding.is_none() || behavior->binding->alive()))
                 return Err(InputError::InvalidSequence);
         if (behaviors_.len() >= usize(65536))
             return Err(InputError::Limit);
-        auto behavior = Box<NodeBehavior<T>>::make(target);
+        auto behavior = Box<NodeBehavior<T>>::make(target, role);
         behaviors_.push(Box<BehaviorEntry>::from_raw(
             rstd::move(behavior).into_raw().template cast<BehaviorEntry>()));
         return Ok(empty{});
@@ -806,7 +807,7 @@ class EventRouter {
     template <class T>
         requires rstd::Impled<T, vui::Behavior>
     auto bind_behavior(UiId target, rstd::rc::Weak<T> receiver,
-                       InputDelivery delivery = InputDelivery::EverySample)
+                       InputDelivery delivery = InputDelivery::EverySample, NodeStateKey role = {})
         -> Result<Binding, InputError> {
         if (closed_)
             return Err(InputError::Unavailable);
@@ -815,7 +816,7 @@ class EventRouter {
         if (!document_.valid(target))
             return Err(InputError::InvalidId);
         for (const auto &entry : behaviors_)
-            if (entry->target == target && (entry->binding.is_none() || entry->binding->alive()))
+            if (entry->target == target && entry->role == role && (entry->binding.is_none() || entry->binding->alive()))
                 return Err(InputError::InvalidSequence);
         if (behaviors_.len() >= usize(65536))
             return Err(InputError::Limit);
@@ -824,8 +825,8 @@ class EventRouter {
         auto binding = document_.bindings().make(receiver);
         struct Entry : BehaviorEntry {
             rstd::rc::Weak<T> receiver;
-            Entry(UiId id, rstd::rc::Weak<T> value, BindingGuard guard)
-                : BehaviorEntry(id), receiver(rstd::move(value)) {
+            Entry(UiId id, rstd::rc::Weak<T> value, BindingGuard guard, NodeStateKey role)
+                : BehaviorEntry(id, role), receiver(rstd::move(value)) {
                 this->binding = Some(BindingGuard(guard));
             }
             void invoke(EventContext &context, const RoutedEvent &event) override {
@@ -834,7 +835,7 @@ class EventRouter {
                     rstd::as<vui::Behavior>(*value->get()).handle(context, event);
             }
         };
-        auto entry = Box<Entry>::make(target, rstd::move(receiver), binding.guard());
+        auto entry = Box<Entry>::make(target, rstd::move(receiver), binding.guard(), role);
         entry->delivery = delivery;
         behaviors_.push(Box<BehaviorEntry>::from_raw(
             rstd::move(entry).into_raw().template cast<BehaviorEntry>()));

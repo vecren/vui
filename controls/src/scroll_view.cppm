@@ -131,7 +131,7 @@ class ScrollView {
         if (previous.is_some() && !state) return Err(UiError::InvalidId);
         style.focusable = true;
         auto node = previous.is_some() ? edit.existing(*previous) : edit.create(LayoutKind::Stack, style);
-        if (before.is_some()) { before->focusable = true; edit.style(node, style, *before); }
+        if (before.is_some()) { before->focusable = true; edit.style(node, NodeStylePatch::difference(*before, style)); }
         else edit.style(node, style);
         bool changed = state && state->style() != scroll;
         if (changed) {

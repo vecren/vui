@@ -1,5 +1,8 @@
 export module vui:document.edit;
 import :node.types;
+import :node.ownership;
+import :node.state;
+import :node.style_patch;
 import :text;
 import :image;
 using namespace rstd::prelude;
@@ -81,23 +84,36 @@ struct UiStatePatch {
     virtual auto type() const -> rstd::any::TypeId = 0;
     virtual void publish(UiNodeState &) = 0;
 };
+struct UiNodeStateSlot {
+    NodeStateKey key;
+    Box<UiNodeState> value;
+};
+struct UiNodeStateUpdate {
+    NodeStateKey key;
+    Box<UiStatePatch> value;
+};
+inline auto node_state(Vec<UiNodeStateSlot> &slots, NodeStateKey key) -> UiNodeState * {
+    for (auto &slot : slots) if (slot.key == key) return &*slot.value;
+    return nullptr;
+}
 class UiDocument;
 class UiEditBatch {
     struct Entry {
         Option<UiId> existing;
         LayoutKind kind{LayoutKind::Item};
-        Option<NodeStyle> style;
+        Option<NodeStylePatch> style;
         Option<UiTextValue> text;
         Option<UiImageValue> image;
         Option<Vec<UiNodeRef>> children;
-        Option<Box<UiNodeState>> state;
-        Option<Box<UiStatePatch>> patch;
-        Option<NodeStyle> before_style;
+        Vec<UiNodeStateSlot> states;
+        Vec<UiNodeStateUpdate> patches;
+        Option<UiTreePermit> children_owner;
         Option<UiTextValue> before_text;
         Option<UiImageValue> before_image;
     };
     Vec<Entry> entries_;
     Vec<UiId> removed_;
+    UiTreeAccess access_;
     Serial owner_{new_session()};
     Option<UiError> error_;
     auto entry(UiNodeRef ref) -> Entry * {
@@ -107,17 +123,19 @@ class UiEditBatch {
     friend class UiDocument;
 
   public:
+    explicit UiEditBatch(UiTreeAccess access = {}) : access_(rstd::move(access)) {}
     auto existing(UiId id) -> UiNodeRef {
         for (usize i{}; i < entries_.len(); ++i)
             if (entries_[i].existing == Some(id)) return {owner_, i};
         UiNodeRef result{owner_, entries_.len()}; entries_.push({Some(id)}); return result;
     }
     auto create(LayoutKind kind, NodeStyle style = {}) -> UiNodeRef {
-        UiNodeRef result{owner_, entries_.len()}; entries_.push({{}, kind, Some(style)}); return result;
+        UiNodeRef result{owner_, entries_.len()}; entries_.push({{}, kind, Some(NodeStylePatch::all(style))}); return result;
     }
-    void style(UiNodeRef id, NodeStyle value) { if (auto target = entry(id)) target->style = Some(value); }
-    void style(UiNodeRef id, NodeStyle value, NodeStyle before) {
-        if (auto target = entry(id)) target->before_style = Some(before); style(id, value);
+    void style(UiNodeRef id, NodeStylePatch value) { if (auto target = entry(id)) target->style = Some(rstd::move(value)); }
+    void style(UiNodeRef id, NodeStyle value) { style(id, NodeStylePatch::all(rstd::move(value))); }
+    void claim_children(UiNodeRef id, const UiTreeOwner &owner) {
+        if (auto target = entry(id)) target->children_owner = Some(owner.permit());
     }
     void text(UiNodeRef id, UiTextValue value, const UiTextValue &before) {
         if (auto target = entry(id)) target->before_text = Some(UiTextValue(before)); text(id, rstd::move(value));
@@ -134,20 +152,24 @@ class UiEditBatch {
     void children(UiNodeRef id, Vec<UiNodeRef> values) {
         if (auto target = entry(id)) target->children = Some(rstd::move(values));
     }
-    template <class T> void state(UiNodeRef id, T value) {
+    template <class T> void state(UiNodeRef id, T value, NodeStateKey key = {}) {
         auto target = entry(id); if (!target) return;
+        if (node_state(target->states, key)) { error_ = Some(UiError::InvalidValue); return; }
         auto stored = Box<UiStoredState<T>>::make(rstd::move(value));
-        target->state = Some(Box<UiNodeState>::from_raw(
-            rstd::move(stored).into_raw().template cast<UiNodeState>()));
+        target->states.push({key, Box<UiNodeState>::from_raw(
+            rstd::move(stored).into_raw().template cast<UiNodeState>())});
     }
-    template <class T> auto prepared_state(UiNodeRef id) -> T * {
+    template <class T> auto prepared_state(UiNodeRef id, NodeStateKey key = {}) -> T * {
         auto target = entry(id); if (!target) return nullptr;
-        auto &value = target->state;
-        if (value.is_none() || (**value).type() != rstd::any::TypeId::of<T>()) return nullptr;
-        return &static_cast<UiStoredState<T> &>(**value).value;
+        auto value = node_state(target->states, key);
+        if (!value || value->type() != rstd::any::TypeId::of<T>()) return nullptr;
+        return &static_cast<UiStoredState<T> &>(*value).value;
     }
-    void patch(UiNodeRef id, Box<UiStatePatch> value) {
-        if (auto target = entry(id)) target->patch = Some(rstd::move(value));
+    void patch(UiNodeRef id, Box<UiStatePatch> value, NodeStateKey key = {}) {
+        if (auto target = entry(id)) {
+            for (const auto &previous : target->patches) if (previous.key == key) { error_ = Some(UiError::InvalidValue); return; }
+            target->patches.push({key, rstd::move(value)});
+        }
     }
     void remove(UiId id) { removed_.push(UiId(id)); }
 };

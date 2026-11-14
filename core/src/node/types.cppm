@@ -4,6 +4,10 @@ import :layout;
 using namespace rstd::prelude;
 export namespace vui {
 enum class LayoutKind { Leaf, Row, Column, Stack, Viewport, Text, Image, Custom, Scene, Item };
+inline auto accepts_children(LayoutKind kind) -> bool {
+    return kind == LayoutKind::Row || kind == LayoutKind::Column || kind == LayoutKind::Stack ||
+           kind == LayoutKind::Viewport || kind == LayoutKind::Custom || kind == LayoutKind::Item;
+}
 struct Item {
     static constexpr LayoutKind layout = LayoutKind::Item;
 };

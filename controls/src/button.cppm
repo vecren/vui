@@ -244,7 +244,7 @@ class Button {
         }
         style.focusable = true;
         auto node = previous.is_some() ? edit.existing(*previous) : edit.create(LayoutKind::Stack, style);
-        if (state && before.is_some()) edit.style(node, style, state->configured_style(*before));
+        if (state && before.is_some()) edit.style(node, NodeStylePatch::difference(state->configured_style(*before), style));
         else edit.style(node, style);
         if (!state) edit.state(node, ButtonState(appearance, options, background, radius));
         else if (!state->configured(appearance, options, background, radius)) {

@@ -164,6 +164,7 @@ class ComposeBuild {
     };
   public:
     UiSession &session;
+    const UiTreeOwner &tree_owner;
     vui::state::GraphView local;
     rstd::rc::Rc<ComposeSignal> signal;
     UiEditBatch edit;
@@ -174,8 +175,8 @@ class ComposeBuild {
     Vec<Box<rstd::dyn<rstd::FnMut<Result<empty, InputError>(EventRouter &, EventRouter::BehaviorEdit &, const UiDocument::PreparedEdit &)>>>> behaviors;
     Serial evaluations{}, comparisons{}, skipped{};
     usize nodes{};
-    ComposeBuild(UiSession &ui, vui::state::GraphView graph, rstd::rc::Rc<ComposeSignal> source)
-        : session(ui), local(graph), signal(rstd::move(source)) {}
+    ComposeBuild(UiSession &ui, vui::state::GraphView graph, rstd::rc::Rc<ComposeSignal> source, const UiTreeOwner &owner)
+        : session(ui), tree_owner(owner), local(graph), signal(rstd::move(source)), edit(owner.access()) {}
     auto observe(vui::state::GraphView graph) -> ComposeResult<vui::state::ObservationBatch *> {
         for (auto &entry : observations) if (entry.graph.id() == graph.id()) return Ok(&entry.batch);
         auto batch = vui::state::ObservationBatch::begin(graph);
@@ -353,7 +354,7 @@ class PrepareContext {
     }
     void style(UiNodeRef id, NodeStyle value) {
         if (draft_.fresh) build_.edit.style(id, value);
-        else build_.edit.style(id, value, draft_.instance->element.data().style);
+        else build_.edit.style(id, NodeStylePatch::difference(draft_.instance->element.data().style, value));
     }
     auto signal() -> rstd::rc::Weak<ComposeSignal> { return build_.signal.downgrade(); }
     auto created() const -> bool { return draft_.fresh; }
@@ -380,11 +381,11 @@ class PrepareContext {
             rstd::rc::make_rc<EffectFunction>(rstd::move(start), source)));
     }
     template <class T> requires rstd::Impled<T, Behavior>
-    void behavior(UiNodeRef node) {
+    void behavior(UiNodeRef node, NodeStateKey role = {}) {
         if (!draft_.fresh) return;
         build_.behaviors.push(Box<rstd::dyn<rstd::FnMut<Result<empty, InputError>(EventRouter &, EventRouter::BehaviorEdit &, const UiDocument::PreparedEdit &)>>>::make(
-            [node](EventRouter &input, EventRouter::BehaviorEdit &edit, const UiDocument::PreparedEdit &document) {
-                return input.prepare_behavior<T>(edit, document, node);
+            [node, role](EventRouter &input, EventRouter::BehaviorEdit &edit, const UiDocument::PreparedEdit &document) {
+                return input.prepare_behavior<T>(edit, document, node, role);
             }));
     }
 };
@@ -462,7 +463,7 @@ auto ComposeBuild::reconcile(Element value, rstd::rc::Rc<ComposeInstance> previo
                 auto node = draft.fresh ? edit.create(data.layout, data.style) : edit.existing(*draft.instance->id);
                 draft.node = Some(node);
                 if (draft.fresh) edit.style(node, data.style);
-                else edit.style(node, data.style, draft.instance->element.data().style);
+                else edit.style(node, NodeStylePatch::difference(draft.instance->element.data().style, data.style));
                 if (data.text.is_some()) {
                     if (draft.fresh) edit.text(node, UiTextValue(*data.text));
                     else edit.text(node, UiTextValue(*data.text), *draft.instance->element.data().text);
@@ -525,6 +526,12 @@ auto ComposeBuild::reconcile(Element value, rstd::rc::Rc<ComposeInstance> previo
     }
     for (usize i{}; i < used.len(); ++i) if (!used[i]) retire(draft.instance->children[i].clone());
     if (data.kind == ElementKind::Native || data.kind == ElementKind::Custom) {
+        if (!draft.owns_children) {
+            if (draft.node.is_none()) draft.node = Some(edit.existing(*draft.instance->id));
+            auto kind = session.document().node_kind(edit, *draft.node);
+            if (kind.is_err()) return Err(ComposeError(ComposeStage::Prepare, Some(kind.unwrap_err())));
+            if (accepts_children(kind.unwrap())) edit.claim_children(*draft.node, tree_owner);
+        }
         Vec<ComposeRoot> before;
         for (const auto &child : draft.instance->children) committed_roots(*child.get(), before);
         if (!draft.owns_children && !same_roots(before, descendants)) {
@@ -538,7 +545,7 @@ auto ComposeBuild::reconcile(Element value, rstd::rc::Rc<ComposeInstance> previo
 class CompositionRuntime {
     struct RootTag {};
     UiId mount_;
-    Binding children_claim_;
+    UiTreeOwner children_claim_;
     vui::state::Graph graph_;
     rstd::rc::Rc<ComposeInstance> root_;
     rstd::rc::Rc<ViewFunction> content_;
@@ -689,7 +696,7 @@ class CompositionRuntime {
             return Err(ComposeError(ComposeStage::External, Some(UiError::InvalidId)));
         }
         if (!content_) return Ok(CommitReport{session.document().revision(), attempt_});
-        ComposeBuild build(session, graph_.view(), signal);
+        ComposeBuild build(session, graph_.view(), signal, children_claim_);
         auto data = rstd::rc::make_rc<ElementData>(); data.get()->kind = ElementKind::Component;
         data.get()->component_type = rstd::any::TypeId::of<RootTag>(); data.get()->view = content_; data.get()->source = content_source_;
         auto built = build.reconcile(Element(rstd::move(data)), root_, !root_ || root_->scope->dirty);
@@ -771,7 +778,7 @@ class CompositionRuntime {
     }
   public:
     rstd::rc::Rc<ComposeSignal> signal;
-    CompositionRuntime(UiDocument &document, UiId mount, Binding claim)
+    CompositionRuntime(UiDocument &document, UiId mount, UiTreeOwner claim)
         : mount_(mount), children_claim_(rstd::move(claim)), signal(rstd::rc::make_rc<ComposeSignal>()) {
         signal.get()->document = &document; signal.get()->lifetime = document.lifetime();
     }
@@ -823,10 +830,10 @@ class CompositionRuntime {
             for (auto id : nodes) if (session.document().valid(id)) session.input().cancel_subtree(id);
             cleanup(root_);
             invalidate_links(root_);
-            for (auto id : nodes) if (session.document().valid(id)) session.document().destroy(id);
+            for (auto id : nodes) if (session.document().valid(id)) session.document().destroy(id, children_claim_.access());
             root_ = {};
         }
-        graph_.close(); content_ = {}; children_claim_.disconnect();
+        graph_.close(); content_ = {}; children_claim_.release();
     }
     auto last_result() const -> Option<ComposeResult<CommitReport>> {
         if (signal->error.is_some()) return Some(ComposeResult<CommitReport>(Err(ComposeError(*signal->error))));

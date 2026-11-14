@@ -25,7 +25,6 @@ struct TileController {
     static constexpr Point origin{84, 232};
     Point position{origin}, grab;
     PresentationLease lease;
-    bool focused{};
     TileController(cx::Borrowed<UiSession> owner, cx::NodeRef reference) : session(owner), canvas(rstd::move(reference)) {}
     void move(UiDocument &ui, Point value) {
         position = value; auto id = node.id().unwrap();
@@ -36,14 +35,10 @@ struct TileController {
     }
     void handle(EventContext &context, const RoutedEvent &event) {
         auto &ui = context.document();
-        if (event.input.type == EventType::FocusGained || event.input.type == EventType::FocusLost) {
-            focused = event.input.type == EventType::FocusGained;
-            ui.set_background(event.current, focused || lease.active() ? theme::ink : theme::accent, 12).unwrap();
-        } else if (event.input.type == EventType::PointerDown && event.input.button == PointerButton::Primary) {
+        if (event.input.type == EventType::PointerDown && event.input.button == PointerButton::Primary) {
             grab = event.local; context.capture_pointer().unwrap(); context.focus().unwrap();
             PropertyKey key{event.current, PresentationProperty::Transform};
             lease = ui.take_over(slice<PropertyKey>::from_raw_parts(&key, usize(1))).unwrap();
-            ui.set_background(event.current, theme::ink, 12).unwrap();
         } else if (event.input.type == EventType::PointerMove && lease.active()) {
             auto snapshot = session->input().snapshot();
             if (snapshot.is_none()) return;
@@ -52,7 +47,6 @@ struct TileController {
             move(ui, {pointer.x - grab.x, pointer.y - grab.y});
         } else if (event.input.type == EventType::CaptureLost || event.input.type == EventType::PointerCancel) {
             if (lease.active()) ui.release_presentation(lease).unwrap();
-            ui.set_background(event.current, focused ? theme::ink : theme::accent, 12).unwrap();
         } else if (event.input.type == EventType::KeyDown) {
             auto next = position;
             switch (event.input.key) {
@@ -70,13 +64,35 @@ struct TileBehavior {
     rstd::rc::Rc<TileController> controller;
     void handle(EventContext &context, const RoutedEvent &event) { controller.get()->handle(context, event); }
 };
+struct TileFeedback {
+    bool focused{}, dragging{};
+    void handle(EventContext &context, const RoutedEvent &event) {
+        switch (event.input.type) {
+        case EventType::FocusGained: focused = true; break;
+        case EventType::FocusLost: focused = false; break;
+        case EventType::CaptureGained: dragging = true; break;
+        case EventType::CaptureLost:
+        case EventType::PointerCancel: dragging = false; break;
+        default: return;
+        }
+        context.document().set_background(event.current, focused || dragging ? theme::ink : theme::accent, 12).unwrap();
+    }
+};
+struct TileDragRole {};
+struct TileFeedbackRole {};
 struct TileElement {
     rstd::rc::Rc<TileController> controller;
     auto prepare(cx::PrepareContext &context, Option<UiId> previous, NodeStyle style) -> cx::ComposeResult<UiNodeRef> {
         auto node = previous.is_some() ? context.edit().existing(*previous) : context.edit().create(LayoutKind::Stack, style);
         context.style(node, style);
-        if (previous.is_none()) context.edit().state(node, TileBehavior{controller});
-        context.behavior<TileBehavior>(node);
+        auto feedback = NodeStateKey::of<TileFeedbackRole>();
+        auto drag = NodeStateKey::of<TileDragRole>();
+        if (previous.is_none()) {
+            context.edit().state(node, TileFeedback{}, feedback);
+            context.edit().state(node, TileBehavior{controller}, drag);
+        }
+        context.behavior<TileFeedback>(node, feedback);
+        context.behavior<TileBehavior>(node, drag);
         auto target = context.target();
         context.on_commit([controller = controller, target](cx::CommittedContext &) mutable -> cx::ComposeResult<empty> {
             controller.get()->node = target; return Ok(empty{});
