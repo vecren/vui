@@ -15,5 +15,5 @@ int main(int argc, char **argv) {
     game2048::View view(app.session, game2048::Game(static_cast<rstd::uint32_t>(seed)));
     return app.run(
         limit, [&](const vui::SurfaceInfo &surface) { view.resize(surface); },
-        [](const vui::AdvanceResult &) {}, [] {});
+        [&](const vui::AdvanceResult &) { return view.check(); }, [] {});
 }

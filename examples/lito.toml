@@ -15,5 +15,6 @@ rstd-std = { version = "0.1.5" }
 vui-examples = { path = "common" }
 vui-host = { path = "../host" }
 vui-controls = { path = "../controls" }
+vui-compose = { path = "../compose" }
 vectext = { path = "../../vectext" }
 rstd-nostd = { version = "0.1.5" }

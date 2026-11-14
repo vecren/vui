@@ -25,7 +25,8 @@ enum class UiError {
     TextLayoutFailed,
     LayoutFailed,
     PaintFailed,
-    PropertyOwned
+    PropertyOwned,
+    StaleBase
 };
 
 inline auto finite(Scalar value) -> bool { return __builtin_isfinite(value); }

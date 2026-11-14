@@ -165,8 +165,14 @@ template <class Frames> class SessionRunner {
                     if (event.present.is_some() && *event.present != gpu::PresentStatus::Queued)
                         dirty = true;
                     if (event.type == FrameEventType::Skipped && event.plan_error == Some(FrameError::InvalidSurface)) dirty = true;
-                    if (event.type == FrameEventType::GpuComplete)
+                    if (event.type == FrameEventType::GpuComplete) {
                         ++stats_.gpu_completed;
+                        auto view = event.completed_view();
+                        if (view && !closing) {
+                            auto accepted = session_.complete_frame(rstd::move(*view));
+                            if (accepted.is_err()) return fail({RunStage::Frame, {}, {}, {}, Some(accepted.unwrap_err())});
+                        }
+                    }
                     auto observed = callbacks.on_frame_event(event);
                     if (observed.is_err())
                         return fail({RunStage::Callback, {}, {}, Some(observed.unwrap_err())});

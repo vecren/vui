@@ -1,0 +1,15 @@
+[package]
+name = "vui-compose"
+version.workspace = true
+license.workspace = true
+
+[lib]
+name = "vui-compose"
+module = "vui.compose"
+archive = "vui-compose"
+sources = ["src/lib.cppm", "src/types.cppm", "src/element.cppm", "src/runtime.cppm", "src/controls.cppm"]
+
+[dependencies]
+vui = { workspace = true, pub = true }
+vui-controls = { workspace = true, pub = true }
+rstd-nostd = { workspace = true, usage = "link" }

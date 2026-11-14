@@ -5,6 +5,7 @@ export namespace vui {
 enum class ScrollWheelMode { Direct, SingleAxis };
 enum class ScrollMovement { Clamped, Elastic };
 struct ScrollMotionOptions {
+    friend auto operator==(const ScrollMotionOptions &, const ScrollMotionOptions &) -> bool = default;
     bool enabled{}, inertia{true};
     ScrollMovement movement{ScrollMovement::Clamped};
     Scalar threshold{8}, deceleration_rate{.135}, elasticity{.1}, rubber_scale{1};
@@ -15,6 +16,7 @@ struct ScrollMotionOptions {
     }
 };
 struct ScrollStyle {
+    friend auto operator==(const ScrollStyle &, const ScrollStyle &) -> bool = default;
     ScrollAxes axes;
     Scalar line_step{40};
     ScrollWheelMode wheel_mode{ScrollWheelMode::Direct};

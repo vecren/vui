@@ -23,6 +23,11 @@ class ScrollState {
 
   public:
     ScrollState(UiId viewport, ScrollStyle style) : viewport_(viewport), style_(style) {}
+    auto style() const -> ScrollStyle { return style_; }
+    void configure_prepared(ScrollStyle style) { style_ = style; }
+    void finish_configuration() {
+        stop(); if (interaction_.is_some()) interaction_->get()->configure();
+    }
     auto viewport() const -> UiId { return viewport_; }
     auto connect(UiSession &session,UiId root) -> Result<empty,ControlError> {
         auto value=ScrollInteraction::make(session,root,viewport_,style_,user_scrolled_);if (value.is_err()) return Err(value.unwrap_err());
@@ -115,6 +120,49 @@ class ScrollState {
 };
 class ScrollView {
   public:
+    struct Prepared {
+        UiNodeRef node;
+        bool created{}, changed{};
+    };
+    static auto prepare(UiDocument &ui, UiEditBatch &edit, Option<UiId> previous,
+                        NodeStyle style, ScrollStyle scroll, Option<NodeStyle> before = {}) -> Result<Prepared, UiError> {
+        if (!scroll.valid()) return Err(UiError::InvalidValue);
+        auto state = previous.is_some() ? ui.state<ScrollState>(*previous) : nullptr;
+        if (previous.is_some() && !state) return Err(UiError::InvalidId);
+        style.focusable = true;
+        auto node = previous.is_some() ? edit.existing(*previous) : edit.create(LayoutKind::Stack, style);
+        if (before.is_some()) { before->focusable = true; edit.style(node, style, *before); }
+        else edit.style(node, style);
+        bool changed = state && state->style() != scroll;
+        if (changed) {
+            struct Patch final : UiStatePatch {
+                ScrollStyle style;
+                explicit Patch(ScrollStyle value) : style(value) {}
+                auto type() const -> rstd::any::TypeId override { return rstd::any::TypeId::of<ScrollState>(); }
+                void publish(UiNodeState &target) override { static_cast<UiStoredState<ScrollState> &>(target).value.configure_prepared(style); }
+            };
+            auto patch = Box<Patch>::make(scroll);
+            edit.patch(node, Box<UiStatePatch>::from_raw(rstd::move(patch).into_raw().template cast<UiStatePatch>()));
+        }
+        return Ok(Prepared{node, previous.is_none(), changed});
+    }
+    static auto prepare_state(UiDocument::PreparedEdit &edit, Prepared prepared, ScrollStyle scroll) -> Result<empty, UiError> {
+        auto children = edit.children(prepared.node);
+        if (children.len() != usize(1)) return Err(UiError::MissingChild);
+        if (prepared.created) {
+            auto stored = edit.state(prepared.node, ScrollState(children[usize()], scroll));
+            if (stored.is_err()) return stored;
+        }
+        if (prepared.created || prepared.changed) return edit.viewport_axes(children[usize()], scroll.axes);
+        return Ok(empty{});
+    }
+    static auto connect(UiSession &session, UiId id) -> Result<empty, ControlError> {
+        auto state = session.document().state<ScrollState>(id);
+        return state ? state->connect(session, id) : Result<empty, ControlError>(Err(ControlError{Some(UiError::InvalidId), {}}));
+    }
+    static void finish_configuration(UiDocument &ui, UiId id) {
+        if (auto state = ui.state<ScrollState>(id)) state->finish_configuration();
+    }
     static auto on_metrics_changed(UiDocument &ui, UiId id, auto callback) -> Result<Binding, UiError> {
         auto state = ui.state<ScrollState>(id);
         return state ? ui.on_viewport_changed(state->viewport(), rstd::move(callback)) : Result<Binding, UiError>(Err(UiError::InvalidId));

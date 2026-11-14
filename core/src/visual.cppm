@@ -1,6 +1,7 @@
 export module vui:visual;
 import :document;
 import :endpoint;
+import :frame;
 using namespace rstd::prelude;
 
 export namespace vui {
@@ -10,6 +11,30 @@ struct BuildTimings {
     CpuTiming build;
     Option<TransactionHeader> transaction;
     Option<PublishError> error;
+};
+class UiFrame {
+    struct Data {
+        UiUpdate update;
+        Vec<RenderId> ids;
+        FramePlan plan;
+    };
+    rstd::sync::Arc<Data> data_;
+    UiFrame(UiUpdate update, Vec<RenderId> ids, FramePlan plan)
+        : data_(rstd::sync::Arc<Data>::make(Data{rstd::move(update), rstd::move(ids), rstd::move(plan)})) {}
+    friend class VisualBuilder;
+  public:
+    UiFrame(const UiFrame &other) : data_(other.data_.clone()) {}
+    auto operator=(const UiFrame &other) -> UiFrame & { data_ = other.data_.clone(); return *this; }
+    UiFrame(UiFrame &&) = default;
+    auto operator=(UiFrame &&) -> UiFrame & = default;
+    auto plan() const -> FramePlan { return FramePlan(data_->plan); }
+    auto identity() const -> FrameIdentity { return data_->plan.identity(); }
+    auto surface() const -> SurfaceInfo { return data_->plan.surface(); }
+    auto update() const -> const UiUpdate & { return data_->update; }
+    auto content(UiId node, Serial source_id) const -> Result<Option<FrameContent>, FrameError> {
+        if (!data_->update.get(node)) return Ok(None<FrameContent>());
+        return data_->plan.content(data_->ids[usize(node.slot)], source_id);
+    }
 };
 class VisualBuilder {
     struct Published {
@@ -50,6 +75,12 @@ class VisualBuilder {
         if (applied_.is_none() || !applied_->update.get(ui))
             return None();
         return Some(id(*applied_, ui));
+    }
+    auto frame(FramePlan plan) const -> Result<UiFrame, PublishError> {
+        auto identity = plan.identity();
+        if (!applied_ || identity.scene_session != session_ || identity.scene_revision != applied_->revision || identity.ui_revision != applied_->update.revision())
+            return Err(PublishError::StaleUpdate);
+        return Ok(UiFrame(UiUpdate(applied_->update), Vec<RenderId>::from(applied_->ids.as_slice()), rstd::move(plan)));
     }
     auto last_build_timings() const -> Option<BuildTimings> { return last_timings_; }
     auto build(UiUpdate update, DiagnosticsOptions options = {})

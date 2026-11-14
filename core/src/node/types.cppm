@@ -57,6 +57,7 @@ struct NodeStyle {
     Option<Rect> text_input_area;
     Color content_tint{1, 1, 1, 1};
     Color paint_color{1, 1, 1, 1};
+    friend auto operator==(const NodeStyle &, const NodeStyle &) -> bool = default;
     auto valid() const -> bool {
         return layout.valid() && background.valid() && content_tint.valid() && paint_color.valid() && finite(radius) && radius >= 0 &&
                RenderProperties{transform, {}, clip, opacity, visible}.valid() &&

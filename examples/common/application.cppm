@@ -83,7 +83,12 @@ class Application {
                 return Ok(empty{});
             },
             [&](const AdvanceResult &result) -> Result<empty, UiError> {
-                after_update(result);
+                if constexpr (rstd::mtp::same_as<decltype(after_update(result)), void>)
+                    after_update(result);
+                else {
+                    auto checked = after_update(result);
+                    if (checked.is_err()) return checked;
+                }
                 (void)session.document().poll_animation_events();
                 (void)session.motion().poll_events();
                 return Ok(empty{});

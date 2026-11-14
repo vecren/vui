@@ -13,5 +13,5 @@ int main(int argc, char **argv) {
     app.session.document().mount(panel.get()->root()).unwrap();
     return app.run(
         limit, [&](const vui::SurfaceInfo &surface) { panel.get()->resize(surface); },
-        [](const vui::AdvanceResult &) {}, [] {});
+        [&](const vui::AdvanceResult &) { return panel.get()->check(); }, [] {});
 }

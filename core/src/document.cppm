@@ -10,6 +10,7 @@ import :layout.protocol;
 import :paint.protocol;
 import :motion.properties;
 import :state.targets;
+import :document.edit;
 using namespace rstd::prelude;
 using namespace rstd::literals;
 
@@ -323,15 +324,8 @@ class UiDocument {
         ViewportMetrics metrics;
         Option<rstd::rc::Rc<ViewportObserver>> observer;
     };
-    struct State {
-        virtual ~State() = default;
-        virtual auto type() const -> rstd::any::TypeId = 0;
-    };
-    template <class T> struct StoredState : State {
-        T value;
-        explicit StoredState(T value) : value(rstd::move(value)) {}
-        auto type() const -> rstd::any::TypeId override { return rstd::any::TypeId::of<T>(); }
-    };
+    using State = UiNodeState;
+    template <class T> using StoredState = UiStoredState<T>;
     struct Mutation {
         Serial id;
         explicit Mutation(Serial value) : id(value) {}
@@ -374,6 +368,96 @@ class UiDocument {
         Option<TextError> error;
         TextBoundaries boundaries;
     };
+    static auto format_changed(const TextContent &text, TextFormat format) -> bool {
+        return text.family.as_str() != format.family || text.language.as_str() != format.language ||
+            text.size != format.size || text.direction != format.direction ||
+            text.wrap != format.wrap || text.bold != format.bold || text.italic != format.italic ||
+            text.alignment != format.alignment || text.line_spacing != format.line_spacing || text.character_spacing != format.character_spacing || text.spacing != format.spacing ||
+            text.max_lines != format.max_lines || text.overflow != format.overflow || text.auto_size!=format.auto_size || text.source!=format.source || text.line_breaks!=format.line_breaks || text.whitespace!=format.whitespace;
+    }
+    static void assign_format(TextContent &text, TextFormat format) {
+            text.family = String::make(format.family);
+            text.language = String::make(format.language);
+            text.size = format.size;
+            text.direction = format.direction;
+            text.wrap = format.wrap;
+            text.bold = format.bold;
+            text.italic = format.italic;
+            text.alignment = format.alignment;
+            text.line_spacing = format.line_spacing;
+            text.character_spacing = format.character_spacing;
+            text.spacing = format.spacing;
+            text.max_lines = format.max_lines;
+            text.overflow = format.overflow;
+            text.auto_size = format.auto_size;
+            text.source = format.source;
+            text.line_breaks=format.line_breaks;text.whitespace=format.whitespace;
+    }
+    static auto merge_style(NodeStyle current, const NodeStyle &before, const NodeStyle &value) -> NodeStyle {
+        if (before.layout.width != value.layout.width) current.layout.width = value.layout.width;
+        if (before.layout.height != value.layout.height) current.layout.height = value.layout.height;
+        if (before.layout.gap != value.layout.gap) current.layout.gap = value.layout.gap;
+        if (before.layout.padding != value.layout.padding) current.layout.padding = value.layout.padding;
+        if (before.layout.min_width != value.layout.min_width) current.layout.min_width = value.layout.min_width;
+        if (before.layout.min_height != value.layout.min_height) current.layout.min_height = value.layout.min_height;
+        if (before.layout.max_width != value.layout.max_width) current.layout.max_width = value.layout.max_width;
+        if (before.layout.max_height != value.layout.max_height) current.layout.max_height = value.layout.max_height;
+        if (before.layout.horizontal != value.layout.horizontal) current.layout.horizontal = value.layout.horizontal;
+        if (before.layout.vertical != value.layout.vertical) current.layout.vertical = value.layout.vertical;
+        if (before.background != value.background) current.background = value.background;
+        if (before.radius != value.radius) current.radius = value.radius;
+        if (before.transform != value.transform) current.transform = value.transform;
+        if (before.clip != value.clip) current.clip = value.clip;
+        if (before.opacity != value.opacity) current.opacity = value.opacity;
+        if (before.visible != value.visible) current.visible = value.visible;
+        if (before.hit_test_visible != value.hit_test_visible) current.hit_test_visible = value.hit_test_visible;
+        if (before.enabled != value.enabled) current.enabled = value.enabled;
+        if (before.focusable != value.focusable) current.focusable = value.focusable;
+        if (before.hit_self != value.hit_self) current.hit_self = value.hit_self;
+        if (before.text_input_area != value.text_input_area) current.text_input_area = value.text_input_area;
+        if (before.content_tint != value.content_tint) current.content_tint = value.content_tint;
+        if (before.paint_color != value.paint_color) current.paint_color = value.paint_color;
+        return current;
+    }
+    static auto text_format(const TextContent &text) -> TextFormat {
+        TextFormat result; result.family = text.family.as_str(); result.language = text.language.as_str();
+        result.size = text.size;
+        result.direction = text.direction;
+        result.wrap = text.wrap;
+        result.bold = text.bold;
+        result.italic = text.italic;
+        result.alignment = text.alignment;
+        result.line_spacing = text.line_spacing;
+        result.character_spacing = text.character_spacing;
+        result.spacing = text.spacing;
+        result.max_lines = text.max_lines;
+        result.overflow = text.overflow;
+        result.auto_size = text.auto_size;
+        result.source = text.source;
+        result.line_breaks = text.line_breaks;
+        result.whitespace = text.whitespace;
+        return result;
+    }
+    static auto merge_format(TextFormat current, TextFormat before, TextFormat value) -> TextFormat {
+        if (before.family != value.family) current.family = value.family;
+        if (before.language != value.language) current.language = value.language;
+        if (before.size != value.size) current.size = value.size;
+        if (before.direction != value.direction) current.direction = value.direction;
+        if (before.wrap != value.wrap) current.wrap = value.wrap;
+        if (before.bold != value.bold) current.bold = value.bold;
+        if (before.italic != value.italic) current.italic = value.italic;
+        if (before.alignment != value.alignment) current.alignment = value.alignment;
+        if (before.line_spacing != value.line_spacing) current.line_spacing = value.line_spacing;
+        if (before.character_spacing != value.character_spacing) current.character_spacing = value.character_spacing;
+        if (before.spacing != value.spacing) current.spacing = value.spacing;
+        if (before.max_lines != value.max_lines) current.max_lines = value.max_lines;
+        if (before.overflow != value.overflow) current.overflow = value.overflow;
+        if (before.auto_size != value.auto_size) current.auto_size = value.auto_size;
+        if (before.source != value.source) current.source = value.source;
+        if (before.line_breaks != value.line_breaks) current.line_breaks = value.line_breaks;
+        if (before.whitespace != value.whitespace) current.whitespace = value.whitespace;
+        return current;
+    }
     struct ImageContent {
         Option<ImageData> data;
         ImageFit fit{ImageFit::Contain};
@@ -436,6 +520,7 @@ class UiDocument {
         DisplayList content;
         Serial mount_generation{1}, relation_generation{1};
         Option<Box<State>> state;
+        Option<BindingGuard> children_owner;
         Option<Box<ViewportLayout>> viewport;
         Option<Box<TextContent>> text;
         Option<Box<ImageContent>> image;
@@ -485,7 +570,7 @@ class UiDocument {
     UpdateTimings *active_timings_{};
     Option<UpdateTimings> last_timings_;
     Index depth_limit_{256};
-    bool routing_{}, draining_{};
+    bool routing_{}, draining_{}, evaluating_{}, editing_{};
     Serial rejected_cleanups_{};
     Serial next_mutation_{1};
     Vec<Box<Mutation>> mutations_;
@@ -937,7 +1022,7 @@ class UiDocument {
     }
     auto start_animation(UiId id, AnimationProperty property, AnimationValue to,
                          AnimationOptions options) -> Result<AnimationId, AnimationError> {
-        if ((layout_active_ || painting_))
+        if ((layout_active_ || painting_ || evaluating_ || editing_))
             return Err(AnimationError::Reentrant);
         if (animations_closed_)
             return Err(AnimationError::Closed);
@@ -1665,6 +1750,328 @@ class UiDocument {
     }
 
   public:
+    class ReadScope {
+        UiDocument *document_;
+        friend class UiDocument;
+        explicit ReadScope(UiDocument &value) : document_(&value) {}
+      public:
+        ReadScope(const ReadScope &) = delete;
+        ReadScope(ReadScope &&other) : document_(rstd::exchange(other.document_, nullptr)) {}
+        ~ReadScope() { if (document_) document_->evaluating_ = false; }
+    };
+    auto acquire_read() -> Result<ReadScope, UiError> {
+        if (!can_route()) return Err(UiError::Routing);
+        evaluating_ = true; return Ok(ReadScope(*this));
+    }
+    class PreparedEdit {
+        struct Entry {
+            UiId id;
+            LayoutKind kind{LayoutKind::Item};
+            Option<Node> fresh;
+            Option<NodeStyle> style;
+            Option<Box<TextContent>> text;
+            Option<Box<ImageContent>> image;
+            Vec<UiId> children;
+            Option<UiId> parent;
+            bool relation_changed{}, children_changed{}, created{}, updated{};
+            Option<Box<State>> state;
+            Option<Box<UiStatePatch>> patch;
+            Option<rstd::any::TypeId> state_type;
+            Option<ScrollAxes> axes;
+        };
+        struct Retirement final : UiEditRetirement { Vec<Entry> entries; };
+        Serial session_{}, base_{}, batch_{};
+        BindingGuard lifetime_;
+        Vec<Entry> entries_;
+        Vec<UiId> retired_;
+        usize slots_{};
+        Option<Box<Retirement>> retirement_;
+        friend class UiDocument;
+        PreparedEdit() = default;
+
+      public:
+        PreparedEdit(const PreparedEdit &) = delete;
+        PreparedEdit(PreparedEdit &&) = default;
+        auto operator=(PreparedEdit &&) -> PreparedEdit & = default;
+        auto id(UiNodeRef ref) const -> UiId { return ref.batch == batch_ && ref.index < entries_.len() ? entries_[ref.index].id : UiId{}; }
+        auto retired() const -> slice<UiId> { return retired_.as_slice(); }
+        auto state_type(UiNodeRef ref) const -> Option<rstd::any::TypeId> { return ref.batch == batch_ && ref.index < entries_.len() ? entries_[ref.index].state_type : None<rstd::any::TypeId>(); }
+        auto children(UiNodeRef ref) const -> slice<UiId> { return ref.batch == batch_ && ref.index < entries_.len() ? entries_[ref.index].children.as_slice() : slice<UiId>{}; }
+        auto viewport_axes(UiId id, ScrollAxes value) -> Result<empty, UiError> {
+            for (auto &entry : entries_) if (entry.id == id) {
+                if (entry.kind != LayoutKind::Viewport) return Err(UiError::InvalidValue);
+                entry.axes = Some(value); return Ok(empty{});
+            }
+            return Err(UiError::InvalidId);
+        }
+        template <class T> auto state(UiNodeRef ref, T value) -> Result<empty, UiError> {
+            if (ref.batch != batch_ || ref.index >= entries_.len()) return Err(UiError::InvalidId);
+            auto &entry = entries_[ref.index];
+            if (entry.state_type.is_some()) return Err(UiError::InvalidValue);
+            auto stored = Box<UiStoredState<T>>::make(rstd::move(value));
+            entry.state = Some(Box<UiNodeState>::from_raw(rstd::move(stored).into_raw().template cast<UiNodeState>()));
+            entry.state_type = Some(rstd::any::TypeId::of<T>()); return Ok(empty{});
+        }
+    };
+    auto prepare(UiEditBatch edit) -> Result<PreparedEdit, UiEditError> {
+        Option<UiNodeRef> active_ref;
+        auto operation = UiEditOperation::Handle;
+        auto fail = [&](UiError error) -> Result<PreparedEdit, UiEditError> {
+            return Err(UiEditError{error, active_ref, operation});
+        };
+        if (!can_route()) return fail(UiError::Routing);
+        if (edit.error_.is_some()) return fail(*edit.error_);
+        PreparedEdit result;
+        result.batch_ = edit.owner_;
+        result.session_ = session_; result.base_ = revision_; result.lifetime_ = lifetime();
+        for (auto id : edit.removed_) {
+            if (!valid(id)) return fail(UiError::InvalidId);
+            if (root_ == Some(id)) return fail(UiError::Root);
+            for (auto previous : result.retired_) {
+                if (is_descendant(previous, id).unwrap() || is_descendant(id, previous).unwrap())
+                    return fail(UiError::InvalidValue);
+            }
+            result.retired_.push(UiId(id));
+            if (resolve(id)->parent.is_some()) edit.existing(*resolve(id)->parent);
+        }
+        for (usize i{}; i < edit.entries_.len(); ++i) {
+            auto existing = edit.entries_[i].existing;
+            if (existing.is_none()) continue;
+            if (!valid(*existing)) return fail(UiError::InvalidId);
+            for (auto removed : result.retired_)
+                if (is_descendant(removed, *existing).unwrap()) return fail(UiError::InvalidValue);
+            auto node = resolve(*existing);
+            if (edit.entries_[i].children.is_some())
+                for (auto child : node->children) {
+                    bool retired{};
+                    for (auto removed : result.retired_)
+                        retired |= is_descendant(removed, child).unwrap();
+                    if (!retired) edit.existing(child);
+                }
+            if (node->parent.is_some()) edit.existing(*node->parent);
+        }
+        usize next_slot{};
+        usize entry_index{};
+        for (auto &entry : edit.entries_) {
+            active_ref = Some(UiNodeRef{edit.owner_, entry_index++}); operation = UiEditOperation::Handle;
+            typename PreparedEdit::Entry prepared;
+            if (entry.existing.is_some()) {
+                prepared.id = *entry.existing;
+                auto node = resolve(prepared.id);
+                entry.kind = node->kind;
+                prepared.parent = node->parent;
+                for (auto child : node->children) prepared.children.push(UiId(child));
+            } else {
+                while (next_slot < slots_.len() &&
+                       (slots_[next_slot].node.is_some() || slots_[next_slot].generation == ~Serial{}))
+                    ++next_slot;
+                if (next_slot >= usize(1'000'000)) return fail(UiError::Limit);
+                prepared.id = {session_, Index(next_slot.to_primitive()),
+                               next_slot < slots_.len() ? slots_[next_slot].generation : 1};
+                ++next_slot;
+                if (unsigned(entry.kind) > unsigned(LayoutKind::Item)) return fail(UiError::InvalidValue);
+                prepared.fresh = Some(Node(entry.kind, entry.style.unwrap_or(NodeStyle{})));
+                if (entry.kind == LayoutKind::Viewport) prepared.fresh->viewport = Some(Box<ViewportLayout>::make());
+                if (entry.kind == LayoutKind::Text) prepared.fresh->text = Some(Box<TextContent>::make());
+                if (entry.kind == LayoutKind::Image) prepared.fresh->image = Some(Box<ImageContent>::make());
+                if (entry.kind == LayoutKind::Scene) prepared.fresh->scene = Some(Box<SceneContent>::make());
+            }
+            auto node = entry.existing.is_some() ? resolve(prepared.id) : &*prepared.fresh;
+            if (entry.style.is_some()) {
+                operation = UiEditOperation::Style;
+                auto style = entry.before_style.is_some() ? merge_style(node->style, *entry.before_style, *entry.style) : *entry.style;
+                if (!style.valid() || (entry.kind == LayoutKind::Viewport && style.clip.enabled))
+                    return fail(UiError::InvalidValue);
+                auto &old = node->style;
+                if ((style.layout.width != old.layout.width && property_occupied(*node, PresentationProperty::Width)) ||
+                    (style.layout.height != old.layout.height && property_occupied(*node, PresentationProperty::Height)) ||
+                    (style.transform != old.transform && property_occupied(*node, PresentationProperty::Transform)) ||
+                    (style.opacity != old.opacity && property_occupied(*node, PresentationProperty::Opacity)) ||
+                    (style.background != old.background && property_occupied(*node, PresentationProperty::Background)))
+                    return fail(UiError::PropertyOwned);
+                if (entry.existing.is_none() || old != style) prepared.style = Some(style);
+            }
+            if (entry.state.is_some()) {
+                operation = UiEditOperation::State;
+                if (node->state.is_some()) return fail(UiError::InvalidValue);
+                prepared.state = rstd::move(entry.state);
+            }
+            if (entry.patch.is_some()) {
+                operation = UiEditOperation::State;
+                auto state = prepared.state.is_some() ? &**prepared.state
+                    : node->state.is_some() ? &**node->state : nullptr;
+                if (!state || state->type() != (**entry.patch).type()) return fail(UiError::InvalidValue);
+                prepared.patch = rstd::move(entry.patch);
+            }
+            if (prepared.state.is_some()) prepared.state_type = Some((**prepared.state).type());
+            else if (node->state.is_some()) prepared.state_type = Some((**node->state).type());
+            if (entry.text.is_some()) {
+                operation = UiEditOperation::Text;
+                auto &value = *entry.text; auto format = value.format();
+                if (node->text.is_none() || !format.valid() || !format.line_breaks.matches(value.text()) || !value.color.valid())
+                    return fail(UiError::InvalidValue);
+                auto &old = **node->text;
+                auto content = value.text(); auto color = value.color;
+                if (entry.before_text.is_some()) {
+                    auto &before = *entry.before_text;
+                    format = merge_format(text_format(old), before.format(), format);
+                    if (before.text() == value.text()) content = old.value.as_str();
+                    if (before.color == value.color) color = old.color;
+                }
+                auto changed_value = old.value.as_str() != content;
+                if ((changed_value && value_occupied(*node, UiValueProperty::Text)) ||
+                    (old.character_spacing != format.character_spacing && property_occupied(*node, PresentationProperty::CharacterSpacing)) ||
+                    (old.color != color && property_occupied(*node, PresentationProperty::TextColor)))
+                    return fail(UiError::PropertyOwned);
+                if (entry.existing.is_none() || changed_value || format_changed(old, format) || old.color != color) {
+                    auto text = Box<TextContent>::make();
+                    text->value = String::make(content); assign_format(*text, format); text->color = color;
+                    text->effects = old.effects;
+                    if (!changed_value) {
+                        text->colors = TextColors(old.colors); text->decorations = TextDecorations(old.decorations);
+                        text->inline_images = TextInlineImages(old.inline_images); text->font_spans = TextFontSpans(old.font_spans);
+                        text->boundaries = TextBoundaries(old.boundaries);
+                    }
+                    prepared.text = Some(rstd::move(text));
+                }
+            }
+
+            if (entry.image.is_some()) {
+                operation = UiEditOperation::Image;
+                auto &value = *entry.image;
+                if (node->image.is_none() || !value.tint.valid() || !value.radial.valid() ||
+                    unsigned(value.fit) > unsigned(ImageFit::Cover) || unsigned(value.sampling) > unsigned(ImageSampling::Linear))
+                    return fail(UiError::InvalidValue);
+                auto &old = **node->image;
+                if (entry.before_image.is_some()) {
+                    auto &before = *entry.before_image;
+                    bool same_data = before.data.is_some() == value.data.is_some() &&
+                        (before.data.is_none() || before.data->id() == value.data->id());
+                    if (same_data) value.data = old.data.is_some() ? Some(ImageData(*old.data)) : None<ImageData>();
+                    if (before.fit == value.fit) value.fit = old.fit;
+                    if (before.sampling == value.sampling) value.sampling = old.sampling;
+                    if (before.tint == value.tint) value.tint = old.tint;
+                    if (before.radial == value.radial) value.radial = old.radial;
+                }
+                bool same_image = old.data.is_some() == value.data.is_some() &&
+                    (old.data.is_none() || old.data->id() == value.data->id());
+                if (!same_image && value_occupied(*node, UiValueProperty::Image)) return fail(UiError::PropertyOwned);
+                if (entry.existing.is_none() || !same_image || old.fit != value.fit || old.sampling != value.sampling ||
+                    old.tint != value.tint || old.radial != value.radial) {
+                    auto image = Box<ImageContent>::make();
+                    image->data = value.data.is_some() ? Some(ImageData(*value.data)) : None<ImageData>(); image->fit = value.fit; image->sampling = value.sampling;
+                    image->tint = value.tint; image->radial = value.radial; prepared.image = Some(rstd::move(image));
+                }
+            }
+            prepared.kind = entry.kind; prepared.created = entry.existing.is_none();
+            result.entries_.push(rstd::move(prepared));
+        }
+        auto lookup = [&](UiId id) -> typename PreparedEdit::Entry * {
+            for (auto &entry : result.entries_) if (entry.id == id) return &entry;
+            return nullptr;
+        };
+        for (usize i{}; i < edit.entries_.len(); ++i) {
+            active_ref = Some(UiNodeRef{edit.owner_, i}); operation = UiEditOperation::Children;
+            auto &source = edit.entries_[i]; auto &entry = result.entries_[i];
+            if (source.children.is_none()) continue;
+            if ((source.kind == LayoutKind::Leaf || source.kind == LayoutKind::Text || source.kind == LayoutKind::Image || source.kind == LayoutKind::Scene) && !source.children->is_empty())
+                return fail(UiError::MissingChild);
+            if (source.kind == LayoutKind::Viewport && source.children->len() > usize(1)) return fail(UiError::InvalidValue);
+            for (auto child : entry.children) if (auto previous = lookup(child)) previous->parent = None();
+            entry.children.clear();
+        }
+        for (usize i{}; i < edit.entries_.len(); ++i) {
+            active_ref = Some(UiNodeRef{edit.owner_, i}); operation = UiEditOperation::Children;
+            auto &source = edit.entries_[i]; auto &entry = result.entries_[i];
+            if (source.children.is_none()) continue;
+            for (auto ref : *source.children) {
+                if (ref.batch != edit.owner_ || ref.index >= result.entries_.len()) return fail(UiError::InvalidId);
+                auto &child = result.entries_[ref.index];
+                if (root_ == Some(child.id)) return fail(UiError::Root);
+                for (auto id : entry.children) if (id == child.id) return fail(UiError::InvalidValue);
+                if (child.parent.is_some() && *child.parent != entry.id) {
+                    auto parent = lookup(*child.parent);
+                    if (!parent) return fail(UiError::InvalidValue);
+                    auto parent_index = usize(parent - result.entries_.as_mut_ptr().as_raw_ptr());
+                    if (edit.entries_[parent_index].children.is_some()) return fail(UiError::InvalidValue);
+                }
+                child.parent = Some(entry.id); entry.children.push(UiId(child.id));
+            }
+        }
+        for (auto removed : result.retired_) {
+            auto parent = resolve(removed)->parent;
+            if (parent.is_some()) lookup(*parent)->children.retain([&](UiId id) { return id != removed; });
+        }
+        entry_index = usize();
+        for (auto &entry : result.entries_) {
+            active_ref = Some(UiNodeRef{edit.owner_, entry_index++}); operation = UiEditOperation::Relation;
+            entry.children.retain([&](UiId id) {
+                auto child = lookup(id); return !child || child->parent == Some(entry.id);
+            });
+            auto cursor = entry.parent; Index depth{};
+            while (cursor.is_some()) {
+                if (*cursor == entry.id) return fail(UiError::Cycle);
+                if (++depth >= depth_limit_) return fail(UiError::Limit);
+                auto ancestor = lookup(*cursor);
+                cursor = ancestor ? ancestor->parent : resolve(*cursor)->parent;
+            }
+            if (auto old = resolve(entry.id)) {
+                entry.relation_changed = old->parent != entry.parent;
+                entry.children_changed = old->children.len() != entry.children.len();
+                if (!entry.children_changed)
+                    for (usize i{}; i < entry.children.len(); ++i)
+                        entry.children_changed |= old->children[i] != entry.children[i];
+            } else {
+                entry.relation_changed = entry.parent.is_some();
+                entry.children_changed = !entry.children.is_empty();
+            }
+        }
+        result.slots_ = next_slot > slots_.len() ? next_slot : slots_.len();
+        slots_.reserve(result.slots_ - slots_.len());
+        input_changes_.reserve(result.entries_.len() + result.retired_.len());
+        animation_completions_.reserve(animations_.len());
+        result.retirement_ = Some(Box<typename PreparedEdit::Retirement>::make());
+        return Ok(rstd::move(result));
+    }
+    auto publish(PreparedEdit edit) -> Result<UiCommitReport, UiError> {
+        if (!can_route()) return Err(UiError::Routing);
+        if (!edit.lifetime_.alive() || edit.session_ != session_ || edit.base_ != revision_)
+            return Err(UiError::StaleBase);
+        editing_ = true;
+        struct Guard { bool &value; ~Guard() { value = false; } } guard{editing_};
+        UiCommitReport report;
+        while (slots_.len() < edit.slots_) slots_.push(Slot{});
+        for (auto &entry : edit.entries_)
+            if (entry.fresh.is_some()) {
+                slots_[usize(entry.id.slot)].node = rstd::move(entry.fresh); ++report.created;
+            }
+        for (auto &entry : edit.entries_) {
+            auto node = resolve(entry.id);
+            entry.updated = entry.style.is_some() || entry.text.is_some() || entry.image.is_some() || entry.state.is_some() || entry.patch.is_some() || entry.axes.is_some() || entry.children_changed || entry.relation_changed;
+            if (entry.style.is_some()) { node->style = *entry.style; node->paint_dirty = true; }
+            if (entry.text.is_some()) { auto previous = rstd::move(node->text); node->text = rstd::move(entry.text); entry.text = rstd::move(previous); node->paint_dirty = true; }
+            if (entry.image.is_some()) { auto previous = rstd::move(node->image); node->image = rstd::move(entry.image); entry.image = rstd::move(previous); node->paint_dirty = true; }
+            if (entry.state.is_some()) node->state = rstd::move(entry.state);
+            if (entry.patch.is_some()) (**entry.patch).publish(**node->state);
+            if (entry.axes.is_some()) (*node->viewport)->axes = *entry.axes;
+            if (entry.relation_changed) { ++node->relation_generation; node->parent = entry.parent; }
+            if (entry.children_changed) node->children = rstd::move(entry.children);
+        }
+        for (auto id : edit.retired_) {
+            auto node = resolve(id); node->parent = None(); ++node->relation_generation;
+        }
+        for (auto &entry : edit.entries_) {
+            if (entry.relation_changed && !entry.created) remount(entry.id);
+            if (entry.updated) { changed(true, Some(entry.id)); if (!entry.created) ++report.updated; }
+        }
+        for (auto id : edit.retired_) changed(true, Some(id));
+        report.retired = rstd::move(edit.retired_); report.revision = revision_;
+        (*edit.retirement_)->entries = rstd::move(edit.entries_);
+        report.retirement = Some(Box<UiEditRetirement>::from_raw(
+            rstd::move(*edit.retirement_).into_raw().template cast<UiEditRetirement>()));
+        return Ok(rstd::move(report));
+    }
+    void notify_edit_targets() { if (!editing_ && !evaluating_) notify_targets(); }
     class RouteScope {
         UiDocument *document_;
         friend class UiDocument;
@@ -1685,12 +2092,21 @@ class UiDocument {
     auto operator=(const UiDocument &) -> UiDocument & = delete;
     auto session() const -> Serial { return session_; }
     auto bindings() -> BindingRegistry & { return bindings_; }
+    auto claim_children(UiId id) -> Result<Binding, UiError> {
+        if (!can_route()) return Err(UiError::Routing);
+        auto node = resolve(id);
+        if (!node) return Err(UiError::InvalidId);
+        if (node->kind == LayoutKind::Leaf || node->kind == LayoutKind::Text || node->kind == LayoutKind::Image || node->kind == LayoutKind::Scene ||
+            !node->children.is_empty() || (node->children_owner.is_some() && node->children_owner->alive()))
+            return Err(UiError::PropertyOwned);
+        auto binding = bindings_.make(); node->children_owner = Some(binding.guard()); return Ok(rstd::move(binding));
+    }
     auto lifetime() const -> BindingGuard { return lease_owner_.guard(); }
     auto paint_diagnostics() const -> slice<PaintDiagnostic> {
         return paint_diagnostics_.as_slice();
     }
     auto invalidate_paint(UiId id) -> Result<empty, UiError> {
-        if (layout_active_ || painting_)
+        if (layout_active_ || painting_ || evaluating_ || editing_)
             return Err(UiError::Routing);
         auto node = resolve(id);
         if (!node)
@@ -1700,9 +2116,9 @@ class UiDocument {
         return Ok(empty{});
     }
     auto revision() const -> Serial { return revision_; }
-    auto routing() const -> bool { return routing_; }
+    auto routing() const -> bool { return routing_ || evaluating_ || editing_; }
     auto can_route() const -> bool {
-        return !routing_ && !draining_ && !animation_dispatching_ && !layout_active_ && !painting_;
+        return !routing_ && !draining_ && !animation_dispatching_ && !layout_active_ && !painting_ && !evaluating_ && !editing_;
     }
     auto acquire_route() -> Result<RouteScope, UiError> {
         if (!can_route())
@@ -1712,7 +2128,7 @@ class UiDocument {
     }
     auto pending_mutations() const -> usize { return mutations_.len(); }
     auto cancel_mutations() -> Result<Vec<MutationResult>, UiError> {
-        if (routing_ || draining_ || animation_dispatching_ || (layout_active_ || painting_))
+        if (routing_ || draining_ || animation_dispatching_ || (layout_active_ || painting_ || evaluating_ || editing_))
             return Err(UiError::Routing);
         auto pending = rstd::exchange(mutations_, Vec<Box<Mutation>>{});
         Vec<MutationResult> results;
@@ -1721,7 +2137,7 @@ class UiDocument {
         return Ok(rstd::move(results));
     }
     template <class F> auto defer(F callback) -> Result<Serial, UiError> {
-        if (layout_active_ || painting_)
+        if (layout_active_ || painting_ || evaluating_ || editing_)
             return Err(UiError::Routing);
         if (mutations_.len() >= usize(1024))
             return Err(UiError::Limit);
@@ -1775,7 +2191,7 @@ class UiDocument {
         });
     }
     auto flush_mutations() -> Result<Vec<MutationResult>, UiError> {
-        if (routing_ || draining_ || animation_dispatching_ || (layout_active_ || painting_))
+        if (routing_ || draining_ || animation_dispatching_ || (layout_active_ || painting_ || evaluating_ || editing_))
             return Err(UiError::Routing);
         draining_ = true;
         auto pending = rstd::exchange(mutations_, Vec<Box<Mutation>>{});
@@ -1795,7 +2211,7 @@ class UiDocument {
         return slot.generation == id.generation && slot.node.is_some();
     }
     template <class T> auto attach_state(UiId id, T value) -> Result<empty, UiError> {
-        if (routing_ || (layout_active_ || painting_))
+        if (routing_ || (layout_active_ || painting_ || evaluating_ || editing_))
             return Err(UiError::Routing);
         auto node = resolve(id);
         if (!node)
@@ -1805,6 +2221,7 @@ class UiDocument {
         auto state = Box<StoredState<T>>::make(rstd::move(value));
         node->state =
             Some(Box<State>::from_raw(rstd::move(state).into_raw().template cast<State>()));
+        changed(false, Some(id));
         return Ok(empty{});
     }
     template <class T> auto state(UiId id) -> T * {
@@ -1814,7 +2231,7 @@ class UiDocument {
         return &static_cast<StoredState<T> &>(**node->state).value;
     }
     template <class T> auto create(NodeStyle style = {}) -> Result<UiId, UiError> {
-        if (routing_ || (layout_active_ || painting_))
+        if (routing_ || (layout_active_ || painting_ || evaluating_ || editing_))
             return Err(UiError::Routing);
         if (!style.valid() || (T::layout == LayoutKind::Viewport && style.clip.enabled))
             return Err(UiError::InvalidValue);
@@ -1865,7 +2282,7 @@ class UiDocument {
         return Ok(UiRelation{parent, child, c->relation_generation});
     }
     auto attach(UiId parent, UiId child) -> Result<empty, UiError> {
-        if (routing_ || (layout_active_ || painting_))
+        if (routing_ || (layout_active_ || painting_ || evaluating_ || editing_))
             return Err(UiError::Routing);
         auto p = resolve(parent), c = resolve(child);
         if (!p || !c)
@@ -1929,7 +2346,7 @@ class UiDocument {
         return Ok(id);
     }
     auto mount(UiId root) -> Result<empty, UiError> {
-        if (routing_ || (layout_active_ || painting_))
+        if (routing_ || (layout_active_ || painting_ || evaluating_ || editing_))
             return Err(UiError::Routing);
         auto node = resolve(root);
         if (!node)
@@ -1948,7 +2365,7 @@ class UiDocument {
         return Ok(empty{});
     }
     auto detach(UiId id) -> Result<empty, UiError> {
-        if (routing_ || (layout_active_ || painting_))
+        if (routing_ || (layout_active_ || painting_ || evaluating_ || editing_))
             return Err(UiError::Routing);
         auto node = resolve(id);
         if (!node)
@@ -1975,7 +2392,7 @@ class UiDocument {
         return Ok(empty{});
     }
     auto reorder(UiId parent, UiId child, usize destination) -> Result<empty, UiError> {
-        if (routing_ || (layout_active_ || painting_))
+        if (routing_ || (layout_active_ || painting_ || evaluating_ || editing_))
             return Err(UiError::Routing);
         auto node = resolve(parent);
         if (!node)
@@ -2018,7 +2435,7 @@ class UiDocument {
     template <class T>
     auto claim_value_writer(const UiPropertyTarget<T> &target)
         -> Result<UiValueWriter<T>, UiError> {
-        if (layout_active_ || painting_)
+        if (layout_active_ || painting_ || evaluating_ || editing_)
             return Err(UiError::Routing);
         if (target.document() != session_ || !target.status().valid)
             return Err(UiError::InvalidId);
@@ -2047,7 +2464,7 @@ class UiDocument {
         return Ok(rstd::move(lifetime));
     }
     auto apply_values(UiValueBatch batch) -> Result<usize, UiValueBatchError> {
-        if (layout_active_ || painting_)
+        if (layout_active_ || painting_ || evaluating_ || editing_)
             return Err(UiValueBatchError{usize(), UiError::Routing});
         if (batch.size() > usize(4096))
             return Err(UiValueBatchError{usize(), UiError::Limit});
@@ -2085,7 +2502,7 @@ class UiDocument {
     }
     auto take_over(slice<PropertyKey> keys, TakeoverPolicy policy = TakeoverPolicy::PreserveCurrent)
         -> Result<PresentationLease, UiError> {
-        if (layout_active_ || painting_)
+        if (layout_active_ || painting_ || evaluating_ || editing_)
             return Err(UiError::Routing);
         if (keys.is_empty() || keys.len() > usize(256) || !lease_owner_.alive())
             return Err(UiError::InvalidValue);
@@ -2149,7 +2566,7 @@ class UiDocument {
     }
     auto write_presentation(PresentationLease &lease, const PresentationBatch &batch,
                             Option<BindingGuard> driver = {}) -> Result<empty, UiError> {
-        if (layout_active_ || painting_)
+        if (layout_active_ || painting_ || evaluating_ || editing_)
             return Err(UiError::Routing);
         if (!lease.active() || lease.state_.get()->document != session_)
             return Err(UiError::PropertyOwned);
@@ -2192,7 +2609,7 @@ class UiDocument {
         return Ok(empty{});
     }
     auto set_presentation(const PresentationBatch &batch) -> Result<empty, UiError> {
-        if (layout_active_ || painting_) return Err(UiError::Routing);
+        if (layout_active_ || painting_ || evaluating_ || editing_) return Err(UiError::Routing);
         if (batch.writes().len()>usize(256)) return Err(UiError::Limit);
         for (usize i{};i<batch.writes().len();++i) {
             const auto &write=batch.writes()[i];auto node=resolve(write.key.target);
@@ -2208,7 +2625,7 @@ class UiDocument {
     auto release_presentation(PresentationLease &lease,
                               LeaseEndPolicy policy = LeaseEndPolicy::CommitCurrent)
         -> Result<empty, UiError> {
-        if (layout_active_ || painting_)
+        if (layout_active_ || painting_ || evaluating_ || editing_)
             return Err(UiError::Routing);
         if (!lease.active() || lease.state_.get()->document != session_)
             return Err(UiError::PropertyOwned);
@@ -2264,7 +2681,7 @@ class UiDocument {
     }
     auto retarget_animation(AnimationId id, AnimationValue to, AnimationOptions options)
         -> Result<empty, AnimationError> {
-        if ((layout_active_ || painting_))
+        if ((layout_active_ || painting_ || evaluating_ || editing_))
             return Err(AnimationError::Reentrant);
         if (animations_closed_)
             return Err(AnimationError::Closed);
@@ -2287,7 +2704,7 @@ class UiDocument {
         return retarget_animation(id, rstd::move(to), animations_[*index].state.options);
     }
     auto cancel_animation(AnimationId id) -> Result<empty, AnimationError> {
-        if ((layout_active_ || painting_))
+        if ((layout_active_ || painting_ || evaluating_ || editing_))
             return Err(AnimationError::Reentrant);
         auto index = animation_index(id);
         if (index.is_none())
@@ -2297,7 +2714,7 @@ class UiDocument {
     }
     template <class F>
     auto on_animation_end(AnimationId id, F callback) -> Result<empty, AnimationError> {
-        if ((layout_active_ || painting_))
+        if ((layout_active_ || painting_ || evaluating_ || editing_))
             return Err(AnimationError::Reentrant);
         auto index = animation_index(id);
         if (index.is_none())
@@ -2348,7 +2765,7 @@ class UiDocument {
     auto sample_animations(Serial time) -> Result<empty, AnimationError> {
         if (!can_route())
             return Err(AnimationError::Reentrant);
-        if ((layout_active_ || painting_))
+        if ((layout_active_ || painting_ || evaluating_ || editing_))
             return Err(AnimationError::Reentrant);
         if (animations_closed_)
             return Ok(empty{});
@@ -2377,7 +2794,7 @@ class UiDocument {
         return Ok(empty{});
     }
     auto dispatch_animation_callbacks() -> Result<empty, AnimationError> {
-        if (routing_ || draining_ || animation_dispatching_ || (layout_active_ || painting_))
+        if (routing_ || draining_ || animation_dispatching_ || (layout_active_ || painting_ || evaluating_ || editing_))
             return Err(AnimationError::Reentrant);
         animation_dispatching_ = true;
         auto pending = rstd::exchange(animation_completions_, Vec<AnimationCompletion>{});
@@ -2400,7 +2817,7 @@ class UiDocument {
         return dispatch_animation_callbacks();
     }
     auto set_scene_source(UiId id, Option<ContentSource> source) -> Result<empty, UiError> {
-        if ((layout_active_ || painting_))
+        if ((layout_active_ || painting_ || evaluating_ || editing_))
             return Err(UiError::Routing);
         auto node = resolve(id);
         if (!node)
@@ -2419,7 +2836,7 @@ class UiDocument {
     auto set_scene_presentation(UiId id, ImageFit fit, ImageSampling sampling,
                                 Color placeholder = {0.15, 0.15, 0.15, 1})
         -> Result<empty, UiError> {
-        if ((layout_active_ || painting_))
+        if ((layout_active_ || painting_ || evaluating_ || editing_))
             return Err(UiError::Routing);
         auto node = resolve(id);
         if (!node)
@@ -2462,7 +2879,7 @@ class UiDocument {
         return Ok(Some(ScenePlacement{info, placed.unwrap()}));
     }
     auto set_image(UiId id, Option<ImageData> data) -> Result<empty, UiError> {
-        if ((layout_active_ || painting_))
+        if ((layout_active_ || painting_ || evaluating_ || editing_))
             return Err(UiError::Routing);
         auto node = resolve(id);
         if (!node)
@@ -2475,7 +2892,7 @@ class UiDocument {
         return Ok(empty{});
     }
     auto set_image_tint(UiId id, Color tint) -> Result<empty, UiError> {
-        if (layout_active_ || painting_)
+        if (layout_active_ || painting_ || evaluating_ || editing_)
             return Err(UiError::Routing);
         auto node = resolve(id);
         if (!node)
@@ -2490,7 +2907,7 @@ class UiDocument {
         return Ok(empty{});
     }
     auto set_image_radial_fill(UiId id, ImageRadialFill radial) -> Result<empty, UiError> {
-        if (layout_active_ || painting_) return Err(UiError::Routing);
+        if (layout_active_ || painting_ || evaluating_ || editing_) return Err(UiError::Routing);
         auto node = resolve(id);
         if (!node) return Err(UiError::InvalidId);
         if (node->image.is_none() || !radial.valid()) return Err(UiError::InvalidValue);
@@ -2502,7 +2919,7 @@ class UiDocument {
         return Ok(empty{});
     }
     auto set_image_fit(UiId id, ImageFit fit) -> Result<empty, UiError> {
-        if ((layout_active_ || painting_))
+        if ((layout_active_ || painting_ || evaluating_ || editing_))
             return Err(UiError::Routing);
         auto node = resolve(id);
         if (!node)
@@ -2518,7 +2935,7 @@ class UiDocument {
         return Ok(empty{});
     }
     auto set_image_sampling(UiId id, ImageSampling sampling) -> Result<empty, UiError> {
-        if ((layout_active_ || painting_))
+        if ((layout_active_ || painting_ || evaluating_ || editing_))
             return Err(UiError::Routing);
         auto node = resolve(id);
         if (!node)
@@ -2544,13 +2961,13 @@ class UiDocument {
         return Ok(place_image_content(*node));
     }
     auto set_text_service(Box<TextService> service) -> Result<empty, UiError> {
-        if (routing_ || (layout_active_ || painting_))
+        if (routing_ || (layout_active_ || painting_ || evaluating_ || editing_))
             return Err(UiError::Routing);
         text_service_ = Some(rstd::move(service));
         return text_fonts_changed();
     }
     auto text_fonts_changed() -> Result<empty, UiError> {
-        if (routing_ || (layout_active_ || painting_))
+        if (routing_ || (layout_active_ || painting_ || evaluating_ || editing_))
             return Err(UiError::Routing);
         for (usize index{}; index < slots_.len(); ++index) {
             auto &slot = slots_[index];
@@ -2565,7 +2982,7 @@ class UiDocument {
         return Ok(empty{});
     }
     auto set_text(UiId id, ref<str> value) -> Result<empty, UiError> {
-        if ((layout_active_ || painting_))
+        if ((layout_active_ || painting_ || evaluating_ || editing_))
             return Err(UiError::Routing);
         auto node = resolve(id);
         if (!node)
@@ -2579,7 +2996,7 @@ class UiDocument {
         return Ok(empty{});
     }
     auto set_text(UiId id, const TextBoundaries &value) -> Result<empty, UiError> {
-        if (layout_active_ || painting_) return Err(UiError::Routing);
+        if (layout_active_ || painting_ || evaluating_ || editing_) return Err(UiError::Routing);
         auto node = resolve(id);
         if (!node) return Err(UiError::InvalidId);
         if (node->text.is_none() || !value.present()) return Err(UiError::InvalidValue);
@@ -2589,7 +3006,7 @@ class UiDocument {
         return Ok(empty{});
     }
     auto set_text_format(UiId id, TextFormat format) -> Result<empty, UiError> {
-        if ((layout_active_ || painting_))
+        if ((layout_active_ || painting_ || evaluating_ || editing_))
             return Err(UiError::Routing);
         auto node = resolve(id);
         if (!node)
@@ -2599,34 +3016,16 @@ class UiDocument {
         if (property_occupied(*node, PresentationProperty::CharacterSpacing))
             return Err(UiError::PropertyOwned);
         auto &text = **node->text;
-        if (text.family.as_str() != format.family || text.language.as_str() != format.language ||
-            text.size != format.size || text.direction != format.direction ||
-            text.wrap != format.wrap || text.bold != format.bold || text.italic != format.italic ||
-            text.alignment != format.alignment || text.line_spacing != format.line_spacing || text.character_spacing != format.character_spacing || text.spacing != format.spacing ||
-            text.max_lines != format.max_lines || text.overflow != format.overflow || text.auto_size!=format.auto_size || text.source!=format.source || text.line_breaks!=format.line_breaks || text.whitespace!=format.whitespace) {
-            text.family = String::make(format.family);
-            text.language = String::make(format.language);
-            text.size = format.size;
-            text.direction = format.direction;
-            text.wrap = format.wrap;
-            text.bold = format.bold;
-            text.italic = format.italic;
-            text.alignment = format.alignment;
-            text.line_spacing = format.line_spacing;
-            text.character_spacing = format.character_spacing;
-            text.spacing = format.spacing;
-            text.max_lines = format.max_lines;
-            text.overflow = format.overflow;
-            text.auto_size = format.auto_size;
-            text.source = format.source;
-            text.line_breaks=format.line_breaks;text.whitespace=format.whitespace;
+        if (format_changed(text, format)) {
+            assign_format(text, format);
             text.dirty = true;
             changed(true, Some(id));
         }
         return Ok(empty{});
     }
+
     auto set_text_font_spans(UiId id, TextFontSpans spans) -> Result<empty,UiError> {
-        if (layout_active_ || painting_) return Err(UiError::Routing);
+        if (layout_active_ || painting_ || evaluating_ || editing_) return Err(UiError::Routing);
         auto node=resolve(id); if (!node) return Err(UiError::InvalidId);
         if (node->text.is_none() || !spans.matches((*node->text)->value.as_str())) return Err(UiError::InvalidValue);
         auto &text=**node->text;
@@ -2634,7 +3033,7 @@ class UiDocument {
         return Ok(empty{});
     }
     auto set_text_font_spans(UiId id, slice<TextFontSpan> spans) -> Result<empty,UiError> {
-        if (layout_active_ || painting_) return Err(UiError::Routing);
+        if (layout_active_ || painting_ || evaluating_ || editing_) return Err(UiError::Routing);
         auto node=resolve(id); if (!node) return Err(UiError::InvalidId);
         if (node->text.is_none()) return Err(UiError::InvalidValue);
         auto value=TextFontSpans::create((*node->text)->value.as_str(),spans);
@@ -2642,7 +3041,7 @@ class UiDocument {
         return set_text_font_spans(id,rstd::move(value).unwrap());
     }
     auto set_text_effects(UiId id, TextEffects effects) -> Result<empty, UiError> {
-        if (layout_active_ || painting_) return Err(UiError::Routing);
+        if (layout_active_ || painting_ || evaluating_ || editing_) return Err(UiError::Routing);
         auto node = resolve(id);
         if (!node) return Err(UiError::InvalidId);
         if (node->text.is_none() || !effects.valid()) return Err(UiError::InvalidValue);
@@ -2654,7 +3053,7 @@ class UiDocument {
         return Ok(empty{});
     }
     auto set_text_character_spacing(UiId id, Scalar value) -> Result<empty, UiError> {
-        if (layout_active_ || painting_)
+        if (layout_active_ || painting_ || evaluating_ || editing_)
             return Err(UiError::Routing);
         auto node = resolve(id);
         if (!node)
@@ -2667,7 +3066,7 @@ class UiDocument {
         return Ok(empty{});
     }
     auto set_text_color(UiId id, Color color) -> Result<empty, UiError> {
-        if ((layout_active_ || painting_))
+        if ((layout_active_ || painting_ || evaluating_ || editing_))
             return Err(UiError::Routing);
         auto node = resolve(id);
         if (!node)
@@ -2680,7 +3079,7 @@ class UiDocument {
         return Ok(empty{});
     }
     auto set_text_colors(UiId id, TextColors colors) -> Result<empty, UiError> {
-        if (layout_active_ || painting_) return Err(UiError::Routing);
+        if (layout_active_ || painting_ || evaluating_ || editing_) return Err(UiError::Routing);
         auto node = resolve(id);
         if (!node) return Err(UiError::InvalidId);
         if (node->text.is_none() || !colors.matches((*node->text)->value.as_str())) return Err(UiError::InvalidValue);
@@ -2692,7 +3091,7 @@ class UiDocument {
         return Ok(empty{});
     }
     auto set_text_colors(UiId id, slice<TextColorSpan> spans) -> Result<empty, UiError> {
-        if (layout_active_ || painting_) return Err(UiError::Routing);
+        if (layout_active_ || painting_ || evaluating_ || editing_) return Err(UiError::Routing);
         auto node = resolve(id);
         if (!node) return Err(UiError::InvalidId);
         if (node->text.is_none()) return Err(UiError::InvalidValue);
@@ -2701,7 +3100,7 @@ class UiDocument {
         return set_text_colors(id, rstd::move(colors).unwrap());
     }
     auto set_text_decorations(UiId id, TextDecorations decorations) -> Result<empty, UiError> {
-        if (layout_active_ || painting_) return Err(UiError::Routing);
+        if (layout_active_ || painting_ || evaluating_ || editing_) return Err(UiError::Routing);
         auto node = resolve(id);
         if (!node) return Err(UiError::InvalidId);
         if (node->text.is_none() || !decorations.matches((*node->text)->value.as_str())) return Err(UiError::InvalidValue);
@@ -2713,7 +3112,7 @@ class UiDocument {
         return Ok(empty{});
     }
     auto set_text_decorations(UiId id, slice<TextDecorationSpan> spans) -> Result<empty, UiError> {
-        if (layout_active_ || painting_) return Err(UiError::Routing);
+        if (layout_active_ || painting_ || evaluating_ || editing_) return Err(UiError::Routing);
         auto node = resolve(id);
         if (!node) return Err(UiError::InvalidId);
         if (node->text.is_none()) return Err(UiError::InvalidValue);
@@ -2722,7 +3121,7 @@ class UiDocument {
         return set_text_decorations(id, rstd::move(decorations).unwrap());
     }
     auto set_text_inline_images(UiId id, TextInlineImages images) -> Result<empty, UiError> {
-        if (layout_active_ || painting_) return Err(UiError::Routing);
+        if (layout_active_ || painting_ || evaluating_ || editing_) return Err(UiError::Routing);
         auto node = resolve(id);
         if (!node) return Err(UiError::InvalidId);
         if (node->text.is_none() || !images.matches((*node->text)->value.as_str())) return Err(UiError::InvalidValue);
@@ -2764,7 +3163,7 @@ class UiDocument {
     template <class T>
         requires rstd::Impled<T, Layout>
     auto install_layout(UiId id, T strategy) -> Result<empty, UiError> {
-        if (layout_active_ || painting_ || routing_)
+        if (layout_active_ || painting_ || evaluating_ || editing_ || routing_)
             return Err(UiError::Routing);
         auto node = resolve(id);
         if (!node)
@@ -2842,7 +3241,7 @@ class UiDocument {
     template <class T>
         requires rstd::Impled<T, Paint>
     auto install_paint(UiId id, T painter) -> Result<empty, UiError> {
-        if (layout_active_ || painting_ || routing_)
+        if (layout_active_ || painting_ || evaluating_ || editing_ || routing_)
             return Err(UiError::Routing);
         auto node = resolve(id);
         if (!node)
@@ -2890,7 +3289,7 @@ class UiDocument {
         return Ok(rstd::move(binding));
     }
     auto invalidate_layout(UiId id) -> Result<empty, UiError> {
-        if ((layout_active_ || painting_))
+        if ((layout_active_ || painting_ || evaluating_ || editing_))
             return Err(UiError::Routing);
         if (!resolve(id))
             return Err(UiError::InvalidId);
@@ -2901,7 +3300,7 @@ class UiDocument {
         return layout_diagnostics_.as_slice();
     }
     auto set_layout(UiId id, LayoutStyle value) -> Result<empty, UiError> {
-        if ((layout_active_ || painting_))
+        if ((layout_active_ || painting_ || evaluating_ || editing_))
             return Err(UiError::Routing);
         auto node = resolve(id);
         if (!node)
@@ -2935,7 +3334,7 @@ class UiDocument {
         return Ok(empty{});
     }
     auto set_background(UiId id, Color value, Scalar radius = 0) -> Result<empty, UiError> {
-        if ((layout_active_ || painting_))
+        if ((layout_active_ || painting_ || evaluating_ || editing_))
             return Err(UiError::Routing);
         auto node = resolve(id);
         if (!node)
@@ -2955,7 +3354,7 @@ class UiDocument {
         return Ok(empty{});
     }
     auto set_transform(UiId id, Transform value) -> Result<empty, UiError> {
-        if ((layout_active_ || painting_))
+        if ((layout_active_ || painting_ || evaluating_ || editing_))
             return Err(UiError::Routing);
         auto node = resolve(id);
         if (!node)
@@ -2971,7 +3370,7 @@ class UiDocument {
         return Ok(empty{});
     }
     auto set_opacity(UiId id, Scalar value) -> Result<empty, UiError> {
-        if ((layout_active_ || painting_))
+        if ((layout_active_ || painting_ || evaluating_ || editing_))
             return Err(UiError::Routing);
         auto node = resolve(id);
         if (!node)
@@ -2987,7 +3386,7 @@ class UiDocument {
         return Ok(empty{});
     }
     auto set_content_tint(UiId id, Color value) -> Result<empty, UiError> {
-        if (layout_active_ || painting_)
+        if (layout_active_ || painting_ || evaluating_ || editing_)
             return Err(UiError::Routing);
         auto node = resolve(id);
         if (!node)
@@ -3003,7 +3402,7 @@ class UiDocument {
         return Ok(empty{});
     }
     auto set_paint_color(UiId id, Color value) -> Result<empty, UiError> {
-        if (layout_active_ || painting_)
+        if (layout_active_ || painting_ || evaluating_ || editing_)
             return Err(UiError::Routing);
         auto node = resolve(id);
         if (!node)
@@ -3019,7 +3418,7 @@ class UiDocument {
         return Ok(empty{});
     }
     auto set_clip(UiId id, Clip value) -> Result<empty, UiError> {
-        if ((layout_active_ || painting_))
+        if ((layout_active_ || painting_ || evaluating_ || editing_))
             return Err(UiError::Routing);
         auto node = resolve(id);
         if (!node)
@@ -3035,7 +3434,7 @@ class UiDocument {
         return Ok(empty{});
     }
     auto set_visible(UiId id, bool value) -> Result<empty, UiError> {
-        if ((layout_active_ || painting_))
+        if ((layout_active_ || painting_ || evaluating_ || editing_))
             return Err(UiError::Routing);
         auto node = resolve(id);
         if (!node)
@@ -3046,7 +3445,7 @@ class UiDocument {
         return Ok(empty{});
     }
     auto set_hit_self(UiId id, bool value) -> Result<empty, UiError> {
-        if (layout_active_ || painting_)
+        if (layout_active_ || painting_ || evaluating_ || editing_)
             return Err(UiError::Routing);
         auto node = resolve(id);
         if (!node)
@@ -3058,7 +3457,7 @@ class UiDocument {
         return Ok(empty{});
     }
     auto set_text_input_area(UiId id, Option<Rect> area) -> Result<empty, UiError> {
-        if (layout_active_ || painting_) return Err(UiError::Routing);
+        if (layout_active_ || painting_ || evaluating_ || editing_) return Err(UiError::Routing);
         auto node = resolve(id);
         if (!node) return Err(UiError::InvalidId);
         if (area.is_some() && !area->valid()) return Err(UiError::InvalidValue);
@@ -3070,7 +3469,7 @@ class UiDocument {
     }
     auto set_interaction(UiId id, bool hit_test_visible, bool enabled, bool focusable)
         -> Result<empty, UiError> {
-        if ((layout_active_ || painting_))
+        if ((layout_active_ || painting_ || evaluating_ || editing_))
             return Err(UiError::Routing);
         auto node = resolve(id);
         if (!node)
@@ -3085,7 +3484,7 @@ class UiDocument {
         return Ok(empty{});
     }
     auto set_viewport_axes(UiId id, ScrollAxes axes) -> Result<empty, UiError> {
-        if ((layout_active_ || painting_))
+        if ((layout_active_ || painting_ || evaluating_ || editing_))
             return Err(UiError::Routing);
         auto node = resolve(id);
         if (!node)
@@ -3100,7 +3499,7 @@ class UiDocument {
         return Ok(empty{});
     }
     auto set_viewport_boundary(UiId id, ViewportBoundary boundary) -> Result<empty,UiError> {
-        if (layout_active_ || painting_) return Err(UiError::Routing);
+        if (layout_active_ || painting_ || evaluating_ || editing_) return Err(UiError::Routing);
         auto node=resolve(id); if (!node) return Err(UiError::InvalidId);
         if (node->viewport.is_none() || (boundary!=ViewportBoundary::Clamped && boundary!=ViewportBoundary::Unclamped)) return Err(UiError::InvalidValue);
         auto &view=**node->viewport;
@@ -3112,7 +3511,7 @@ class UiDocument {
         return Ok(empty{});
     }
     auto set_viewport_offset(UiId id, Point offset) -> Result<empty, UiError> {
-        if ((layout_active_ || painting_))
+        if ((layout_active_ || painting_ || evaluating_ || editing_))
             return Err(UiError::Routing);
         auto node = resolve(id);
         if (!node)
@@ -3346,7 +3745,7 @@ class UiDocument {
 
   private:
     auto update_impl(Size viewport, bool recording = true) -> Result<UiUpdate::Data, UiError> {
-        if (routing_ || animation_dispatching_ || (layout_active_ || painting_))
+        if (routing_ || animation_dispatching_ || (layout_active_ || painting_ || evaluating_ || editing_))
             return Err(UiError::Routing);
         if (!viewport.valid())
             return Err(UiError::InvalidValue);

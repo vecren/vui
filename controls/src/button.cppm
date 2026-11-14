@@ -9,6 +9,7 @@ struct ButtonStyle {
     Color pressed{0.03, 0.1, 0.2, 1};
     Color focused{0.12, 0.35, 0.65, 1};
     Scalar radius{4};
+    friend auto operator==(const ButtonStyle &, const ButtonStyle &) -> bool = default;
     auto valid() const -> bool {
         return normal.valid() && pressed.valid() && focused.valid() && finite(radius) &&
                radius >= 0;
@@ -39,6 +40,20 @@ class ButtonState {
     }
 
   public:
+    auto configured(ButtonStyle style, ButtonOptions options, Color background, Scalar radius) const -> bool {
+        return style_ == style && options_ == options && original_background_ == background && original_radius_ == radius;
+    }
+    void configure_prepared(ButtonStyle style, ButtonOptions options, Color background, Scalar radius) {
+        style_ = style; options_ = options; original_background_ = background; original_radius_ = radius;
+    }
+    auto configured_style(NodeStyle style) const -> NodeStyle {
+        if (options_.appearance == ButtonAppearance::Default) {
+            auto current = status();
+            style.background = current.pressed ? style_.pressed : current.focused ? style_.focused : style_.normal;
+            style.radius = style_.radius;
+        }
+        style.focusable = true; return style;
+    }
     explicit ButtonState(ButtonStyle style, ButtonOptions options = {})
         : ButtonState(style, options, Color{}, 0) {}
     ButtonState(ButtonStyle style, ButtonOptions options, Color background, Scalar radius)
@@ -204,6 +219,48 @@ class ButtonState {
 
 class Button {
   public:
+    template <class F>
+    static auto prepare_clicked(UiDocument &document, UiEditBatch &edit, UiNodeRef node, F callback)
+        -> Result<Binding, ControlError> {
+        auto state = edit.prepared_state<ButtonState>(node);
+        if (!state) return Err(ControlError{Some(UiError::InvalidId), {}});
+        auto connected = state->on_clicked(document.bindings(), rstd::move(callback));
+        if (connected.is_err()) return Err(ControlError{Some(UiError::Limit), {}});
+        return Ok(connected.unwrap());
+    }
+    static auto prepare(UiDocument &document, UiEditBatch &edit, Option<UiId> previous,
+                        NodeStyle style, ButtonStyle appearance = {}, ButtonOptions options = {},
+                        Option<NodeStyle> before = {})
+        -> Result<UiNodeRef, ControlError> {
+        if (!appearance.valid() || unsigned(options.appearance) > unsigned(ButtonAppearance::Custom))
+            return Err(ControlError{Some(UiError::InvalidValue), {}});
+        auto background = style.background; auto radius = style.radius;
+        auto state = previous.is_some() ? document.state<ButtonState>(*previous) : nullptr;
+        if (previous.is_some() && !state) return Err(ControlError{Some(UiError::InvalidId), {}});
+        if (options.appearance == ButtonAppearance::Default) {
+            auto status = state ? state->status() : ButtonStatus{};
+            style.background = status.pressed ? appearance.pressed : status.focused ? appearance.focused : appearance.normal;
+            style.radius = appearance.radius;
+        }
+        style.focusable = true;
+        auto node = previous.is_some() ? edit.existing(*previous) : edit.create(LayoutKind::Stack, style);
+        if (state && before.is_some()) edit.style(node, style, state->configured_style(*before));
+        else edit.style(node, style);
+        if (!state) edit.state(node, ButtonState(appearance, options, background, radius));
+        else if (!state->configured(appearance, options, background, radius)) {
+            struct Patch final : UiStatePatch {
+                ButtonStyle style; ButtonOptions options; Color background; Scalar radius;
+                Patch(ButtonStyle s, ButtonOptions o, Color b, Scalar r) : style(s), options(o), background(b), radius(r) {}
+                auto type() const -> rstd::any::TypeId override { return rstd::any::TypeId::of<ButtonState>(); }
+                void publish(UiNodeState &target) override {
+                    static_cast<UiStoredState<ButtonState> &>(target).value.configure_prepared(style, options, background, radius);
+                }
+            };
+            auto patch = Box<Patch>::make(appearance, options, background, radius);
+            edit.patch(node, Box<UiStatePatch>::from_raw(rstd::move(patch).into_raw().template cast<UiStatePatch>()));
+        }
+        return Ok(node);
+    }
     static auto create(UiSession &session, NodeStyle style, ButtonStyle appearance = {},
                        ButtonOptions options = {}) -> Result<UiId, ControlError> {
         if (!appearance.valid())

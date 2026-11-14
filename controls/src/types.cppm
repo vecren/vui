@@ -38,6 +38,7 @@ struct ButtonTintStatus {
 };
 enum class ButtonAppearance { Default, Custom };
 struct ButtonOptions {
+    friend auto operator==(const ButtonOptions &, const ButtonOptions &) -> bool = default;
     bool focus_on_press{true}, capture_on_press{true}, pointer_enabled{true};
     Key first_key{Key::Space}, second_key{Key::Enter};
     ButtonAppearance appearance{ButtonAppearance::Default};

@@ -40,7 +40,7 @@ class ThreadedFrames {
     Option<rstd::thread::JoinHandle<void>> worker_;
     Option<Serial> pending_;
     Serial next_request_{}, next_capture_{};
-    struct Lease { Serial request; FramePlan plan; };
+    struct Lease { Serial request; FramePlan plan; Option<UiFrame> view; };
     Vec<Lease> leases_;
     Vec<FrameEvent> events_;
     FrameLoopStatus status_;
@@ -88,7 +88,8 @@ class ThreadedFrames {
             if (capacity || control.close) {
                 (void)frames.pump_with_clock(clock, [&]() -> Result<FramePacket, FrameError> {
                     if (packet.is_none()) return Err(FrameError::Busy);
-                    return Ok(FramePacket{FramePlan(packet->plan), packet->inputs.clone(), true});
+                    return Ok(FramePacket{FramePlan(packet->plan), packet->inputs.clone(), true,
+                        packet->view ? Some(UiFrame(*packet->view)) : Option<UiFrame>{}});
                 }, [&] {
                     Control latest;
                     { auto lock = channel->mutex.lock().unwrap(); latest = channel->control; }
@@ -282,22 +283,22 @@ class ThreadedFrames {
             if (!channel_->ready || channel_->packet.is_some() ||
                 (windowed_ && (control.suspended || !control.extent.width || !control.extent.height))) return Ok(empty{});
         }
-        auto plan = session_.plan_frame();
-        if (plan.is_err()) {
-            if (plan.unwrap_err() == FrameError::Busy) return Ok(empty{});
-            events_.push({*pending_, FrameEventType::Failed, {}, 0, {}, {}, Some(plan.unwrap_err())});
+        auto frame = session_.plan_ui_frame();
+        if (frame.is_err()) {
+            if (frame.unwrap_err() == FrameError::Busy) return Ok(empty{});
+            events_.push({*pending_, FrameEventType::Failed, {}, 0, {}, {}, Some(frame.unwrap_err())});
             pending_ = None();
             return Ok(empty{});
         }
-        auto value = rstd::move(plan).unwrap();
+        auto value = frame->plan();
         if (!value.concurrent_rendering()) {
             events_.push({*pending_, FrameEventType::Failed, Some(value.identity()), 0, {}, {}, Some(FrameError::ThreadUnsafe)});
             pending_ = None();
             return Ok(empty{});
         }
         auto id = *pending_;
-        leases_.push({id, FramePlan(value)});
-        auto packet = Some(FramePacket{rstd::move(value), session_.last_successful_input_timings()});
+        leases_.push({id, FramePlan(value), Some(UiFrame(*frame))});
+        auto packet = Some(FramePacket{rstd::move(value), session_.last_successful_input_timings(), false, Some(rstd::move(*frame))});
         {
             auto lock = channel_->mutex.lock().unwrap();
             channel_->packet = rstd::move(packet);

@@ -3,6 +3,7 @@ import :input;
 import :input.protocol;
 import :interaction.arena;
 import :input.scopes;
+import :visual;
 using namespace rstd::prelude;
 
 export namespace vui {
@@ -41,6 +42,7 @@ class EventContext {
   public:
     auto document() -> UiDocument &;
     auto visual(UiId id) const -> const UiVisual *;
+    auto completed_content(UiId id, Serial source_id) const -> Result<Option<FrameContent>, FrameError>;
     auto scroll_remaining() const -> Point { return remaining_scroll_; }
     auto consume_scroll(Point amount) -> Result<empty, InputError> {
         auto valid = [](Scalar value, Scalar remaining) {
@@ -73,6 +75,7 @@ class EventContext {
 
 class EventRouter {
     friend class EventContext;
+    friend class UiSession;
     struct BehaviorEntry {
         UiId target;
         explicit BehaviorEntry(UiId id) : target(id) {}
@@ -197,6 +200,8 @@ class EventRouter {
     Vec<Transfer> transfers_;
     Vec<Vec<PointerKey>> releases_;
     Option<InputSnapshot> update_;
+    Option<UiFrame> completed_frame_;
+    Serial completed_frame_id_{};
     Option<UiDocument::RouteScope> scope_;
     Option<UiId> focus_;
     Serial focus_revision_{};
@@ -736,6 +741,34 @@ class EventRouter {
     }
 
   public:
+    class BehaviorEdit {
+        Vec<Box<BehaviorEntry>> entries_;
+        friend class EventRouter;
+      public:
+        BehaviorEdit() = default;
+        BehaviorEdit(const BehaviorEdit &) = delete;
+        BehaviorEdit(BehaviorEdit &&) = default;
+    };
+    template <class T> requires rstd::Impled<T, vui::Behavior>
+    auto prepare_behavior(BehaviorEdit &edit, const UiDocument::PreparedEdit &document, UiNodeRef ref)
+        -> Result<empty, InputError> {
+        if (closed_) return Err(InputError::Unavailable);
+        if (busy_ || document_.routing()) return Err(InputError::Reentrant);
+        auto target = document.id(ref);
+        if (target.session != document_.session() || document.state_type(ref) != Some(rstd::any::TypeId::of<T>()))
+            return Err(InputError::InvalidId);
+        for (const auto &entry : behaviors_) if (entry->target == target) return Err(InputError::InvalidSequence);
+        for (const auto &entry : edit.entries_) if (entry->target == target) return Err(InputError::InvalidSequence);
+        if (behaviors_.len() + edit.entries_.len() >= usize(65536)) return Err(InputError::Limit);
+        auto entry = Box<NodeBehavior<T>>::make(target);
+        edit.entries_.push(Box<BehaviorEntry>::from_raw(rstd::move(entry).into_raw().template cast<BehaviorEntry>()));
+        behaviors_.reserve(edit.entries_.len());
+        return Ok(empty{});
+    }
+    void publish_behaviors(BehaviorEdit edit) {
+        for (auto &entry : edit.entries_) behaviors_.push(rstd::move(entry));
+        routes_dirty_ = true; prune_requested_ = true;
+    }
     explicit EventRouter(UiDocument &document) : document_(document) {}
     ~EventRouter() {
         if (native_text_input_.is_some() && text_request_.is_some())
@@ -1261,6 +1294,13 @@ class EventRouter {
     auto snapshot() const -> Option<InputSnapshot> {
         return update_.is_some() ? Some(InputSnapshot(*update_)) : None<InputSnapshot>();
     }
+    auto completed_content(UiId id, Serial source_id) const -> Result<Option<FrameContent>, FrameError> {
+        auto current = update_ ? update_->get(id) : nullptr;
+        auto completed = completed_frame_ ? completed_frame_->update().get(id) : nullptr;
+        if (!current || !completed || current->mount_generation != completed->mount_generation)
+            return Ok(None<FrameContent>());
+        return completed_frame_->content(id, source_id);
+    }
     auto dispatch(InputEvent input) -> Result<empty, InputError> {
         work_ = {};
         if (closed_)
@@ -1563,6 +1603,7 @@ class EventRouter {
         clipboard_pending_.clear();
         delivered_text_state_ = None();
         update_ = None();
+        completed_frame_ = None();
         return Ok(empty{});
     }
 };
@@ -1576,6 +1617,9 @@ inline auto EventContext::request_clipboard_write(ref<str> text) -> Result<Seria
 inline auto EventContext::write_clipboard(ref<str> text) -> Result<empty, ClipboardError> { return router_.write_clipboard(text); }
 inline auto EventContext::visual(UiId id) const -> const UiVisual * {
     return router_.update_->get(id);
+}
+inline auto EventContext::completed_content(UiId id, Serial source_id) const -> Result<Option<FrameContent>, FrameError> {
+    return router_.completed_content(id, source_id);
 }
 inline auto EventContext::hit_within() const -> bool {
     auto hit = HitTest::target_at(*router_.update_, event_.input.position);

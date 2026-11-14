@@ -10,6 +10,7 @@ sources = ["main.cppm", "view.cppm"]
 link-stdlib = false
 
 [dependencies]
+vui-compose = { workspace = true }
 rstd-std = { workspace = true }
 vui-examples = { workspace = true }
 rstd-nostd = { workspace = true, usage = "link" }

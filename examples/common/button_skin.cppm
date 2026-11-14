@@ -1,5 +1,6 @@
 export module vui.examples:button_skin;
 import vui.controls;
+import vui.compose;
 using namespace rstd::prelude;
 
 export namespace examples {
@@ -24,46 +25,63 @@ struct ButtonSkin {
         return Ok(empty{});
     }
 };
-struct SkinnedButton {
-    UiId id;
+struct SkinRegistration {
     rstd::rc::Rc<ButtonSkin> skin;
-    Binding paint, state;
-    static auto create(UiSession &session, UiId parent, NodeStyle style, ImageRegion frame,
-                       NinePatchSpec border, Option<ImageRegion> icon = {})
-        -> Result<SkinnedButton, ControlError> {
-        auto created = Button::create(
-            session, style, {},
-            ButtonOptionsBuilder{}.appearance(ButtonAppearance::Custom).build());
-        if (created.is_err())
-            return Err(created.unwrap_err());
-        auto id = created.unwrap();
-        auto &ui = session.document();
-        auto attached = ui.attach(parent, id);
-        if (attached.is_err()) {
-            ui.destroy(id);
-            return Err(ControlError{Some(attached.unwrap_err()), {}});
-        }
-        auto skin =
-            rstd::rc::make_rc<ButtonSkin>(ButtonSkin{rstd::move(frame), border, rstd::move(icon)});
-        auto paint = ui.bind_paint(id, skin.downgrade());
-        if (paint.is_err()) {
-            ui.destroy(id);
-            return Err(ControlError{Some(paint.unwrap_err()), {}});
-        }
-        auto state = Button::bind_status_changed(
-            ui, id, skin.downgrade(),
-            [](ButtonSkin &skin, UiDocument &ui, UiId id, const ButtonStatus &status) {
-                skin.status = status;
-                ui.invalidate_paint(id).unwrap();
+    Option<Binding> paint, status;
+    explicit SkinRegistration(ButtonSkin value) : skin(rstd::rc::make_rc<ButtonSkin>(rstd::move(value))) {}
+};
+struct SkinnedButtonElement {
+    vui::compose::ButtonElement button;
+    ImageRegion frame;
+    NinePatchSpec border;
+    auto prepare(vui::compose::PrepareContext &context, Option<UiId> previous, NodeStyle style)
+        -> vui::compose::ComposeResult<UiNodeRef> {
+        namespace cx = vui::compose;
+        auto prepared = button.prepare(context, previous, style);
+        if (prepared.is_err()) return Err(prepared.unwrap_err());
+        auto state = context.runtime<SkinRegistration>([this]() -> cx::ComposeResult<rstd::rc::Rc<SkinRegistration>> {
+            return Ok(rstd::rc::make_rc<SkinRegistration>(ButtonSkin{ImageRegion(frame), border, {}}));
+        });
+        if (state.is_err()) return Err(state.unwrap_err());
+        auto skin = state.unwrap(); auto target = context.target();
+        auto &current = *skin.get()->skin.get();
+        if (current.frame.image.id() != frame.image.id() || current.frame.source != frame.source ||
+            current.border.source_insets != border.source_insets || current.border.destination_insets != border.destination_insets ||
+            current.border.draw_center != border.draw_center)
+            context.on_commit([skin, target, frame = ImageRegion(frame), border = border](vui::compose::CommittedContext &context) mutable -> vui::compose::ComposeResult<empty> {
+                auto id = context.resolve(target); if (id.is_err()) return Err(id.unwrap_err());
+                skin.get()->skin.get()->frame = rstd::move(frame); skin.get()->skin.get()->border = border;
+                auto result = context.session().document().invalidate_paint(id.unwrap());
+                return result.is_ok() ? vui::compose::ComposeResult<empty>(Ok(empty{}))
+                    : vui::compose::ComposeResult<empty>(Err(vui::compose::ComposeError(vui::compose::ComposeStage::Effect, Some(result.unwrap_err()))));
             });
-        if (state.is_err()) {
-            ui.destroy(id);
-            return Err(state.unwrap_err());
-        }
-        return Ok(SkinnedButton{id, rstd::move(skin), rstd::move(paint).unwrap(),
-                                rstd::move(state).unwrap()});
+        context.on_mount([skin, target](cx::CommittedContext &context) mutable -> cx::ComposeResult<cx::EffectLease> {
+            auto node = context.resolve(target); if (node.is_err()) return Err(node.unwrap_err());
+            cx::EffectLease cleanup([skin]() mutable { skin.get()->status = None(); skin.get()->paint = None(); });
+            auto &ui = context.session().document();
+            auto paint = ui.bind_paint(node.unwrap(), skin.get()->skin.downgrade());
+            if (paint.is_err()) return Err(cx::ComposeError(cx::ComposeStage::Effect, Some(paint.unwrap_err())));
+            skin.get()->paint = Some(paint.unwrap());
+            auto status = Button::bind_status_changed(ui, node.unwrap(), skin.get()->skin.downgrade(),
+                [](ButtonSkin &skin, UiDocument &ui, UiId id, const ButtonStatus &status) {
+                    skin.status = status; ui.invalidate_paint(id).unwrap();
+                });
+            if (status.is_err()) return Err(cx::ComposeError(cx::ComposeStage::Effect, status.unwrap_err().ui));
+            skin.get()->status = Some(status.unwrap()); return Ok(rstd::move(cleanup));
+        });
+        return Ok(prepared.unwrap());
     }
 };
+
+template <class F>
+auto skinned_button(vui::compose::Element content, F clicked, ImageRegion frame, NinePatchSpec border)
+    -> vui::compose::Element {
+    namespace cx = vui::compose;
+    Vec<cx::Element> children; children.push(rstd::move(content));
+    auto options = ButtonOptionsBuilder{}.appearance(ButtonAppearance::Custom).build();
+    return cx::element(SkinnedButtonElement{cx::ButtonElement{rstd::rc::make_rc<cx::ClickFunction>(rstd::move(clicked)), {}, options},
+        rstd::move(frame), border}, rstd::move(children));
+}
 inline auto make_button_frame() -> ImageData {
     unsigned char pixels[36];
     for (unsigned i = 0; i < 9; ++i) {

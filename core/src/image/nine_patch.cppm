@@ -5,6 +5,7 @@ using namespace rstd::prelude;
 export namespace vui {
 struct Insets {
     Scalar left{}, top{}, right{}, bottom{};
+    friend auto operator==(Insets, Insets) -> bool = default;
     auto valid() const -> bool {
         return finite(left) && finite(top) && finite(right) && finite(bottom) && left >= 0 &&
                top >= 0 && right >= 0 && bottom >= 0;

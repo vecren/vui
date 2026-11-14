@@ -18,6 +18,7 @@ struct SurfaceInfo {
     Scalar scale{1};
     Serial generation{1};
     Option<PixelSize> pixel_size;
+    friend auto operator==(const SurfaceInfo &, const SurfaceInfo &) -> bool = default;
     auto valid() const -> bool {
         return logical_size.valid() && finite(scale) && scale > 0 && generation != 0 &&
                finite(logical_size.width * scale) && finite(logical_size.height * scale);
@@ -50,6 +51,18 @@ enum class FrameError { InvalidSurface, InvalidTransform, MissingNode, Limit, In
 struct ContentSelection {
     Serial source_id{}, source_revision{};
     Option<TextureFrame> frame;
+};
+
+struct FrameContent {
+    FrameIdentity frame;
+    Serial source_id{};
+    TextureFrame image;
+    ScenePlacement placement;
+    Transform local_to_surface;
+    auto content_position(Point surface, ContentBounds bounds = ContentBounds::RequireInside) const -> Option<Point> {
+        auto inverse = local_to_surface.inverse();
+        return inverse ? placement.content_position(inverse->map(surface), bounds) : None<Point>();
+    }
 };
 
 class FramePlanner;
@@ -93,6 +106,17 @@ class FramePlan {
     }
     auto contents() const -> slice<DisplayList> { return data_->contents.as_slice(); }
     auto sources() const -> slice<ContentSelection> { return data_->sources.as_slice(); }
+    auto content(RenderId node, Serial source_id) const -> Result<Option<FrameContent>, FrameError> {
+        Option<FrameContent> result;
+        for (const auto &pass : data_->passes) for (const auto &draw : pass.draws) if (draw.is_External()) {
+            const auto &external = draw.as_External();
+            if (external.node != node || external.source_id != source_id) continue;
+            if (result) return Err(FrameError::InvalidContent);
+            result = Some(FrameContent{identity(), source_id, TextureFrame(external.frame),
+                {external.frame.info(), {external.destination, external.source}}, external.transform});
+        }
+        return Ok(rstd::move(result));
+    }
 };
 
 class FramePlanner {

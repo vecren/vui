@@ -16,6 +16,7 @@ options = ["-Wall", "-Wextra", "-Wno-missing-field-initializers", "-Werror=retur
 [dependencies]
 rstd-std = { workspace = true, pub = true }
 vui-controls = { workspace = true, pub = true }
+vui-compose = { workspace = true, pub = true }
 vui-host = { workspace = true, pub = true }
 vectext = { workspace = true, pub = true }
 rstd-nostd = { workspace = true, usage = "link" }

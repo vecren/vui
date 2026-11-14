@@ -63,6 +63,7 @@ template <class T> class ValueSnapshot {
     Version version_{}, epoch_{};
     friend class EvalContext;
     friend class ReadBatch;
+    friend class ObservationBatch;
     friend class GraphUpdate;
     ValueSnapshot(SharedValue value, Version version, Version epoch)
         : value_(rstd::move(value)), version_(version), epoch_(epoch) {}
@@ -81,6 +82,7 @@ class GraphView;
 class ReadBatch;
 class GraphUpdate;
 class StateWriteGuard;
+class ObservationBatch;
 struct Dependency {
     NodeId id;
 };
@@ -109,6 +111,7 @@ class Subscription {
     rstd::rc::Rc<Observer> observer_;
     rstd::rc::Weak<GraphData> graph_;
     friend class GraphView;
+    friend class ObservationBatch;
     Subscription(rstd::rc::Rc<Observer> observer, rstd::rc::Weak<GraphData> graph)
         : observer_(rstd::move(observer)), graph_(rstd::move(graph)) {}
 
@@ -160,6 +163,7 @@ struct GraphData {
     Vec<StateDiagnostic> diagnostics;
     Vec<NodeId> evaluating;
     unsigned reads{};
+    unsigned observations{};
     unsigned write_blocks{};
     bool notifying{}, publishing{}, cleaning{}, transaction{}, closed{}, closing{};
     explicit GraphData(GraphLimits value) : limits(value) {
@@ -174,7 +178,7 @@ struct GraphData {
         return None();
     }
     auto busy() const -> bool {
-        return reads || notifying || publishing || cleaning || !evaluating.is_empty();
+        return reads || observations || notifying || publishing || cleaning || !evaluating.is_empty();
     }
     auto resolve(NodeId value) const -> rstd::rc::Rc<Node> {
         if (value.graph != id || value.slot >= slots.len())
@@ -326,6 +330,7 @@ class GraphView {
     Option<rstd::thread::ThreadId> thread_;
     Version id_{};
     friend class Graph;
+    friend class ObservationBatch;
     template <class T> friend class Cell;
     template <class T> friend class Computed;
     friend auto begin_read(GraphView) -> Result<ReadBatch, StateError>;
@@ -380,6 +385,7 @@ template <class T> class Value {
     GraphView graph_;
     NodeId id_;
     friend class Graph;
+    friend class ObservationBatch;
     Value(GraphView graph, NodeId id) : graph_(rstd::move(graph)), id_(id) {}
 
   public:
@@ -572,7 +578,7 @@ inline auto begin_read(GraphView graph) -> Result<ReadBatch, StateError> {
         return Err(opened.unwrap_err());
     auto data = opened.unwrap();
     if (data.get()->notifying || data.get()->publishing || !data.get()->evaluating.is_empty() ||
-        data.get()->reads)
+        data.get()->reads || data.get()->observations)
         return Err(StateError::Reentrant);
     return Ok(ReadBatch(rstd::move(data)));
 }
@@ -615,6 +621,7 @@ template <class T> class Cell {
         }
     }
     friend class Graph;
+    friend class ObservationBatch;
     template <class U> friend class Computed;
     explicit Cell(Value<T> value) : value_(rstd::move(value)) {}
 
@@ -791,22 +798,20 @@ struct ValueEqual {
             return a == b;
     }
 };
-class Graph {
-    rstd::rc::Rc<GraphData> data_;
-    template <class T, class Equal>
-    auto allocate(Equal comparison, NodeOptions options) -> Result<rstd::rc::Rc<Node>, StateError> {
-        if (auto error = data_.get()->check(); error.is_some())
+template <class T, class Equal>
+auto allocate_node(rstd::rc::Rc<GraphData> &data, Equal comparison, NodeOptions options, bool observed = false) -> Result<rstd::rc::Rc<Node>, StateError> {
+        if (auto error = data.get()->check(); error.is_some())
             return Err(*error);
-        if (data_.get()->busy() || data_.get()->transaction || data_.get()->write_blocks)
+        if ((!observed && (data.get()->busy() || data.get()->write_blocks)) || data.get()->transaction)
             return Err(StateError::Reentrant);
-        if (data_.get()->stats.nodes >= data_.get()->limits.nodes)
+        if (data.get()->stats.nodes >= data.get()->limits.nodes)
             return Err(StateError::Capacity);
         usize slot{};
-        while (slot < data_.get()->slots.len() && data_.get()->slots[slot].node)
+        while (slot < data.get()->slots.len() && data.get()->slots[slot].node)
             ++slot;
-        if (slot == data_.get()->slots.len())
-            data_.get()->slots.push({});
-        NodeId id{data_.get()->id, data_.get()->slots[slot].generation, slot};
+        if (slot == data.get()->slots.len())
+            data.get()->slots.push({});
+        NodeId id{data.get()->id, data.get()->slots[slot].generation, slot};
         auto equal = [comparison = rstd::move(comparison)](const SharedValue &a,
                                                            const SharedValue &b) {
             return comparison(*static_cast<const T *>(a->address()),
@@ -814,10 +819,100 @@ class Graph {
         };
         auto node = rstd::rc::make_rc<Node>(id, rstd::any::TypeId::of<T>(), rstd::move(equal),
                                             rstd::move(options));
-        data_.get()->slots[slot].node = node;
-        ++data_.get()->stats.nodes;
+        data.get()->slots[slot].node = node;
+        ++data.get()->stats.nodes;
         return Ok(rstd::move(node));
     }
+class ObservationBatch {
+    rstd::rc::Rc<GraphData> data_;
+    Version epoch_{};
+    Vec<NodeId> cells_;
+    Vec<rstd::rc::Rc<Observer>> observers_;
+    bool reading_{}, published_{};
+    explicit ObservationBatch(rstd::rc::Rc<GraphData> data)
+        : data_(rstd::move(data)), epoch_(data_.get()->epoch), reading_(true) {
+        ++data_.get()->reads; ++data_.get()->write_blocks; ++data_.get()->observations;
+    }
+
+  public:
+    static auto begin(GraphView graph) -> Result<ObservationBatch, StateError> {
+        auto opened = graph.open();
+        if (opened.is_err()) return Err(opened.unwrap_err());
+        auto data = opened.unwrap();
+        if (data.get()->busy() || data.get()->transaction || data.get()->write_blocks) return Err(StateError::Reentrant);
+        data.get()->prune_observers();
+        if (auto error = data.get()->check(); error.is_some()) return Err(*error);
+        return Ok(ObservationBatch(rstd::move(data)));
+    }
+    ObservationBatch(const ObservationBatch &) = delete;
+    ObservationBatch(ObservationBatch &&other)
+        : data_(rstd::move(other.data_)), epoch_(other.epoch_), cells_(rstd::move(other.cells_)),
+          observers_(rstd::move(other.observers_)), reading_(rstd::exchange(other.reading_, false)),
+          published_(other.published_) {}
+    ~ObservationBatch() {
+        if (!data_) return;
+        if (!published_) {
+            for (auto &observer : observers_) observer.get()->active = false;
+            for (auto id : cells_) if (auto node = data_.get()->resolve(id)) node.get()->retire = true;
+        }
+        finish_reads();
+        --data_.get()->observations;
+        --data_.get()->write_blocks;
+        data_.get()->prune_observers();
+    }
+    auto graph() const -> Version { return data_.get()->id; }
+    auto ready() const -> Result<empty, StateError> {
+        if (auto error = data_.get()->check(); error.is_some()) return Err(*error);
+        if (data_.get()->closing) return Err(StateError::Closed);
+        if (data_.get()->epoch != epoch_) return Err(StateError::Reentrant);
+        return Ok(empty{});
+    }
+    void finish_reads() {
+        if (reading_) { --data_.get()->reads; reading_ = false; }
+    }
+    void publish() {
+        if (published_) return;
+        finish_reads();
+        for (auto &observer : observers_) if (observer.get()->active) data_.get()->observers.push(observer.clone());
+        data_.get()->stats.observers = data_.get()->observers.len();
+        published_ = true;
+    }
+    template <class T> auto cell(T initial) -> Result<Cell<T>, StateError> {
+        if (!reading_) return Err(StateError::Reentrant);
+        auto available = ready();
+        if (available.is_err()) return Err(available.unwrap_err());
+        auto allocated = allocate_node<T>(data_, ValueEqual{}, {}, true);
+        if (allocated.is_err()) return Err(allocated.unwrap_err());
+        auto node = allocated.unwrap(); node.get()->source = node.get()->evaluated = true;
+        node.get()->current = store(rstd::move(initial)); cells_.push(NodeId(node.get()->id));
+        return Ok(Cell<T>(Value<T>(GraphView(data_), node.get()->id)));
+    }
+    template <class T> auto read(const Value<T> &value) -> Result<ValueSnapshot<T>, StateError> {
+        if (!reading_) return Err(StateError::Reentrant);
+        auto available = ready();
+        if (available.is_err()) return Err(available.unwrap_err());
+        auto result = data_.get()->ensure(value.id());
+        if (result.is_err()) return Err(result.unwrap_err());
+        auto node = data_.get()->resolve(value.id());
+        if (node.get()->type != rstd::any::TypeId::of<T>()) return Err(StateError::TypeMismatch);
+        return Ok(ValueSnapshot<T>(node.get()->current, node.get()->version, epoch_));
+    }
+    template <class T, class F>
+    auto watch(const Value<T> &value, F callback) -> Result<Subscription, StateError> {
+        if (!reading_ || published_) return Err(StateError::Reentrant);
+        auto available = ready();
+        if (available.is_err()) return Err(available.unwrap_err());
+        if (auto error = data_.get()->validate(value.id()); error.is_some()) return Err(*error);
+        if (data_.get()->observers.len() + observers_.len() >= data_.get()->limits.observers) return Err(StateError::Capacity);
+        auto observer = rstd::rc::make_rc<Observer>(value.id(), rstd::move(callback));
+        observers_.push(observer.clone());
+        data_.get()->observers.reserve(observers_.len());
+        return Ok(Subscription(rstd::move(observer), data_.downgrade()));
+    }
+};
+class Graph {
+    rstd::rc::Rc<GraphData> data_;
+
 
   public:
     explicit Graph(GraphLimits limits = {}) : data_(rstd::rc::make_rc<GraphData>(limits)) {}
@@ -837,7 +932,7 @@ class Graph {
     template <class T, class Equal = ValueEqual>
     auto cell(T initial, Equal equal = {}, NodeOptions options = {})
         -> Result<Cell<T>, StateError> {
-        auto allocated = allocate<T>(rstd::move(equal), rstd::move(options));
+        auto allocated = allocate_node<T>(data_, rstd::move(equal), rstd::move(options));
         if (allocated.is_err())
             return Err(allocated.unwrap_err());
         auto node = allocated.unwrap();
@@ -862,7 +957,7 @@ class Graph {
         }
         if (data_.get()->stats.edges + keys.len() > data_.get()->limits.edges)
             return Err(StateError::Capacity);
-        auto allocated = allocate<T>(rstd::move(equal), rstd::move(options));
+        auto allocated = allocate_node<T>(data_, rstd::move(equal), rstd::move(options));
         if (allocated.is_err())
             return Err(allocated.unwrap_err());
         auto node = allocated.unwrap();

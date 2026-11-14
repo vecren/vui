@@ -29,6 +29,11 @@ struct FrameEvent {
     Serial earlier_unselected_input_batches{};
     Serial capture{};
     Option<gpu::Pixels> pixels;
+    Option<UiFrame> view;
+    auto completed_view() const -> Option<UiFrame> {
+        if (type != FrameEventType::GpuComplete || !view || present == Some(gpu::PresentStatus::OutOfDate)) return None();
+        return Some(UiFrame(*view));
+    }
 };
 struct FrameLoopStatus {
     Option<Serial> active, pending;
@@ -42,6 +47,7 @@ struct FramePacket {
     FramePlan plan;
     Option<InputTimings> inputs;
     bool frozen{};
+    Option<UiFrame> view;
 };
 
 template <class Backend = gpu::Renderer> class FrameExecutor {
@@ -51,6 +57,8 @@ template <class Backend = gpu::Renderer> class FrameExecutor {
         Serial submission{};
         Option<InputTimings> inputs;
         Serial earlier_unselected_input_batches{};
+        Option<UiFrame> view;
+        Option<gpu::PresentStatus> present;
     };
     Backend &renderer_;
     bool windowed_;
@@ -83,6 +91,8 @@ template <class Backend = gpu::Renderer> class FrameExecutor {
                 Option<gpu::PresentStatus> present = None()) {
         FrameEvent event{active_->request,    type,    Some(active_->frame),
                          active_->submission, present, rstd::move(error)};
+        if (active_->view) event.view = Some(UiFrame(*active_->view));
+        if (type == FrameEventType::GpuComplete) event.present = active_->present;
         if (active_->inputs.is_some()) {
             event.inputs = Some(InputTimings(*active_->inputs));
             event.observed = Some(rstd::time::Instant::now());
@@ -136,6 +146,7 @@ template <class Backend = gpu::Renderer> class FrameExecutor {
             if (presented.is_err())
                 return fail(presented.unwrap_err());
             auto result = presented.unwrap().status;
+            active_->present = Some(result);
             notify(result == gpu::PresentStatus::OutOfDate ? FrameEventType::PresentRejected
                                                            : FrameEventType::PresentQueued,
                    None(), Some(result));
@@ -370,7 +381,7 @@ template <class Backend = gpu::Renderer> class FrameExecutor {
                 return fail(error);
             return Ok(empty{});
         }
-        active_ = Some(Active{id, identity, 0, rstd::move(inputs)});
+        active_ = Some(Active{id, identity, 0, rstd::move(inputs), 0, rstd::move(packet.view)});
         pending_ = None();
         synchronize();
         if (closing_ || rebuild_ || suspended()) return Ok(empty{});
@@ -388,9 +399,9 @@ class FrameLoop : public FrameExecutor<> {
     }
     auto pump_with_clock(auto clock) -> Result<empty, gpu::Error> {
         return FrameExecutor<>::pump_with_clock(clock, [&]() -> Result<FramePacket, FrameError> {
-            auto plan = session_.plan_frame();
-            if (plan.is_err()) return Err(plan.unwrap_err());
-            return Ok(FramePacket{rstd::move(plan).unwrap(), session_.last_successful_input_timings()});
+            auto frame = session_.plan_ui_frame();
+            if (frame.is_err()) return Err(frame.unwrap_err());
+            return Ok(FramePacket{frame->plan(), session_.last_successful_input_timings(), false, Some(rstd::move(*frame))});
         });
     }
 };
