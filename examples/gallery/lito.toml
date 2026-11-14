@@ -14,6 +14,7 @@ link-stdlib = false
 options = ["-Wall", "-Wextra", "-Wno-missing-field-initializers", "-Werror=return-type"]
 
 [dependencies]
+vui-compose-plugin = { path = "../../plugin" }
 vui-controls = { workspace = true }
 vui-compose = { workspace = true }
 rstd-std = { workspace = true }

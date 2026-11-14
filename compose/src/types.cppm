@@ -22,6 +22,40 @@ class Key {
     auto label() const -> String {
         return named_ ? String::make(name_.as_str()) : rstd::format("{}", number_);
     }
+    auto encoded() const -> String {
+        return named_ ? rstd::format("s{}:{}", name_.len(), name_.as_str()) : rstd::format("n{}", number_);
+    }
+};
+struct CallSite {
+    Serial id{};
+    rstd::source_location source;
+};
+struct CallIdentity {
+    Serial site{}, occurrence{};
+    Vec<Key> groups;
+    explicit CallIdentity(Serial value = 0, Serial index = 0) : site(value), occurrence(index) {}
+    CallIdentity(const CallIdentity &other) : site(other.site), occurrence(other.occurrence) {
+        for (const auto &key : other.groups) groups.push(Key(key));
+    }
+    CallIdentity(CallIdentity &&) = default;
+    auto operator=(CallIdentity other) -> CallIdentity & {
+        site = other.site; occurrence = other.occurrence; groups = rstd::move(other.groups); return *this;
+    }
+    auto same_group(const CallIdentity &other) const -> bool {
+        if (site != other.site || groups.len() != other.groups.len()) return false;
+        for (usize index{}; index < groups.len(); ++index) if (groups[index] != other.groups[index]) return false;
+        return true;
+    }
+    auto memory_key(Option<Key> explicit_key = {}) const -> Key {
+        auto name = rstd::format("{}:{}:{}", groups.len(), site, explicit_key.is_some() ? Serial{} : occurrence);
+        for (const auto &group : groups) {
+            auto value = group.encoded(); name.push_str(rstd::format("/{}", value.as_str()).as_str());
+        }
+        if (explicit_key.is_some()) {
+            auto value = explicit_key->encoded(); name.push_str(rstd::format("/{}", value.as_str()).as_str());
+        }
+        return Key{name.as_str()};
+    }
 };
 enum class ComposeStage { Closed, Key, Type, Evaluation, State, Prepare, Publish, Input, Action, Effect, Limit, External };
 inline auto compose_operation_name(ComposeStage stage) -> ref<str> {
@@ -41,7 +75,7 @@ inline auto compose_operation_name(ComposeStage stage) -> ref<str> {
     }
     return "compose"_str;
 }
-struct ComposeError {
+struct [[clang::annotate("vui.compose.error.v1")]] ComposeError {
     ComposeStage stage{ComposeStage::Evaluation};
     Option<UiError> ui;
     Option<state::StateError> state;
@@ -70,6 +104,7 @@ inline auto state_error(state::StateError error) -> ComposeError {
 struct CommitReport {
     Serial revision{}, attempt{}, evaluations{};
     usize created{}, updated{}, destroyed{};
+    Serial comparisons{}, skipped{};
 };
 struct ComposeDiagnostics {
     Vec<ComposeError> entries;

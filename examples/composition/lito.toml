@@ -1,0 +1,20 @@
+[package]
+name = "vui-composition"
+version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "vui-composition"
+module = "vui.examples.composition"
+sources = ["main.cppm", "view.cppm", "counter.cppm"]
+link-stdlib = false
+
+[usage]
+options = ["-Wall", "-Wextra", "-Wno-missing-field-initializers", "-Werror=return-type"]
+
+[dependencies]
+vui-compose-plugin = { path = "../../plugin" }
+vui-compose = { workspace = true }
+vui-examples = { workspace = true }
+rstd-std = { workspace = true }
+rstd-nostd = { workspace = true, usage = "link" }

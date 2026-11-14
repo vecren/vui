@@ -1,0 +1,9 @@
+[package]
+name = "vui-compose-plugin"
+version.workspace = true
+license.workspace = true
+standard = "c++23"
+
+[plugin]
+module = "vui.compose.plugin"
+sources = ["src/lib.cppm", "src/plugin.cpp"]

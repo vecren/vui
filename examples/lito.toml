@@ -1,6 +1,6 @@
 [workspace]
 name = "vui-examples"
-members = ["common", "gallery", "2048", "interaction"]
+members = ["common", "gallery", "2048", "interaction", "composition"]
 
 [workspace.package]
 version = "0.1.0"

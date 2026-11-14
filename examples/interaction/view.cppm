@@ -7,14 +7,17 @@ using namespace rstd::literals;
 export namespace interaction_example {
 using namespace vui;
 namespace cx = vui::compose;
+namespace theme = examples::theme;
 class Panel {
     enum class Mode { Idle, Direct, Spring };
     UiSession &session_;
     BindingGuard session_lifetime_{session_.document().lifetime()};
     UiId root_, shade_, curtain_, content_root_, handle_;
     cx::NodeRef shade_ref_, curtain_ref_, content_ref_, handle_ref_;
-    Size size_{640, 520};
-    auto content(cx::CompositionContext &, rstd::rc::Weak<Panel>) -> cx::ComposeResult<cx::Element>;
+    state::Graph geometry_;
+    state::Cell<Size> size_{geometry_.cell(Size{640, 520}).unwrap()};
+    [[vui::compose]]
+    static auto content(rstd::rc::Weak<Panel>) -> cx::ComposeResult<cx::Element>;
     void stop();
     Scalar pending_delta_{};
     Scalar height_{340};
@@ -32,6 +35,9 @@ class Panel {
     MotionRegistration motion_;
 
     auto ui() -> UiDocument & { return session_.document(); }
+    static auto panel_height(Size size) -> Scalar {
+        return rstd::min(Scalar(340), rstd::cmp::max(Scalar(180), size.height - 40));
+    }
     void acquire() {
         PropertyKey keys[] = {{shade_, PresentationProperty::Transform},
                               {curtain_, PresentationProperty::Opacity}};
@@ -40,7 +46,7 @@ class Panel {
     auto presentation(Scalar value) const -> PresentationBatch {
         PresentationBatch batch;
         batch.transform(shade_, {1, 0, 0, 1, 0, (value - 1) * height_ + 40});
-        batch.opacity(curtain_, rstd::min(Scalar(.65), rstd::cmp::max(Scalar(0), value * .65)));
+        batch.opacity(curtain_, rstd::min(Scalar(.24), rstd::cmp::max(Scalar(0), value * .24)));
         return batch;
     }
     void grab(EventContext &context, const RoutedEvent &event) {
@@ -66,8 +72,8 @@ class Panel {
         pointer_ = None();
         session_.motion().request(motion_.id).unwrap();
     }
-    static auto label(ref<str> value, Point origin, Scalar size, Color color) -> cx::Element {
-        return cx::text(value).format(TextFormatBuilder{}.size(size).build()).color(color)
+    static auto label(ref<str> value, Point origin, Scalar size, Color color = theme::ink, bool bold = false) -> cx::Element {
+        return theme::label(value, size, color, bold)
             .style(NodeStyleBuilder{}.transform({1, 0, 0, 1, origin.x, origin.y}).hit_test_visible(false).build());
     }
 
@@ -75,7 +81,7 @@ class Panel {
     explicit Panel(UiSession &session) : session_(session) {
         auto service = Box<vectext::SystemTextService>::make();
         ui().set_text_service(Box<TextService>::from_raw(rstd::move(service).into_raw().template cast<TextService>())).unwrap();
-        root_ = ui().create<Stack>(NodeStyleBuilder{examples::block(640, 520, {.91f, .94f, .97f, 1})}.focusable(true).build()).unwrap();
+        root_ = ui().create<Stack>(NodeStyleBuilder{examples::block(640, 520, theme::canvas)}.focusable(true).build()).unwrap();
     }
     static auto make(UiSession &session) -> rstd::rc::Rc<Panel>;
     void close() {
@@ -103,11 +109,12 @@ class Panel {
     auto value() const -> ScalarMotion { return state_; }
     auto dragging() const -> bool { return mode_ == Mode::Direct; }
     void resize(const SurfaceInfo &surface) {
-        if (size_ == surface.logical_size) return;
-        size_ = surface.logical_size;
-        height_ = rstd::min(Scalar(340), rstd::cmp::max(Scalar(180), size_.height - 40));
-        ui().set_layout(root_, LayoutStyleBuilder{}.width(size_.width).height(size_.height).build()).unwrap();
-        if (auto composition = ui().state<cx::Composition>(root_)) composition->invalidate();
+        auto previous = state::read(size_.value()).unwrap();
+        auto size = surface.logical_size;
+        if (previous.value() == size) return;
+        height_ = panel_height(size);
+        ui().set_layout(root_, LayoutStyleBuilder{}.width(size.width).height(size.height).build()).unwrap();
+        size_.set(size).unwrap();
     }
     auto observe(InputContext &context, const InputPacket &packet) -> InputDecision {
         const auto &input = packet.input;
@@ -284,20 +291,29 @@ void Panel::stop() {
     if (lease_.active() && ui().valid(shade_)) ui().release_presentation(lease_);
 }
 
-auto Panel::content(cx::CompositionContext &scope, rstd::rc::Weak<Panel> weak) -> cx::ComposeResult<cx::Element> {
-    auto remembered = scope.remember<rstd::rc::Rc<Panel>>(cx::Key{"panel"_str}, [weak]() -> cx::ComposeResult<rstd::rc::Rc<Panel>> {
+auto Panel::content(rstd::rc::Weak<Panel> weak) -> cx::ComposeResult<cx::Element> {
+    auto remembered = cx::remember<rstd::rc::Rc<Panel>>([weak]() -> cx::ComposeResult<rstd::rc::Rc<Panel>> {
         auto value = weak.upgrade();
         if (value.is_none()) return Err(cx::ComposeError(cx::ComposeStage::Closed));
         return Ok(rstd::move(*value));
     });
     if (remembered.is_err()) return Err(remembered.unwrap_err());
-    auto child = scope.remember<rstd::rc::Rc<Content>>(cx::Key{"content"_str}, [this, weak]() -> cx::ComposeResult<rstd::rc::Rc<Content>> {
-        return Ok(rstd::rc::make_rc<Content>(session_, weak, UiId{}));
+    auto owner = remembered.unwrap().get();
+    if (owner.is_err()) return Err(owner.unwrap_err());
+    auto panel = owner.unwrap()->clone();
+    auto dimensions = cx::read(panel->size_.value());
+    if (dimensions.is_err()) return Err(dimensions.unwrap_err());
+    auto size = dimensions.unwrap().value();
+    auto height = panel_height(size);
+    auto child = cx::remember<rstd::rc::Rc<Content>>([panel, weak] {
+        return rstd::rc::make_rc<Content>(panel->session_, weak, UiId{});
     });
     if (child.is_err()) return Err(child.unwrap_err());
-    auto content = child.unwrap().get().unwrap()->clone();
+    auto child_owner = child.unwrap().get();
+    if (child_owner.is_err()) return Err(child_owner.unwrap_err());
+    auto content = child_owner.unwrap()->clone();
     auto receiver = content.downgrade();
-    auto installed = scope.effect(cx::Key{"input"_str}, {}, [weak, receiver](cx::CommittedContext &context) -> cx::ComposeResult<cx::EffectLease> {
+    auto installed = cx::effect({}, [weak, receiver](cx::CommittedContext &context) -> cx::ComposeResult<cx::EffectLease> {
         auto panel = weak.upgrade(); auto content = receiver.upgrade();
         if (panel.is_none() || content.is_none()) return Err(cx::ComposeError(cx::ComposeStage::Closed));
         auto target = panel->get(); auto body = content->get(); auto &session = context.session();
@@ -327,8 +343,8 @@ auto Panel::content(cx::CompositionContext &scope, rstd::rc::Weak<Panel> weak) -
         return Ok(rstd::move(cleanup));
     });
     if (installed.is_err()) return Err(installed.unwrap_err());
-    auto size_key = rstd::format("{}x{}", size_.width, size_.height);
-    auto remapped = scope.effect(cx::Key{"geometry"_str}, cx::EffectKeys{cx::Key{size_key.as_str()}},
+    auto size_key = rstd::format("{}x{}", size.width, size.height);
+    auto remapped = cx::effect(cx::EffectKeys{cx::Key{size_key.as_str()}},
         [weak](cx::CommittedContext &) -> cx::ComposeResult<cx::EffectLease> {
             auto panel = weak.upgrade(); if (panel.is_none()) return Err(cx::ComposeError(cx::ComposeStage::Closed));
             auto target = panel->get(); auto batch = target->presentation(target->state_.value);
@@ -338,34 +354,50 @@ auto Panel::content(cx::CompositionContext &scope, rstd::rc::Weak<Panel> weak) -
         });
     if (remapped.is_err()) return Err(remapped.unwrap_err());
     Vec<cx::Element> rows;
+    const ref<str> titles[]{"直接拖动"_str, "松手继续"_str, "再次抓取"_str, "滚动与交接"_str, "键盘操作"_str};
+    const ref<str> descriptions[]{"面板跟随手指或鼠标。"_str, "带着当前速度自然停下。"_str,
+        "运动中也能接着拖动。"_str, "滚动到边缘，继续拖动面板。"_str, "空格或 Enter 展开与收起。"_str};
     for (unsigned i{}; i < 5; ++i)
-        rows.push(cx::native(LayoutKind::Leaf).style(NodeStyleBuilder{examples::block(580, 64, {.16f + .03f * i, .34f, .46f, 1})}.radius(12).build()));
+        rows.push(cx::stack({label(titles[i], {16, 8}, 14, theme::ink, true),
+            label(descriptions[i], {16, 34}, 12, theme::muted)})
+            .style(examples::block(rstd::cmp::max(Scalar(0), size.width - 60), 64, theme::canvas, 8)));
     auto viewport = cx::native(LayoutKind::Viewport, cx::elements({cx::column(rstd::move(rows)).gap(10)}))
-        .style(NodeStyleBuilder{examples::block(rstd::cmp::max(Scalar(0), size_.width - 60), height_ - 172, {0, 0, 0, 0})}
-            .transform({1, 0, 0, 1, 30, 116}).build()).reference(content_ref_);
-    auto handle = cx::native(LayoutKind::Leaf).style(NodeStyleBuilder{examples::block(64, 5, {.65f, .76f, .84f, 1})}
-        .transform({1, 0, 0, 1, (size_.width - 64) / 2, height_ - 22}).radius(2.5).build()).reference(handle_ref_);
-    auto shade = cx::stack({label("用户定义的面板"_str, {30, 35}, 24, {1, 1, 1, 1}),
-        label("滚动到边缘，再拖动面板。"_str, {30, 83}, 17, {.73f, .84f, .91f, 1}), viewport, handle})
-        .style(NodeStyleBuilder{examples::block(size_.width, height_, {.08f, .15f, .23f, 1})}
-            .transform({1, 0, 0, 1, 0, 40 - 340}).radius(16).build()).reference(shade_ref_);
-    return Ok(cx::fragment({
-        label("跟手交互 / Drag"_str, {32, 100}, 25, {.08f, .15f, .23f, 1}),
-        label("拖动把手，松手后继续运动。"_str, {32, 155}, 17, {.25f, .34f, .43f, 1}),
-        label("运动中再次抓取；空格展开或收起。"_str, {32, 190}, 17, {.25f, .34f, .43f, 1}),
-        cx::native(LayoutKind::Leaf).style(NodeStyleBuilder{examples::block(size_.width, size_.height, {0, 0, 0, 1})}
-            .opacity(0).hit_test_visible(false).build()).reference(curtain_ref_), shade,
-    }));
+        .style(NodeStyleBuilder{examples::block(rstd::cmp::max(Scalar(0), size.width - 60), height - 172, {0, 0, 0, 0})}
+            .transform({1, 0, 0, 1, 30, 116}).build()).reference(panel->content_ref_);
+    auto handle = cx::native(LayoutKind::Leaf).style(NodeStyleBuilder{examples::block(64, 5, theme::accent)}
+        .transform({1, 0, 0, 1, (size.width - 64) / 2, height - 22}).radius(2.5).build()).reference(panel->handle_ref_);
+    auto shade = cx::stack({label("交互面板"_str, {30, 27}, 22, theme::ink, true),
+        label("滚动内容，或拖动底部把手。"_str, {30, 73}, 13, theme::muted), viewport, handle})
+        .style(NodeStyleBuilder{examples::block(size.width, height, theme::surface)}
+            .transform({1, 0, 0, 1, 0, 40 - height}).radius(16).build())
+        .key(cx::Key{"panel"_str}).reference(panel->shade_ref_);
+    Vec<cx::Element> page;
+    auto inset = size.width < 400 ? Scalar(24) : Scalar(32);
+    page.push(label("vui interaction"_str, {inset, 88}, size.width < 400 ? 24 : 28, theme::ink, true));
+    page.push(label("向下拖动顶部把手，试试跟手交互。"_str, {inset, 136}, size.width < 400 ? 12 : 14, theme::muted));
+    if (size.height >= 430) {
+        page.push(cx::native(LayoutKind::Leaf).style(NodeStyleBuilder{
+            examples::block(size.width - inset * 2, 208, theme::surface, 12)}
+            .transform({1, 0, 0, 1, inset, 192}).build()));
+        page.push(label("从拖动开始"_str, {inset + 24, 216}, 18, theme::ink, true));
+        page.push(label("松手后，面板继续运动。\n运动中可以再次抓取。"_str,
+            {inset + 24, 258}, 14, theme::muted));
+        if (size.width >= 480)
+            page.push(label("↓"_str, {size.width - inset - 92, 242}, 48, theme::accent));
+    }
+    if (size.height >= 480)
+        page.push(label("空格或 Enter 展开与收起，Esc 退出。"_str, {inset, size.height - 64}, 12, theme::muted));
+    page.push(cx::native(LayoutKind::Leaf).style(NodeStyleBuilder{examples::block(size.width, size.height, {0, 0, 0, 1})}
+        .opacity(0).hit_test_visible(false).build()).key(cx::Key{"curtain"_str}).reference(panel->curtain_ref_));
+    page.push(rstd::move(shade));
+    return Ok(cx::fragment(rstd::move(page)));
 }
 
 auto Panel::make(UiSession &session) -> rstd::rc::Rc<Panel> {
     auto value = rstd::rc::make_rc<Panel>(session);
     auto weak = value.downgrade();
     auto composition = cx::Composition::create(session, value->root_).unwrap();
-    composition.set_content([weak](cx::CompositionContext &scope) -> cx::ComposeResult<cx::Element> {
-        auto value = weak.upgrade(); if (value.is_none()) return Err(cx::ComposeError(cx::ComposeStage::Closed));
-        return value->get()->content(scope, weak);
-    }).unwrap();
+    composition.set_content(content(weak)).unwrap();
     session.document().attach_state(value->root_, rstd::move(composition)).unwrap();
     return value;
 }

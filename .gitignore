@@ -2,3 +2,4 @@ build/
 .lito/
 /AGENTS.md
 /.vscode/
+.cache/

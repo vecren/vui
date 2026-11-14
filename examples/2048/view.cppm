@@ -17,8 +17,17 @@ class View {
         unsigned cell;
         cx::NodeRef node;
     };
+    struct Model {
+        Vec<Tile> tiles;
+        uint64_t score{};
+        Serial tile_epoch{};
+        bool won{}, over{}, pop_pending{};
+    };
     UiSession &session_;
     Binding lifetime_{session_.document().bindings().make()};
+    state::Graph graph_;
+    state::Cell<rstd::rc::Rc<Model>> model_{graph_.cell(rstd::rc::make_rc<Model>(),
+        [](const auto &a, const auto &b) { return a.get() == b.get(); }).unwrap()};
     Option<cx::Composition> composition_;
     Game game_;
     UiId root_;
@@ -69,14 +78,15 @@ class View {
         return cx::text(value).format(TextFormatBuilder{}.size(size).wrap(TextWrap::None).bold(bold).build())
             .color(tint).style(NodeStyleBuilder{}.transform({1, 0, 0, 1, at.x, at.y}).hit_test_visible(false).build());
     }
-    template <class F> auto button(ref<str> title, Scalar x, F clicked, bool visible = true) -> cx::Element {
+    template <class F> static auto button(ref<str> title, Scalar x, F clicked, bool visible = true) -> cx::Element {
         return cx::button(label(title, 17, {}, true, {1, 1, 1, 1})
                 .style(NodeStyleBuilder{}.horizontal(Alignment::Center).vertical(Alignment::Center).hit_test_visible(false).build()),
             rstd::move(clicked), ButtonStyleBuilder{}.normal(ink).pressed({.01, .025, .05, 1})
                 .focused({.035, .12, .26, 1}).radius(10).build())
             .style(NodeStyleBuilder{}.width(210).height(48).transform({1, 0, 0, 1, x, 562}).visible(visible).build());
     }
-    auto tile(const Tile &value) -> cx::Element {
+    [[vui::compose]]
+    static auto tile(Tile value) -> cx::Element {
         auto number = rstd::format("{}", value.value);
         Scalar size = value.value < 128 ? 40 : value.value < 1024 ? 34 : value.value < 16384 ? 28 : 19;
         auto tint = value.value == 32 || value.value == 64 || value.value > 2048 ? Color{1, 1, 1, 1} : ink;
@@ -84,21 +94,25 @@ class View {
             .style(NodeStyleBuilder{}.horizontal(Alignment::Center).vertical(Alignment::Center).hit_test_visible(false).build())})
             .style(NodeStyleBuilder{examples::block(cell, cell, color(value.value), 10)}
                 .transform(position(value.cell)).hit_test_visible(false).build())
-            .key(cx::Key{value.id}).reference(value.node);
+            .reference(value.node);
     }
-    auto content(cx::CompositionContext &scope) -> cx::ComposeResult<cx::Element> {
+    [[vui::compose]]
+    static auto content(cx::Borrowed<View> owner, state::Value<rstd::rc::Rc<Model>> source) -> cx::ComposeResult<cx::Element> {
+        auto observed = cx::read(source);
+        if (observed.is_err()) return Err(observed.unwrap_err());
+        auto snapshot = observed.unwrap();
+        const auto &model = *snapshot.value();
         Vec<cx::Element> cells;
         for (unsigned i{}; i < 16; ++i)
             cells.push(cx::native(LayoutKind::Leaf).style(NodeStyleBuilder{
                 examples::block(cell, cell, {.82, .87, .92, 1}, 10)}.transform(position(i)).hit_test_visible(false).build()));
-        for (const auto &value : tiles_) cells.push(tile(value));
-        auto score = rstd::format("{}", game_.board().score);
-        bool won = game_.reached_2048() && !continued_;
-        auto message = !game_.can_move() ? "没有可移动的方块了，再来一局吧。"_str
-            : won ? "合成了 2048！还想挑战更大的数字吗？"_str : "合并相同数字，向 2048 前进。"_str;
-        auto effect = scope.effect(cx::Key{"tiles"_str}, cx::EffectKeys{cx::Key{tile_epoch_}},
-            [this](cx::CommittedContext &) -> cx::ComposeResult<cx::EffectLease> {
-                if (pop_pending_) start_pop();
+        for (const auto &value : model.tiles) cells.push(tile(value).key(cx::Key{value.id}));
+        auto score = rstd::format("{}", model.score);
+        auto message = model.over ? "没有可移动的方块了，再来一局吧。"_str
+            : model.won ? "合成了 2048！还想挑战更大的数字吗？"_str : "合并相同数字，向 2048 前进。"_str;
+        auto effect = cx::effect(cx::EffectKeys{cx::Key{model.tile_epoch}},
+            [owner, pop = model.pop_pending](cx::CommittedContext &) -> cx::ComposeResult<cx::EffectLease> {
+                if (pop) owner->start_pop();
                 return Ok(cx::EffectLease{});
             });
         if (effect.is_err()) return Err(effect.unwrap_err());
@@ -109,11 +123,11 @@ class View {
                 examples::block(board_size, board_size, {.729, .788, .851, 1}, 16)}
                 .transform({1, 0, 0, 1, 0, 86}).build()),
             label(message, 16, {0, 538}),
-            button("重新开始"_str, 0, [this] { restart(); }),
-            button("继续挑战"_str, 234, [this] {
-                continued_ = true; update_status();
-                session_.input().focus_when_ready(root_, None<ScopeId>(), lifetime_.guard()).unwrap();
-            }, won),
+            button("重新开始"_str, 0, [owner] { owner->restart(); }),
+            button("继续挑战"_str, 234, [owner] {
+                owner->continued_ = true; owner->update_status();
+                owner->session_.input().focus_when_ready(owner->root_, None<ScopeId>(), owner->lifetime_.guard()).unwrap();
+            }, model.won),
             label("方向键移动 · Tab 切换按钮 · Esc 退出"_str, 14, {0, 628}),
         }).style(examples::block(board_size, 650, {0, 0, 0, 0})));
     }
@@ -122,7 +136,16 @@ class View {
         for (unsigned i{}; i < 16; ++i)
             if (auto value = game_.board().cells[i]) tiles_.push(Tile{next_tile_++, value, i, {}});
     }
-    void update_status() { if (composition_.is_some()) composition_->invalidate(); }
+    void update_status() {
+        Model next;
+        for (auto tile : tiles_) next.tiles.push(rstd::move(tile));
+        next.score = game_.board().score;
+        next.tile_epoch = tile_epoch_;
+        next.won = game_.reached_2048() && !continued_;
+        next.over = !game_.can_move();
+        next.pop_pending = pop_pending_;
+        model_.set(rstd::rc::make_rc<Model>(rstd::move(next))).unwrap();
+    }
     void watch(AnimationId animation, bool sliding) {
         ++pending_;
         auto generation = generation_;
@@ -198,9 +221,9 @@ class View {
         ui().set_text_service(Box<TextService>::from_raw(rstd::move(service).into_raw().template cast<TextService>())).unwrap();
         root_ = ui().create<CustomLayout>(NodeStyleBuilder{examples::block(520, 720, background)}.focusable(true).build()).unwrap();
         ui().install_layout(root_, ReferenceCanvas{{500, 700}, CanvasFit::Contain, {.5, .5}, true, Some(Scalar(1.2))}).unwrap();
-        ui().mount(root_).unwrap(); reset_tiles();
+        ui().mount(root_).unwrap(); reset_tiles(); update_status();
         composition_ = Some(cx::Composition::create(session_, root_).unwrap());
-        composition_->set_content([this](cx::CompositionContext &scope) { return content(scope); }).unwrap();
+        composition_->set_content(content(cx::borrow(*this), model_.value())).unwrap();
         const RoutePhase phases[]{RoutePhase::Target, RoutePhase::Capture};
         for (auto phase : phases)
             session_.input().on(root_, EventType::KeyDown, lifetime_.guard(),

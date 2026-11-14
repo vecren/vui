@@ -2,6 +2,7 @@ export module vui.compose:runtime;
 import :element;
 import :types;
 using namespace rstd::prelude;
+using namespace rstd::literals;
 
 export namespace vui::compose {
 struct MemoryPayload {
@@ -17,10 +18,11 @@ enum class MemoryKind { Remember, State, Node };
 struct MemorySlot {
     Key key;
     MemoryKind kind;
+    EffectKeys dependencies;
     rstd::rc::Rc<MemoryPayload> payload;
     bool alive{true}, committed{};
-    MemorySlot(Key name, MemoryKind value, rstd::rc::Rc<MemoryPayload> data)
-        : key(rstd::move(name)), kind(value), payload(rstd::move(data)) {}
+    MemorySlot(Key name, MemoryKind value, rstd::rc::Rc<MemoryPayload> data, EffectKeys keys = {})
+        : key(rstd::move(name)), kind(value), dependencies(rstd::move(keys)), payload(rstd::move(data)) {}
 };
 template <class T> class Remembered {
     rstd::rc::Weak<MemorySlot> slot_;
@@ -99,18 +101,19 @@ struct ScopeDraft {
     Vec<rstd::rc::Rc<DependencyWatch>> reads;
     explicit ScopeDraft(rstd::rc::Rc<ScopeState> value) : scope(rstd::move(value)) {}
     template <class T, class F>
-    auto memory(MemoryKind kind, Key key, F make) -> ComposeResult<rstd::rc::Rc<MemorySlot>> {
+    auto memory(MemoryKind kind, Key key, F make, EffectKeys dependencies = {}) -> ComposeResult<rstd::rc::Rc<MemorySlot>> {
         if (memories.len() >= usize(4096)) return Err(ComposeError(ComposeStage::Limit));
         for (const auto &slot : memories)
             if (slot->kind == kind && slot->key == key) return Err(ComposeError(ComposeStage::Key));
         for (auto &slot : scope.get()->memories)
             if (slot->kind == kind && slot->key == key) {
                 if (slot->payload->type() != rstd::any::TypeId::of<T>()) return Err(ComposeError(ComposeStage::Type));
-                memories.push(slot.clone()); return Ok(slot.clone());
+                if (slot->dependencies == dependencies) { memories.push(slot.clone()); return Ok(slot.clone()); }
+                break;
             }
         auto made = make(); if (made.is_err()) return Err(made.unwrap_err());
         auto value = rstd::rc::Rc<MemoryPayload>(new MemoryValue<T>(rstd::move(made.unwrap())));
-        auto slot = rstd::rc::make_rc<MemorySlot>(rstd::move(key), kind, rstd::move(value));
+        auto slot = rstd::rc::make_rc<MemorySlot>(rstd::move(key), kind, rstd::move(value), rstd::move(dependencies));
         memories.push(slot.clone()); return Ok(rstd::move(slot));
     }
 };
@@ -125,6 +128,7 @@ template <class T> struct NativeValue final : NativePayload {
 };
 struct ComposeInstance {
     Element element;
+    Option<Element> output;
     Option<UiId> id;
     rstd::rc::Rc<ScopeState> scope;
     Vec<rstd::rc::Rc<NativePayload>> native;
@@ -139,6 +143,7 @@ struct ComposeRoot {
 };
 struct ComposeDraft {
     Element element;
+    Option<Element> output;
     rstd::rc::Rc<ComposeInstance> instance;
     Option<Box<ScopeDraft>> scope;
     Vec<rstd::rc::Rc<NativePayload>> native;
@@ -167,7 +172,7 @@ class ComposeBuild {
     Vec<Box<rstd::dyn<rstd::FnMut<ComposeResult<empty>(CommittedContext &)>>>> actions;
     Vec<Box<rstd::dyn<rstd::FnMut<ComposeResult<empty>(UiDocument::PreparedEdit &)>>>> preparers;
     Vec<Box<rstd::dyn<rstd::FnMut<Result<empty, InputError>(EventRouter &, EventRouter::BehaviorEdit &, const UiDocument::PreparedEdit &)>>>> behaviors;
-    Serial evaluations{};
+    Serial evaluations{}, comparisons{}, skipped{};
     usize nodes{};
     ComposeBuild(UiSession &ui, vui::state::GraphView graph, rstd::rc::Rc<ComposeSignal> source)
         : session(ui), local(graph), signal(rstd::move(source)) {}
@@ -212,11 +217,58 @@ class ComposeBuild {
 class CompositionContext {
     ComposeBuild &build_;
     ScopeDraft &draft_;
+    Vec<Key> groups_;
+    struct Occurrence { CallIdentity identity; Serial next{}; };
+    Vec<Occurrence> occurrences_;
+    Vec<CallIdentity> groups_seen_;
+    Option<ComposeError> failure_;
   public:
+    class GroupGuard {
+        CompositionContext *context_{};
+        usize depth_{};
+      public:
+        GroupGuard(CompositionContext &context, usize depth) : context_(&context), depth_(depth) {}
+        GroupGuard(const GroupGuard &) = delete;
+        GroupGuard(GroupGuard &&other) : context_(rstd::exchange(other.context_, nullptr)), depth_(other.depth_) {}
+        ~GroupGuard() { if (context_) context_->groups_.truncate(depth_); }
+    };
     CompositionContext(ComposeBuild &build, ScopeDraft &draft) : build_(build), draft_(draft) {}
     CompositionContext(const CompositionContext &) = delete;
+    auto identity(Serial site) -> CallIdentity {
+        auto value = CallIdentity(site);
+        for (const auto &group : groups_) value.groups.push(Key(group));
+        for (auto &entry : occurrences_)
+            if (entry.identity.same_group(value)) { value.occurrence = entry.next++; return value; }
+        occurrences_.push({CallIdentity(value), 1}); return value;
+    }
+    auto slot(Serial site) -> Key { return identity(site).memory_key(); }
+    auto slot(Key key) -> Key {
+        auto value = CallIdentity();
+        for (const auto &group : groups_) value.groups.push(Key(group));
+        return value.memory_key(Some(rstd::move(key)));
+    }
+    auto group(Key key, Serial site, rstd::source_location source = {}) -> GroupGuard {
+        auto depth = groups_.len();
+        auto visit = CallIdentity(site);
+        for (const auto &group : groups_) visit.groups.push(Key(group));
+        visit.groups.push(Key(key));
+        for (const auto &previous : groups_seen_)
+            if (previous.same_group(visit)) {
+                failure_ = Some(ComposeError(ComposeStage::Key));
+                failure_->operation = String::make("duplicate composition group"_str);
+                failure_->source = source;
+                break;
+            }
+        groups_seen_.push(rstd::move(visit));
+        groups_.push(Key{site}); groups_.push(rstd::move(key));
+        return GroupGuard(*this, depth);
+    }
+    auto failure() const -> const Option<ComposeError> & { return failure_; }
     template <class T, class F> auto remember(Key key, F make) -> ComposeResult<Remembered<T>> {
-        auto slot = draft_.memory<T>(MemoryKind::Remember, rstd::move(key), rstd::move(make));
+        return remember<T>(rstd::move(key), {}, rstd::move(make));
+    }
+    template <class T, class F> auto remember(Key key, EffectKeys dependencies, F make) -> ComposeResult<Remembered<T>> {
+        auto slot = draft_.memory<T>(MemoryKind::Remember, rstd::move(key), rstd::move(make), rstd::move(dependencies));
         if (slot.is_err()) return Err(slot.unwrap_err());
         return Ok(Remembered<T>(slot.unwrap().downgrade()));
     }
@@ -277,6 +329,17 @@ class CompositionContext {
         return Ok(empty{});
     }
 };
+namespace [[clang::annotate("vui.compose.runtime.v1")]] compiler {
+inline thread_local CompositionContext *active_context{};
+class Activation {
+    CompositionContext *previous_;
+  public:
+    explicit Activation(CompositionContext &context) : previous_(active_context) { active_context = &context; }
+    Activation(const Activation &) = delete;
+    ~Activation() { active_context = previous_; }
+};
+inline auto current() -> CompositionContext * { return active_context; }
+}
 class PrepareContext {
     ComposeBuild &build_;
     ComposeDraft &draft_;
@@ -332,6 +395,13 @@ inline auto compatible(const ElementData &a, const ElementData &b) -> bool {
     if (a.kind == ElementKind::Custom) return a.adapter->type == b.adapter->type;
     return true;
 }
+inline auto identified(const ElementData &value) -> bool { return value.key.is_some() || value.identity.is_some(); }
+inline auto same_identity(const ElementData &a, const ElementData &b) -> bool {
+    if (a.identity.is_some() != b.identity.is_some() || a.key.is_some() != b.key.is_some()) return false;
+    if (a.identity.is_some() && !a.identity->same_group(*b.identity)) return false;
+    if (a.key.is_some()) return *a.key == *b.key;
+    return a.identity.is_some() && a.identity->occurrence == b.identity->occurrence;
+}
 auto ComposeBuild::reconcile(Element value, rstd::rc::Rc<ComposeInstance> previous, bool force, Index depth)
     -> ComposeResult<rstd::rc::Rc<ComposeDraft>> {
     if (++nodes > usize(65536) || depth >= 128) return Err(ComposeError(ComposeStage::Limit));
@@ -351,20 +421,42 @@ auto ComposeBuild::reconcile(Element value, rstd::rc::Rc<ComposeInstance> previo
     Vec<Element> children;
     if (data.kind == ElementKind::Component) {
         auto scope = draft.instance->scope ? draft.instance->scope.clone() : rstd::rc::make_rc<ScopeState>();
+        if (force && !draft.fresh && !scope->dirty && data.parameters) {
+            const auto &previous_parameters = draft.instance->element.data().parameters;
+            ++comparisons;
+            if (previous_parameters && data.parameters->type() == previous_parameters->type() &&
+                data.parameters->equal(*previous_parameters.get())) { force = false; ++skipped; }
+        }
         if (force || scope->dirty || draft.fresh) {
             ++evaluations; draft.scope = Some(Box<ScopeDraft>::make(scope));
             CompositionContext context(*this, **draft.scope);
             auto evaluate = data.view.clone();
             auto evaluated = [&]() -> ComposeResult<Element> {
+                compiler::Activation activation(context);
                 auto read = session.document().acquire_read();
                 if (read.is_err()) return Err(ComposeError(ComposeStage::Evaluation, Some(read.unwrap_err())));
                 auto guard = read.unwrap(); return evaluate.get()->invoke->operator()(context);
             }();
+            if (context.failure().is_some()) return Err(ComposeError(*context.failure()));
             if (evaluated.is_err()) return Err(evaluated.unwrap_err());
-            children.push(evaluated.unwrap()); force = true;
-        } else for (const auto &child : draft.instance->children) children.push(Element(child->element));
+            draft.output = Some(evaluated.unwrap()); force = true;
+        } else if (draft.instance->output.is_some()) draft.output = Some(Element(*draft.instance->output));
+        else return Err(ComposeError(ComposeStage::Type));
+        auto modified = apply_modifiers(Element(*draft.output), data.modifiers);
+        if (modified.is_err()) return Err(modified.unwrap_err());
+        children.push(modified.unwrap());
+        if (!data.modifiers.is_empty() || !draft.instance->element.data().modifiers.is_empty()) force = true;
     } else {
         for (const auto &child : data.children) children.push(Element(child));
+        if (data.kind == ElementKind::Fragment && !data.modifiers.is_empty()) {
+            if (children.len() != usize(1)) {
+                auto error = ComposeError(ComposeStage::Type);
+                error.operation = String::make("component modifiers require exactly one root"_str); return Err(rstd::move(error));
+            }
+            auto modified = apply_modifiers(rstd::move(children[usize()]), data.modifiers);
+            if (modified.is_err()) return Err(modified.unwrap_err());
+            children[usize()] = modified.unwrap();
+        }
         if (data.kind == ElementKind::Native) {
             if (force || draft.fresh) {
                 auto node = draft.fresh ? edit.create(data.layout, data.style) : edit.existing(*draft.instance->id);
@@ -402,16 +494,15 @@ auto ComposeBuild::reconcile(Element value, rstd::rc::Rc<ComposeInstance> previo
     Vec<ComposeRoot> descendants;
     for (usize i{}; i < children.len(); ++i) {
         const auto &child = children[i].data();
-        if (child.key.is_some())
+        if (identified(child))
             for (usize j{}; j < i; ++j)
-                if (children[j].data().key.is_some() && *children[j].data().key == *child.key)
+                if (same_identity(child, children[j].data()))
                     return Err(ComposeError(ComposeStage::Key));
         rstd::rc::Rc<ComposeInstance> old;
         for (usize j{}; j < draft.instance->children.len(); ++j) {
             if (used[j]) continue;
             const auto &candidate = draft.instance->children[j]->element.data();
-            bool match = child.key.is_some() ? candidate.key.is_some() && *child.key == *candidate.key
-                                            : candidate.key.is_none() && i == j;
+            bool match = identified(child) ? same_identity(child, candidate) : !identified(candidate) && i == j;
             if (match) { old = draft.instance->children[j].clone(); used[j] = true; break; }
         }
         if (old && !force && compatible(child, old->element.data()) && !dirty(*old.get())) {
@@ -422,7 +513,8 @@ auto ComposeBuild::reconcile(Element value, rstd::rc::Rc<ComposeInstance> previo
         if (built.is_err()) {
             auto error = built.unwrap_err();
             if (!error.source.line()) error.source = child.source;
-            auto label = child.key.is_some() ? child.key->label() : rstd::format("{}", i);
+            auto label = child.key.is_some() ? child.key->label() : child.identity.is_some()
+                ? rstd::format("{}#{}", child.identity->site, child.identity->occurrence) : rstd::format("{}", i);
             error.path = rstd::format("{}/{}", label.as_str(), error.path.as_str()); return Err(rstd::move(error));
         }
         auto child_plan = built.unwrap();
@@ -536,6 +628,7 @@ class CompositionRuntime {
             if (old_link.get() != next_link.get()) { old_link.get()->active = false; old_link.get()->alive = false; }
         }
         instance.element = draft.element; instance.native = rstd::move(draft.native);
+        if (draft.output.is_some()) instance.output = Some(Element(*draft.output));
         if (draft.fresh) instance.mounts = rstd::move(draft.mounts);
         instance.owns_children = draft.owns_children;
         if (draft.resolved.is_some()) instance.id = draft.resolved;
@@ -674,7 +767,7 @@ class CompositionRuntime {
             auto applied = (*action)(context); if (applied.is_err()) signal.get()->report(applied.unwrap_err());
         }
         activate(*draft.get(), context);
-        return Ok(CommitReport{report.revision, attempt_, build.evaluations, report.created, report.updated, report.retired.len()});
+        return Ok(CommitReport{report.revision, attempt_, build.evaluations, report.created, report.updated, report.retired.len(), build.comparisons, build.skipped});
     }
   public:
     rstd::rc::Rc<ComposeSignal> signal;
@@ -773,6 +866,15 @@ class Composition {
     template <class F> auto set_content(F evaluate, rstd::source_location source = rstd::source_location::current()) -> ComposeResult<empty> {
         if (!runtime_ || runtime_->signal->closed) return Err(ComposeError(ComposeStage::Closed));
         runtime_.get()->content(rstd::move(evaluate), source); return Ok(empty{});
+    }
+    auto set_content(Element value, rstd::source_location source = rstd::source_location::current()) -> ComposeResult<empty> {
+        return set_content([value = rstd::move(value)](CompositionContext &) -> ComposeResult<Element> {
+            return Ok(Element(value));
+        }, source);
+    }
+    auto set_content(ComposeResult<Element> value, rstd::source_location source = rstd::source_location::current()) -> ComposeResult<empty> {
+        if (value.is_err()) return Err(value.unwrap_err());
+        return set_content(value.unwrap(), source);
     }
     void invalidate() { if (runtime_) runtime_.get()->invalidate(); }
     void retry_effects() { if (runtime_) runtime_.get()->retry_effects(); }

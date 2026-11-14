@@ -1,6 +1,7 @@
 export module vui.examples:button_skin;
 import vui.controls;
 import vui.compose;
+import :style;
 using namespace rstd::prelude;
 
 export namespace examples {
@@ -10,10 +11,10 @@ struct ButtonSkin {
     NinePatchSpec border;
     Option<ImageRegion> icon;
     ButtonStatus status;
-    Color normal{.06f, .2f, .4f, 1}, pressed{.03f, .1f, .2f, 1}, focused{.12f, .35f, .65f, 1};
+    ButtonStyle appearance{theme::button_style()};
     auto paint(PaintContext &context) -> Result<empty, UiError> {
         auto size = context.size();
-        auto color = status.pressed ? pressed : status.focused ? focused : normal;
+        auto color = status.pressed ? appearance.pressed : status.focused ? appearance.focused : appearance.normal;
         context.nine_patch(frame, border, {0, 0, size.width, size.height}, color);
         if (icon.is_some()) {
             auto width = rstd::min(Scalar(24), rstd::min(size.width, size.height));
@@ -85,7 +86,7 @@ auto skinned_button(vui::compose::Element content, F clicked, ImageRegion frame,
 inline auto make_button_frame() -> ImageData {
     unsigned char pixels[36];
     for (unsigned i = 0; i < 9; ++i) {
-        auto value = static_cast<unsigned char>(i == 4 ? 200 : 255);
+        auto value = static_cast<unsigned char>(i == 4 ? 250 : 255);
         pixels[i * 4] = pixels[i * 4 + 1] = pixels[i * 4 + 2] = value;
         pixels[i * 4 + 3] = 255;
     }
