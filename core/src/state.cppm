@@ -1,5 +1,6 @@
 export module vui:state;
 import rstd;
+import ligraph;
 using namespace rstd::prelude;
 
 export namespace vui::state {
@@ -205,10 +206,30 @@ struct GraphData {
     }
     void dirty(NodeId value, InvalidationReason reason = InvalidationReason::Changed) {
         ++propagation;
-        Vec<NodeId> pending;
-        pending.push(NodeId(value));
-        for (usize i{}; i < pending.len(); ++i) {
-            auto key = pending[i];
+        auto view = ligraph::traversal_view<NodeId, StateError>(
+            [](NodeId) -> Result<empty, StateError> { return Ok(empty{}); },
+            [this](NodeId id) {
+                auto neighbors = rstd::iter::from_fn(
+                    [node = resolve(id), index = usize()]() mutable -> Option<NodeId> {
+                        if (!node || index == node->consumers.len())
+                            return None();
+                        return Some(NodeId(node->consumers[index++]));
+                    });
+                return Result<decltype(neighbors), StateError>(Ok(rstd::move(neighbors)));
+            });
+        Vec<NodeId> roots;
+        roots.push(NodeId(value));
+        auto pending = ligraph::bfs(rstd::move(view), roots.as_slice(), [this](NodeId id) {
+                           auto node = resolve(id);
+                           if (!node)
+                               return true;
+                           if (node->marked == propagation)
+                               return false;
+                           node.get()->marked = propagation;
+                           return true;
+                       }).unwrap();
+        while (auto next = pending.next()) {
+            auto key = rstd::move(*next).unwrap();
             auto node = resolve(key);
             for (auto &observer : observers)
                 if (observer.get()->active && observer.get()->value == key) {
@@ -217,13 +238,8 @@ struct GraphData {
                 }
             if (!node)
                 continue;
-            if (node.get()->marked == propagation)
-                continue;
-            node.get()->marked = propagation;
             node.get()->dirty = true;
             ++stats.invalidations;
-            for (auto consumer : node.get()->consumers)
-                pending.push(NodeId(consumer));
         }
     }
     void notify() {

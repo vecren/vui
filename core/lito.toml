@@ -61,6 +61,7 @@ sources = [
 
 
 [dependencies]
+ligraph = { workspace = true }
 vectext = { path = "../../vectext", pub = true }
 rstd-std = { workspace = true, pub = true }
 rstd-nostd = { workspace = true, usage = "link" }

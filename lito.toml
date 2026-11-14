@@ -12,6 +12,7 @@ exceptions = false
 rtti = false
 
 [workspace.dependencies]
+ligraph = { version = "0.1.0" }
 vui = { path = "core" }
 vui-render = { path = "render" }
 vui-controls = { path = "controls" }
