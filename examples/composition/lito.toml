@@ -14,7 +14,7 @@ options = ["-Wall", "-Wextra", "-Wno-missing-field-initializers", "-Werror=retur
 
 [dependencies]
 vui-compose-plugin = { path = "../../plugin" }
-vui-compose = { workspace = true }
+vui = { workspace = true }
 vui-examples = { workspace = true }
 rstd-std = { workspace = true }
 rstd-nostd = { workspace = true, usage = "link" }

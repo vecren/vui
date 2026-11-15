@@ -3,19 +3,52 @@ module;
 #include <xkbcommon/xkbcommon-compose.h>
 #include <xkbcommon/xkbcommon-keysyms.h>
 
-namespace vui_xkb_constants {
-inline constexpr auto tab = XKB_KEY_Tab, enter = XKB_KEY_Return, kp_enter = XKB_KEY_KP_Enter,
-    space = XKB_KEY_space, escape = XKB_KEY_Escape, left = XKB_KEY_Left, right = XKB_KEY_Right,
-    up = XKB_KEY_Up, down = XKB_KEY_Down, home = XKB_KEY_Home, end = XKB_KEY_End,
-    page_up = XKB_KEY_Page_Up, page_down = XKB_KEY_Page_Down, backspace = XKB_KEY_BackSpace,
-    del = XKB_KEY_Delete, iso_tab = XKB_KEY_ISO_Left_Tab, dead_acute = XKB_KEY_dead_acute;
-inline constexpr auto shift = XKB_MOD_NAME_SHIFT, control = XKB_MOD_NAME_CTRL,
-    alt = XKB_MOD_NAME_ALT, meta = XKB_MOD_NAME_LOGO;
-}
+inline constexpr auto alias_XKB_KEY_BackSpace = XKB_KEY_BackSpace;
+inline constexpr auto alias_XKB_KEY_Delete = XKB_KEY_Delete;
+inline constexpr auto alias_XKB_KEY_Down = XKB_KEY_Down;
+inline constexpr auto alias_XKB_KEY_End = XKB_KEY_End;
+inline constexpr auto alias_XKB_KEY_Escape = XKB_KEY_Escape;
+inline constexpr auto alias_XKB_KEY_Home = XKB_KEY_Home;
+inline constexpr auto alias_XKB_KEY_ISO_Left_Tab = XKB_KEY_ISO_Left_Tab;
+inline constexpr auto alias_XKB_KEY_KP_Enter = XKB_KEY_KP_Enter;
+inline constexpr auto alias_XKB_KEY_Left = XKB_KEY_Left;
+inline constexpr auto alias_XKB_KEY_Page_Down = XKB_KEY_Page_Down;
+inline constexpr auto alias_XKB_KEY_Page_Up = XKB_KEY_Page_Up;
+inline constexpr auto alias_XKB_KEY_Return = XKB_KEY_Return;
+inline constexpr auto alias_XKB_KEY_Right = XKB_KEY_Right;
+inline constexpr auto alias_XKB_KEY_Tab = XKB_KEY_Tab;
+inline constexpr auto alias_XKB_KEY_Up = XKB_KEY_Up;
+inline constexpr auto alias_XKB_KEY_dead_acute = XKB_KEY_dead_acute;
+inline constexpr auto alias_XKB_KEY_space = XKB_KEY_space;
+inline constexpr auto alias_XKB_MOD_NAME_ALT = XKB_MOD_NAME_ALT;
+inline constexpr auto alias_XKB_MOD_NAME_CTRL = XKB_MOD_NAME_CTRL;
+inline constexpr auto alias_XKB_MOD_NAME_LOGO = XKB_MOD_NAME_LOGO;
+inline constexpr auto alias_XKB_MOD_NAME_SHIFT = XKB_MOD_NAME_SHIFT;
 
-export module vui.host:ffi.xkb;
+#undef XKB_KEY_BackSpace
+#undef XKB_KEY_Delete
+#undef XKB_KEY_Down
+#undef XKB_KEY_End
+#undef XKB_KEY_Escape
+#undef XKB_KEY_Home
+#undef XKB_KEY_ISO_Left_Tab
+#undef XKB_KEY_KP_Enter
+#undef XKB_KEY_Left
+#undef XKB_KEY_Page_Down
+#undef XKB_KEY_Page_Up
+#undef XKB_KEY_Return
+#undef XKB_KEY_Right
+#undef XKB_KEY_Tab
+#undef XKB_KEY_Up
+#undef XKB_KEY_dead_acute
+#undef XKB_KEY_space
+#undef XKB_MOD_NAME_ALT
+#undef XKB_MOD_NAME_CTRL
+#undef XKB_MOD_NAME_LOGO
+#undef XKB_MOD_NAME_SHIFT
 
-export namespace vui::host::ffi::xkb {
+module vui.host:ffi.xkb;
+namespace ffi {
 using ::xkb_context;
 using ::xkb_context_flags;
 using ::xkb_rule_names;
@@ -48,27 +81,6 @@ using ::XKB_COMPOSE_FEED_ACCEPTED;
 using ::XKB_COMPOSE_COMPOSING;
 using ::XKB_COMPOSE_COMPOSED;
 using ::XKB_COMPOSE_CANCELLED;
-using ::vui_xkb_constants::tab;
-using ::vui_xkb_constants::iso_tab;
-using ::vui_xkb_constants::dead_acute;
-using ::vui_xkb_constants::enter;
-using ::vui_xkb_constants::kp_enter;
-using ::vui_xkb_constants::space;
-using ::vui_xkb_constants::escape;
-using ::vui_xkb_constants::left;
-using ::vui_xkb_constants::right;
-using ::vui_xkb_constants::up;
-using ::vui_xkb_constants::down;
-using ::vui_xkb_constants::home;
-using ::vui_xkb_constants::end;
-using ::vui_xkb_constants::page_up;
-using ::vui_xkb_constants::page_down;
-using ::vui_xkb_constants::backspace;
-using ::vui_xkb_constants::del;
-using ::vui_xkb_constants::shift;
-using ::vui_xkb_constants::control;
-using ::vui_xkb_constants::alt;
-using ::vui_xkb_constants::meta;
 using ::xkb_compose_table_new_from_locale;
 using ::xkb_compose_table_unref;
 using ::xkb_compose_state_new;
@@ -77,4 +89,26 @@ using ::xkb_compose_state_feed;
 using ::xkb_compose_state_get_status;
 using ::xkb_compose_state_get_utf8;
 using ::xkb_compose_state_reset;
-} // namespace vui::host::ffi::xkb
+
+inline constexpr auto XKB_KEY_BackSpace = alias_XKB_KEY_BackSpace;
+inline constexpr auto XKB_KEY_Delete = alias_XKB_KEY_Delete;
+inline constexpr auto XKB_KEY_Down = alias_XKB_KEY_Down;
+inline constexpr auto XKB_KEY_End = alias_XKB_KEY_End;
+inline constexpr auto XKB_KEY_Escape = alias_XKB_KEY_Escape;
+inline constexpr auto XKB_KEY_Home = alias_XKB_KEY_Home;
+inline constexpr auto XKB_KEY_ISO_Left_Tab = alias_XKB_KEY_ISO_Left_Tab;
+inline constexpr auto XKB_KEY_KP_Enter = alias_XKB_KEY_KP_Enter;
+inline constexpr auto XKB_KEY_Left = alias_XKB_KEY_Left;
+inline constexpr auto XKB_KEY_Page_Down = alias_XKB_KEY_Page_Down;
+inline constexpr auto XKB_KEY_Page_Up = alias_XKB_KEY_Page_Up;
+inline constexpr auto XKB_KEY_Return = alias_XKB_KEY_Return;
+inline constexpr auto XKB_KEY_Right = alias_XKB_KEY_Right;
+inline constexpr auto XKB_KEY_Tab = alias_XKB_KEY_Tab;
+inline constexpr auto XKB_KEY_Up = alias_XKB_KEY_Up;
+inline constexpr auto XKB_KEY_dead_acute = alias_XKB_KEY_dead_acute;
+inline constexpr auto XKB_KEY_space = alias_XKB_KEY_space;
+inline constexpr auto XKB_MOD_NAME_ALT = alias_XKB_MOD_NAME_ALT;
+inline constexpr auto XKB_MOD_NAME_CTRL = alias_XKB_MOD_NAME_CTRL;
+inline constexpr auto XKB_MOD_NAME_LOGO = alias_XKB_MOD_NAME_LOGO;
+inline constexpr auto XKB_MOD_NAME_SHIFT = alias_XKB_MOD_NAME_SHIFT;
+}

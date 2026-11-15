@@ -1,6 +1,6 @@
 [workspace]
 name = "vui"
-members = ["core", "controls", "host", "render", "image", "compose", "plugin"]
+members = ["core", "host", "render", "image", "plugin"]
 
 [workspace.package]
 version = "0.1.0"
@@ -14,10 +14,8 @@ rtti = false
 [workspace.dependencies]
 vui = { path = "core" }
 vui-render = { path = "render" }
-vui-controls = { path = "controls" }
 vui-host = { path = "host" }
 vui-image = { path = "image" }
-vui-compose = { path = "compose" }
 rstd-std = { version = "0.1.5" }
 vrento = { version = "0.1.0" }
 vectext = { version = "0.1.0" }

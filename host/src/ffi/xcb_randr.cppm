@@ -1,7 +1,8 @@
 module;
 #include <xcb/randr.h>
-export module vui.host:ffi.xcb_randr;
-export namespace vui::host::ffi::xcb_randr {
+
+module vui.host:ffi.xcb_randr;
+namespace ffi {
 using ::xcb_randr_id;
 using ::xcb_randr_mode_info_t;
 using ::xcb_randr_get_screen_resources_reply_t;

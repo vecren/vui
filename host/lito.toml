@@ -15,8 +15,8 @@ condition = 'target.os == "windows"'
 system-libraries = ["user32", "gdi32", "imm32"]
 
 [dependencies]
+rstd-dlopn = { version = "0.1.11", condition = 'target.os == "linux"' }
 vvk = { version = "0.1.2", pub = true }
-vui-host-wayland = { path = "wayland", condition = 'target.os == "linux"' }
 vui-render = { workspace = true, pub = true }
 
 [external-dependencies.pkg-config]
@@ -24,5 +24,8 @@ wayland-client = { module = "wayland-client", condition = 'target.os == "linux"'
 x11 = { module = "x11", condition = 'target.os == "linux"' }
 xcb = { module = "xcb", condition = 'target.os == "linux"' }
 xcb-randr = { module = "xcb-randr", condition = 'target.os == "linux"' }
-xi = { module = "xi", version = ">= 1.7", condition = 'target.os == "linux"' }
 xkbcommon = { module = "xkbcommon", condition = 'target.os == "linux"' }
+
+[build-tools.wayland-scanner]
+path = "wayland-scanner"
+condition = 'target.os == "linux"'

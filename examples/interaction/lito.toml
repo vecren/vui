@@ -11,7 +11,7 @@ link-stdlib = false
 
 [dependencies]
 vui-compose-plugin = { path = "../../plugin" }
-vui-compose = { workspace = true }
+vui = { workspace = true }
 rstd-std = { workspace = true }
 vui-examples = { workspace = true }
 rstd-nostd = { workspace = true, usage = "link" }

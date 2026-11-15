@@ -10,5 +10,5 @@ archive = "vui"
 
 [dependencies]
 ligraph = { workspace = true }
-vectext = { path = "../../vectext", pub = true }
+vectext = { workspace = true, pub = true }
 rstd-std = { workspace = true, pub = true }

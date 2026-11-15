@@ -3,16 +3,30 @@ module;
 #include <xcb/xcbext.h>
 #include <stdlib.h>
 
-namespace vui_xcb_constants {
-inline constexpr auto none = XCB_NONE, current_time = XCB_CURRENT_TIME, copy_from_parent = XCB_COPY_FROM_PARENT;
-inline constexpr auto selection_clear = XCB_SELECTION_CLEAR, selection_request = XCB_SELECTION_REQUEST,
-                      selection_notify = XCB_SELECTION_NOTIFY, property_notify = XCB_PROPERTY_NOTIFY,
-                      destroy_notify = XCB_DESTROY_NOTIFY;
-inline constexpr auto configure_notify = XCB_CONFIGURE_NOTIFY, reparent_notify = XCB_REPARENT_NOTIFY;
-}
+inline constexpr auto alias_XCB_CONFIGURE_NOTIFY = XCB_CONFIGURE_NOTIFY;
+inline constexpr auto alias_XCB_COPY_FROM_PARENT = XCB_COPY_FROM_PARENT;
+inline constexpr auto alias_XCB_CURRENT_TIME = XCB_CURRENT_TIME;
+inline constexpr auto alias_XCB_DESTROY_NOTIFY = XCB_DESTROY_NOTIFY;
+inline constexpr auto alias_XCB_NONE = XCB_NONE;
+inline constexpr auto alias_XCB_PROPERTY_NOTIFY = XCB_PROPERTY_NOTIFY;
+inline constexpr auto alias_XCB_REPARENT_NOTIFY = XCB_REPARENT_NOTIFY;
+inline constexpr auto alias_XCB_SELECTION_CLEAR = XCB_SELECTION_CLEAR;
+inline constexpr auto alias_XCB_SELECTION_NOTIFY = XCB_SELECTION_NOTIFY;
+inline constexpr auto alias_XCB_SELECTION_REQUEST = XCB_SELECTION_REQUEST;
 
-export module vui.host:ffi.xcb;
-export namespace vui::host::ffi::xcb {
+#undef XCB_CONFIGURE_NOTIFY
+#undef XCB_COPY_FROM_PARENT
+#undef XCB_CURRENT_TIME
+#undef XCB_DESTROY_NOTIFY
+#undef XCB_NONE
+#undef XCB_PROPERTY_NOTIFY
+#undef XCB_REPARENT_NOTIFY
+#undef XCB_SELECTION_CLEAR
+#undef XCB_SELECTION_NOTIFY
+#undef XCB_SELECTION_REQUEST
+
+module vui.host:ffi.xcb;
+namespace ffi {
 using ::xcb_connection_t;
 using ::xcb_window_t;
 using ::xcb_atom_t;
@@ -58,9 +72,6 @@ using ::xcb_poll_for_event;
 using ::xcb_poll_for_reply;
 using ::xcb_flush;
 using ::free;
-using ::vui_xcb_constants::none;
-using ::vui_xcb_constants::current_time;
-using ::vui_xcb_constants::copy_from_parent;
 using ::XCB_WINDOW_CLASS_INPUT_OUTPUT;
 using ::XCB_CW_EVENT_MASK;
 using ::XCB_EVENT_MASK_PROPERTY_CHANGE;
@@ -70,13 +81,17 @@ using ::XCB_ATOM_INTEGER;
 using ::XCB_ATOM_CARDINAL;
 using ::XCB_ATOM_STRING;
 using ::XCB_PROP_MODE_REPLACE;
-using ::vui_xcb_constants::selection_clear;
-using ::vui_xcb_constants::selection_request;
-using ::vui_xcb_constants::selection_notify;
-using ::vui_xcb_constants::property_notify;
-using ::vui_xcb_constants::destroy_notify;
 using ::XCB_PROPERTY_NEW_VALUE;
 using ::XCB_PROPERTY_DELETE;
-using ::vui_xcb_constants::configure_notify;
-using ::vui_xcb_constants::reparent_notify;
+
+inline constexpr auto XCB_CONFIGURE_NOTIFY = alias_XCB_CONFIGURE_NOTIFY;
+inline constexpr auto XCB_COPY_FROM_PARENT = alias_XCB_COPY_FROM_PARENT;
+inline constexpr auto XCB_CURRENT_TIME = alias_XCB_CURRENT_TIME;
+inline constexpr auto XCB_DESTROY_NOTIFY = alias_XCB_DESTROY_NOTIFY;
+inline constexpr auto XCB_NONE = alias_XCB_NONE;
+inline constexpr auto XCB_PROPERTY_NOTIFY = alias_XCB_PROPERTY_NOTIFY;
+inline constexpr auto XCB_REPARENT_NOTIFY = alias_XCB_REPARENT_NOTIFY;
+inline constexpr auto XCB_SELECTION_CLEAR = alias_XCB_SELECTION_CLEAR;
+inline constexpr auto XCB_SELECTION_NOTIFY = alias_XCB_SELECTION_NOTIFY;
+inline constexpr auto XCB_SELECTION_REQUEST = alias_XCB_SELECTION_REQUEST;
 }

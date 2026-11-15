@@ -2,18 +2,18 @@ module;
 #include <locale.h>
 #include <wchar.h>
 
-namespace vui_locale_constants {
-inline constexpr auto ctype_mask = LC_CTYPE_MASK;
-}
+inline constexpr auto alias_LC_CTYPE_MASK = LC_CTYPE_MASK;
 
-export module vui.host:ffi.locale;
+#undef LC_CTYPE_MASK
 
-export namespace vui::host::ffi::locale {
+module vui.host:ffi.locale;
+namespace ffi {
 using ::locale_t;
 using ::mbstate_t;
 using ::newlocale;
 using ::freelocale;
 using ::uselocale;
 using ::mbrtowc;
-using ::vui_locale_constants::ctype_mask;
+
+inline constexpr auto LC_CTYPE_MASK = alias_LC_CTYPE_MASK;
 }

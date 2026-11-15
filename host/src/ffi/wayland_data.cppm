@@ -1,7 +1,23 @@
 module;
 #include <wayland-client.h>
 
-namespace vui_wayland_data_inline {
+inline constexpr auto alias_WL_DATA_DEVICE_RELEASE_SINCE_VERSION = WL_DATA_DEVICE_RELEASE_SINCE_VERSION;
+
+#undef WL_DATA_DEVICE_RELEASE_SINCE_VERSION
+
+module vui.host:ffi.wayland_data;
+namespace ffi {
+using ::wl_data_device_manager;
+using ::wl_data_device_manager_interface;
+using ::wl_data_device;
+using ::wl_data_device_listener;
+using ::wl_data_offer;
+using ::wl_data_offer_listener;
+using ::wl_data_source;
+using ::wl_data_source_listener;
+
+inline constexpr auto WL_DATA_DEVICE_RELEASE_SINCE_VERSION = alias_WL_DATA_DEVICE_RELEASE_SINCE_VERSION;
+
 inline auto get_device(wl_data_device_manager *manager, wl_seat *seat) { return wl_data_device_manager_get_data_device(manager, seat); }
 inline auto create_source(wl_data_device_manager *manager) { return wl_data_device_manager_create_data_source(manager); }
 inline auto source_listener(wl_data_source *source, const wl_data_source_listener *listener, void *data) { return wl_data_source_add_listener(source, listener, data); }
@@ -17,33 +33,4 @@ inline auto offer_listener(wl_data_offer *offer, const wl_data_offer_listener *l
 inline void offer_receive(wl_data_offer *offer, const char *type, int fd) { wl_data_offer_receive(offer, type, fd); }
 inline void offer_accept(wl_data_offer *offer, uint32_t serial, const char *type) { wl_data_offer_accept(offer, serial, type); }
 inline void destroy_offer(wl_data_offer *offer) { wl_data_offer_destroy(offer); }
-inline constexpr auto device_release_version = WL_DATA_DEVICE_RELEASE_SINCE_VERSION;
-}
-
-export module vui.host:ffi.wayland_data;
-export namespace vui::host::ffi::wayland_data {
-using ::wl_data_device_manager;
-using ::wl_data_device_manager_interface;
-using ::wl_data_device;
-using ::wl_data_device_listener;
-using ::wl_data_offer;
-using ::wl_data_offer_listener;
-using ::wl_data_source;
-using ::wl_data_source_listener;
-using ::vui_wayland_data_inline::create_source;
-using ::vui_wayland_data_inline::source_listener;
-using ::vui_wayland_data_inline::source_offer;
-using ::vui_wayland_data_inline::destroy_source;
-using ::vui_wayland_data_inline::set_selection;
-using ::vui_wayland_data_inline::get_device;
-using ::vui_wayland_data_inline::destroy_manager;
-using ::vui_wayland_data_inline::device_listener;
-using ::vui_wayland_data_inline::device_version;
-using ::vui_wayland_data_inline::release_device;
-using ::vui_wayland_data_inline::destroy_device;
-using ::vui_wayland_data_inline::offer_listener;
-using ::vui_wayland_data_inline::offer_receive;
-using ::vui_wayland_data_inline::offer_accept;
-using ::vui_wayland_data_inline::destroy_offer;
-using ::vui_wayland_data_inline::device_release_version;
 }

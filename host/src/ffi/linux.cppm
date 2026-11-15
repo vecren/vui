@@ -9,34 +9,40 @@ module;
 #include <unistd.h>
 #include <linux/input-event-codes.h>
 
-namespace vui_linux_constants {
-inline constexpr auto input = POLLIN;
-inline constexpr auto output = POLLOUT;
-inline constexpr auto error = POLLERR | POLLHUP | POLLNVAL;
-inline constexpr auto invalid = POLLNVAL;
-inline constexpr auto disconnected = POLLERR | POLLHUP;
-inline constexpr auto interrupted = EINTR;
-inline constexpr auto again = EAGAIN;
-inline constexpr auto event_flags = EFD_CLOEXEC | EFD_NONBLOCK;
-inline constexpr auto button_left = BTN_LEFT;
-inline constexpr auto button_right = BTN_RIGHT;
-inline constexpr auto button_middle = BTN_MIDDLE;
-inline constexpr auto button_back = BTN_SIDE;
-inline constexpr auto button_forward = BTN_EXTRA;
-inline constexpr auto key_a = KEY_A;
-inline constexpr auto key_e = KEY_E;
-inline constexpr auto key_apostrophe = KEY_APOSTROPHE;
-inline constexpr auto map_read = PROT_READ;
-inline constexpr auto map_private = MAP_PRIVATE;
-inline auto map_failed(void *p) { return p == MAP_FAILED; }
-inline auto error_number() { return errno; }
-inline auto make_pipe(int *fds) { return pipe2(fds, O_CLOEXEC); }
-inline auto nonblocking(int fd) { auto flags = fcntl(fd, F_GETFL); return flags >= 0 && fcntl(fd, F_SETFL, flags | O_NONBLOCK) >= 0; }
-inline auto block_sigpipe() { sigset_t signals; return sigemptyset(&signals) == 0 && sigaddset(&signals, SIGPIPE) == 0 && pthread_sigmask(SIG_BLOCK, &signals, nullptr) == 0; }
-} // namespace vui_linux_constants
+inline constexpr auto alias_BTN_EXTRA = BTN_EXTRA;
+inline constexpr auto alias_BTN_LEFT = BTN_LEFT;
+inline constexpr auto alias_BTN_MIDDLE = BTN_MIDDLE;
+inline constexpr auto alias_BTN_RIGHT = BTN_RIGHT;
+inline constexpr auto alias_BTN_SIDE = BTN_SIDE;
+inline constexpr auto alias_EAGAIN = EAGAIN;
+inline constexpr auto alias_EINTR = EINTR;
+inline constexpr auto alias_KEY_A = KEY_A;
+inline constexpr auto alias_KEY_APOSTROPHE = KEY_APOSTROPHE;
+inline constexpr auto alias_KEY_E = KEY_E;
+inline constexpr auto alias_MAP_PRIVATE = MAP_PRIVATE;
+inline constexpr auto alias_POLLIN = POLLIN;
+inline constexpr auto alias_POLLNVAL = POLLNVAL;
+inline constexpr auto alias_POLLOUT = POLLOUT;
+inline constexpr auto alias_PROT_READ = PROT_READ;
 
-export module vui.host:ffi.linux;
-export namespace vui::host::ffi::linux {
+#undef BTN_EXTRA
+#undef BTN_LEFT
+#undef BTN_MIDDLE
+#undef BTN_RIGHT
+#undef BTN_SIDE
+#undef EAGAIN
+#undef EINTR
+#undef KEY_A
+#undef KEY_APOSTROPHE
+#undef KEY_E
+#undef MAP_PRIVATE
+#undef POLLIN
+#undef POLLNVAL
+#undef POLLOUT
+#undef PROT_READ
+
+module vui.host:ffi.linux;
+namespace ffi {
 using ::pollfd;
 using ::poll;
 using ::eventfd;
@@ -45,27 +51,32 @@ using ::write;
 using ::close;
 using ::mmap;
 using ::munmap;
-using ::vui_linux_constants::input;
-using ::vui_linux_constants::output;
-using ::vui_linux_constants::error;
-using ::vui_linux_constants::invalid;
-using ::vui_linux_constants::disconnected;
-using ::vui_linux_constants::interrupted;
-using ::vui_linux_constants::again;
-using ::vui_linux_constants::event_flags;
-using ::vui_linux_constants::button_left;
-using ::vui_linux_constants::button_right;
-using ::vui_linux_constants::button_middle;
-using ::vui_linux_constants::button_back;
-using ::vui_linux_constants::button_forward;
-using ::vui_linux_constants::key_a;
-using ::vui_linux_constants::key_e;
-using ::vui_linux_constants::key_apostrophe;
-using ::vui_linux_constants::map_read;
-using ::vui_linux_constants::map_private;
-using ::vui_linux_constants::map_failed;
-using ::vui_linux_constants::error_number;
-using ::vui_linux_constants::make_pipe;
-using ::vui_linux_constants::nonblocking;
-using ::vui_linux_constants::block_sigpipe;
+
+inline constexpr auto BTN_EXTRA = alias_BTN_EXTRA;
+inline constexpr auto BTN_LEFT = alias_BTN_LEFT;
+inline constexpr auto BTN_MIDDLE = alias_BTN_MIDDLE;
+inline constexpr auto BTN_RIGHT = alias_BTN_RIGHT;
+inline constexpr auto BTN_SIDE = alias_BTN_SIDE;
+inline constexpr auto EAGAIN = alias_EAGAIN;
+inline constexpr auto EINTR = alias_EINTR;
+inline constexpr auto KEY_A = alias_KEY_A;
+inline constexpr auto KEY_APOSTROPHE = alias_KEY_APOSTROPHE;
+inline constexpr auto KEY_E = alias_KEY_E;
+inline constexpr auto MAP_PRIVATE = alias_MAP_PRIVATE;
+inline constexpr auto POLLIN = alias_POLLIN;
+inline constexpr auto POLLNVAL = alias_POLLNVAL;
+inline constexpr auto POLLOUT = alias_POLLOUT;
+inline constexpr auto PROT_READ = alias_PROT_READ;
+
+inline constexpr auto error = POLLERR | POLLHUP | POLLNVAL;
+
+inline constexpr auto disconnected = POLLERR | POLLHUP;
+
+inline constexpr auto event_flags = EFD_CLOEXEC | EFD_NONBLOCK;
+
+inline auto map_failed(void *p) { return p == MAP_FAILED; }
+inline auto error_number() { return errno; }
+inline auto make_pipe(int *fds) { return pipe2(fds, O_CLOEXEC); }
+inline auto nonblocking(int fd) { auto flags = fcntl(fd, F_GETFL); return flags >= 0 && fcntl(fd, F_SETFL, flags | O_NONBLOCK) >= 0; }
+inline auto block_sigpipe() { sigset_t signals; return sigemptyset(&signals) == 0 && sigaddset(&signals, SIGPIPE) == 0 && pthread_sigmask(SIG_BLOCK, &signals, nullptr) == 0; }
 }

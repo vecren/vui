@@ -3,32 +3,31 @@ module;
 
 module vui.host;
 import vvk;
+import :platform;
 #if RSTD_OS_WINDOWS
-import :platform.win32_window;
 import :ffi.win32;
 using namespace rstd::prelude;
 
 namespace vui::host {
 namespace {
-namespace win = ffi::win32;
 struct WakeState {
-    win::HANDLE event{};
+    ffi::HANDLE event{};
     rstd::sync::Mutex<WakeStats> stats;
     bool repaint{};
-    explicit WakeState(win::HANDLE value): event(value) {}
-    ~WakeState() { if (event) win::CloseHandle(event); }
+    explicit WakeState(ffi::HANDLE value): event(value) {}
+    ~WakeState() { if (event) ffi::CloseHandle(event); }
     auto request(bool draw = true) -> FrameWakeResult {
         auto guard = stats.lock().unwrap();
         if (guard->closed) return FrameWakeResult::Closed;
         repaint |= draw;
         if (guard->pending) { ++guard->coalesced; return FrameWakeResult::Coalesced; }
-        if (!win::SetEvent(event)) { ++guard->failed; return FrameWakeResult::Failed; }
+        if (!ffi::SetEvent(event)) { ++guard->failed; return FrameWakeResult::Failed; }
         guard->pending = true; ++guard->queued; return FrameWakeResult::Queued;
     }
     auto take(bool &draw) -> bool {
         auto guard = stats.lock().unwrap();
         if (!guard->pending) return false;
-        if (!win::ResetEvent(event)) return false;
+        if (!ffi::ResetEvent(event)) return false;
         guard->pending = false; draw |= rstd::exchange(repaint, false); return true;
     }
     void close() { auto guard = stats.lock().unwrap(); guard->closed = true; guard->pending = false; }
@@ -58,7 +57,7 @@ auto Window::open(const char *title, Index width, Index height, WindowBackend ba
     if (impl_->native.is_some() || !title || !width || !height || width > 32768 || height > 32768 ||
         (backend != WindowBackend::Automatic && backend != WindowBackend::Win32))
         return Err(gpu::Error{gpu::Stage::State});
-    auto event = win::CreateEventW(nullptr, true, false, nullptr);
+    auto event = ffi::CreateEventW(nullptr, true, false, nullptr);
     if (!event) return Err(gpu::Error{gpu::Stage::Surface});
     auto wake = rstd::sync::Arc<WakeState>::make(event);
     auto native = rstd::sync::Arc<detail::Win32Window>::make();
@@ -182,10 +181,10 @@ auto Window::wait(Index milliseconds) -> Result<WindowEvents, gpu::Error> {
     bool woke = wake.take(redraw);
     auto before = native.view();
     if (!woke && !before.redraw && before.revision == impl_->observed_revision) {
-        win::HANDLE events[]{native.changed_handle(), wake.event, native.thread_handle()};
+        ffi::HANDLE events[]{native.changed_handle(), wake.event, native.thread_handle()};
         auto timeout = milliseconds > 0xfffffffeu ? 0xfffffffeu : milliseconds;
-        auto waited = win::WaitForMultipleObjects(3, events, false, timeout);
-        if (waited == win::wait_failed || waited == win::wait_object + 2)
+        auto waited = ffi::WaitForMultipleObjects(3, events, false, timeout);
+        if (waited == ffi::WAIT_FAILED || waited == ffi::WAIT_OBJECT_0 + 2)
             return Err(gpu::Error{gpu::Stage::Surface});
     }
     (void)wake.take(redraw);
@@ -226,9 +225,6 @@ auto Window::pixel_extent() const -> VkExtent2D {
 }
 
 #else
-import :platform.wayland_window;
-import :platform.x11_window;
-import :platform.x11;
 import :ffi.linux;
 import :ffi.wayland;
 import :ffi.x11;
@@ -242,7 +238,7 @@ struct WakeState {
     rstd::sync::Mutex<WakeStats> stats;
     bool repaint{};
     explicit WakeState(int value) : fd(value) {}
-    ~WakeState() { ffi::linux::close(fd); }
+    ~WakeState() { ffi::close(fd); }
     auto request(bool draw = true) -> FrameWakeResult {
         auto guard = stats.lock().unwrap();
         auto &state = *guard;
@@ -254,8 +250,8 @@ struct WakeState {
         }
         rstd::uint64_t value = 1;
         long written;
-        do { written = ffi::linux::write(fd, &value, sizeof(value)); }
-        while (written < 0 && ffi::linux::error_number() == ffi::linux::interrupted);
+        do { written = ffi::write(fd, &value, sizeof(value)); }
+        while (written < 0 && ffi::error_number() == ffi::EINTR);
         if (written != sizeof(value)) {
             ++state.failed;
             return FrameWakeResult::Failed;
@@ -270,8 +266,8 @@ struct WakeState {
         if (!state.pending) return false;
         rstd::uint64_t value{};
         long count;
-        do { count = ffi::linux::read(fd, &value, sizeof(value)); }
-        while (count < 0 && ffi::linux::error_number() == ffi::linux::interrupted);
+        do { count = ffi::read(fd, &value, sizeof(value)); }
+        while (count < 0 && ffi::error_number() == ffi::EINTR);
         if (count != sizeof(value)) return false;
         state.pending = false;
         draw |= rstd::exchange(repaint, false);
@@ -298,7 +294,7 @@ struct Window::Impl {
     Option<rstd::sync::Arc<detail::WaylandWindow>> wayland;
     Option<rstd::sync::Arc<detail::X11Window>> x11;
     Option<rstd::sync::Arc<WakeState>> wake;
-    Vec<ffi::linux::pollfd> pollfds;
+    Vec<ffi::pollfd> pollfds;
     Vec<detail::X11InternalConnection> x11_internal;
     Serial observed_revision{};
     Serial observed_display_revision{};
@@ -322,7 +318,7 @@ auto Window::open(const char *title, Index width, Index height, WindowBackend ba
                 backend = WindowBackend::X11;
         }
     }
-    auto wake_fd = ffi::linux::eventfd(0, ffi::linux::event_flags);
+    auto wake_fd = ffi::eventfd(0, ffi::event_flags);
     if (wake_fd < 0) return Err(gpu::Error{gpu::Stage::Surface});
     auto wake = rstd::sync::Arc<WakeState>::make(wake_fd);
     if (backend == WindowBackend::Automatic || backend == WindowBackend::Wayland) {
@@ -562,18 +558,18 @@ auto Window::wait(Index milliseconds) -> Result<WindowEvents, gpu::Error> {
     Option<usize> clipboard_owner_fd;
     Option<usize> state_fd;
     Option<usize> displays_fd;
-    ffi::wayland::wl_display *wayland{};
+    ffi::wl_display *wayland{};
     auto &fds = impl_->pollfds;
     fds.clear();
-    fds.push(ffi::linux::pollfd{});
-    fds.push(ffi::linux::pollfd{wake->fd, ffi::linux::input, 0});
+    fds.push(ffi::pollfd{});
+    fds.push(ffi::pollfd{wake->fd, ffi::POLLIN, 0});
     impl_->x11_internal.clear();
     if (impl_->wayland.is_some()) {
         auto native = impl_->wayland->as_ptr().as_raw_ptr();
         wayland = native->display();
         redraw = redraw || native->input().has_input();
-        while (ffi::wayland::wl_display_prepare_read(wayland) != 0) {
-            auto dispatched = ffi::wayland::wl_display_dispatch_pending(wayland);
+        while (ffi::wl_display_prepare_read(wayland) != 0) {
+            auto dispatched = ffi::wl_display_dispatch_pending(wayland);
             if (dispatched < 0) return Err(gpu::Error{gpu::Stage::Surface});
             redraw = redraw || dispatched > 0;
         }
@@ -584,13 +580,13 @@ auto Window::wait(Index milliseconds) -> Result<WindowEvents, gpu::Error> {
         timeout_ms = native->input().repeat_wait(timeout_ms);
         timeout_ms = native->input().clipboard().wait(timeout_ms);
         prepared = true;
-        fds[usize(0)] = {ffi::wayland::wl_display_get_fd(wayland), ffi::linux::input, 0};
-        if (ffi::wayland::wl_display_flush(wayland) < 0) {
-            if (ffi::linux::error_number() != ffi::linux::again) {
-                ffi::wayland::wl_display_cancel_read(wayland);
+        fds[usize(0)] = {ffi::wl_display_get_fd(wayland), ffi::POLLIN, 0};
+        if (ffi::wl_display_flush(wayland) < 0) {
+            if (ffi::error_number() != ffi::EAGAIN) {
+                ffi::wl_display_cancel_read(wayland);
                 return Err(gpu::Error{gpu::Stage::Surface});
             }
-            fds[usize(0)].events |= ffi::linux::output;
+            fds[usize(0)].events |= ffi::POLLOUT;
         }
     } else if (impl_->x11.is_some()) {
         auto native = impl_->x11->as_ptr().as_raw_ptr();
@@ -603,27 +599,27 @@ auto Window::wait(Index milliseconds) -> Result<WindowEvents, gpu::Error> {
         redraw = redraw || native->state_pending();
         native->dispatch_clipboard_owner();
         redraw = redraw || native->clipboard_owner_pending();
-        redraw = redraw || ffi::x11::XPending(display) > 0;
+        redraw = redraw || ffi::XPending(display) > 0;
         if (native->dispatch(true).is_err()) return Err(gpu::Error{gpu::Stage::Surface});
         native->expire_clipboard();
         timeout_ms = native->clipboard_wait(timeout_ms);
         redraw = redraw || native->has_input();
-        fds[usize(0)] = {ffi::x11::XConnectionNumber(display), ffi::linux::input, 0};
-        ffi::x11::XFlush(display);
+        fds[usize(0)] = {ffi::XConnectionNumber(display), ffi::POLLIN, 0};
+        ffi::XFlush(display);
         native->copy_internal_connections(impl_->x11_internal);
         for (auto item : impl_->x11_internal)
-            fds.push(ffi::linux::pollfd{item.fd, ffi::linux::input, 0});
+            fds.push(ffi::pollfd{item.fd, ffi::POLLIN, 0});
         if (native->clipboard_owner_fd() >= 0) {
             clipboard_owner_fd = Some(usize(fds.len()));
-            fds.push(ffi::linux::pollfd{native->clipboard_owner_fd(), ffi::linux::input, 0});
+            fds.push(ffi::pollfd{native->clipboard_owner_fd(), ffi::POLLIN, 0});
         }
         if (native->state_fd() >= 0) {
             state_fd = Some(usize(fds.len()));
-            fds.push(ffi::linux::pollfd{native->state_fd(), ffi::linux::input, 0});
+            fds.push(ffi::pollfd{native->state_fd(), ffi::POLLIN, 0});
         }
         if (native->displays_fd() >= 0) {
             displays_fd = Some(usize(fds.len()));
-            fds.push(ffi::linux::pollfd{native->displays_fd(), ffi::linux::input, 0});
+            fds.push(ffi::pollfd{native->displays_fd(), ffi::POLLIN, 0});
         }
     } else return Err(gpu::Error{gpu::Stage::State});
 
@@ -633,52 +629,52 @@ auto Window::wait(Index milliseconds) -> Result<WindowEvents, gpu::Error> {
         auto elapsed = started.elapsed().as_millis().to_primitive();
         auto remaining = elapsed >= timeout_ms ? 0 : timeout_ms - elapsed;
         int timeout = redraw ? 0 : int(remaining > 2147483647 ? 2147483647 : remaining);
-        result = ffi::linux::poll(fds.as_mut_slice().as_raw_ptr(), fds.len().to_primitive(), timeout);
-        if (result >= 0 || ffi::linux::error_number() != ffi::linux::interrupted) break;
+        result = ffi::poll(fds.as_mut_slice().as_raw_ptr(), fds.len().to_primitive(), timeout);
+        if (result >= 0 || ffi::error_number() != ffi::EINTR) break;
     }
-    if (result < 0 || (fds[usize(0)].revents & ffi::linux::error) ||
-        (fds[usize(1)].revents & ffi::linux::error)) {
-        if (prepared) ffi::wayland::wl_display_cancel_read(wayland);
+    if (result < 0 || (fds[usize(0)].revents & ffi::error) ||
+        (fds[usize(1)].revents & ffi::error)) {
+        if (prepared) ffi::wl_display_cancel_read(wayland);
         return Err(gpu::Error{gpu::Stage::Surface});
     }
     if (prepared) {
-        if (fds[usize(0)].revents & ffi::linux::input) {
-            if (ffi::wayland::wl_display_read_events(wayland) < 0)
+        if (fds[usize(0)].revents & ffi::POLLIN) {
+            if (ffi::wl_display_read_events(wayland) < 0)
                 return Err(gpu::Error{gpu::Stage::Surface});
-            auto dispatched = ffi::wayland::wl_display_dispatch_pending(wayland);
+            auto dispatched = ffi::wl_display_dispatch_pending(wayland);
             if (dispatched < 0) return Err(gpu::Error{gpu::Stage::Surface});
             redraw = redraw || dispatched > 0;
-        } else ffi::wayland::wl_display_cancel_read(wayland);
+        } else ffi::wl_display_cancel_read(wayland);
         auto native = impl_->wayland->as_ptr().as_raw_ptr();
         native->input().clipboard().drain();
     } else {
         auto native = impl_->x11->as_ptr().as_raw_ptr();
         if (displays_fd.is_some() && fds[*displays_fd].revents) {
             native->dispatch_displays();
-            if ((fds[*displays_fd].revents & ffi::linux::error) || native->displays_failed()) {
+            if ((fds[*displays_fd].revents & ffi::error) || native->displays_failed()) {
                 native->close_displays(); redraw = true;
             }
         }
         if (state_fd.is_some() && fds[*state_fd].revents) {
             redraw = native->dispatch_state() || redraw;
-            if ((fds[*state_fd].revents & ffi::linux::error) || native->state_failed()) {
+            if ((fds[*state_fd].revents & ffi::error) || native->state_failed()) {
                 native->close_state(); redraw = true;
             }
         }
         if (clipboard_owner_fd.is_some() && fds[*clipboard_owner_fd].revents) {
             native->dispatch_clipboard_owner();
-            if ((fds[*clipboard_owner_fd].revents & ffi::linux::error) || native->clipboard_owner_failed())
+            if ((fds[*clipboard_owner_fd].revents & ffi::error) || native->clipboard_owner_failed())
                 native->disable_clipboard_owner();
         }
         for (usize i{}; i < impl_->x11_internal.len(); i += usize(1)) {
             auto entry = impl_->x11_internal[i];
             auto ready = fds[i + usize(2)].revents;
             if (!ready || !native->internal_connection_current(entry)) continue;
-            if (ready & ffi::linux::invalid) return Err(gpu::Error{gpu::Stage::Surface});
-            if (ready & (ffi::linux::input | ffi::linux::disconnected)) {
+            if (ready & ffi::POLLNVAL) return Err(gpu::Error{gpu::Stage::Surface});
+            if (ready & (ffi::POLLIN | ffi::disconnected)) {
                 native->process_internal_connection(entry);
                 redraw = true;
-                if ((ready & ffi::linux::disconnected) && native->internal_connection_current(entry))
+                if ((ready & ffi::disconnected) && native->internal_connection_current(entry))
                     return Err(gpu::Error{gpu::Stage::Surface});
             }
         }
