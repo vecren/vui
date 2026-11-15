@@ -22,6 +22,7 @@ class PaintContext {
     auto style() const -> const NodeStyle & { return style_; }
     auto id() const -> UiId { return id_; }
     auto size() const -> Size { return size_; }
+    auto local_to_node() const -> Transform { return recorder_.local_transform(); }
     void save() { recorder_.save(); }
     void restore() { recorder_.restore(); }
     void transform(Transform value) { recorder_.transform(value); }

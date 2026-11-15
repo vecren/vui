@@ -43,6 +43,7 @@ class EventContext {
     auto document() -> UiDocument &;
     auto visual(UiId id) const -> const UiVisual *;
     auto completed_content(UiId id, Serial source_id) const -> Result<Option<FrameContent>, FrameError>;
+    auto completed_image(UiId id, Serial image_id) const -> Result<Option<FrameImage>, FrameError>;
     auto scroll_remaining() const -> Point { return remaining_scroll_; }
     auto consume_scroll(Point amount) -> Result<empty, InputError>;
     void stop_propagation() { stopped_ = true; }
@@ -161,6 +162,7 @@ class EventRouter {
     Vec<Vec<PointerKey>> releases_;
     Option<InputSnapshot> update_;
     Option<UiFrame> completed_frame_;
+    auto completed_node(UiId id) const -> bool;
     Serial completed_frame_id_{};
     Option<UiDocument::RouteScope> scope_;
     Option<UiId> focus_;
@@ -562,6 +564,7 @@ class EventRouter {
         return update_.is_some() ? Some(InputSnapshot(*update_)) : None<InputSnapshot>();
     }
     auto completed_content(UiId id, Serial source_id) const -> Result<Option<FrameContent>, FrameError>;
+    auto completed_image(UiId id, Serial image_id) const -> Result<Option<FrameImage>, FrameError>;
     auto dispatch(InputEvent input) -> Result<empty, InputError>;
     auto close() -> Result<empty, InputError>;
 };

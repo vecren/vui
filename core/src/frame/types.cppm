@@ -38,7 +38,7 @@ class FrameDraw {
               (Image, (ImageData data; Rect destination; Rect source; ImageSampling sampling;
                        Color tint; ImageEdges edges; bool clamp_source; Transform transform;
                        Index clip; RenderId node; ImageBlend blend{ImageBlend::SourceOver};
-                       ImageRadialFill radial{};)),
+                       ImageRadialFill radial{}; Transform node_to_surface{};)),
               (External, (TextureFrame frame; Serial source_id; Rect destination; Rect source;
                           ImageSampling sampling; Transform transform; Index clip; RenderId node; Color tint{1, 1, 1, 1};
                           ImageBlend blend{ImageBlend::SourceOver};)),
@@ -63,6 +63,15 @@ struct FrameContent {
         auto inverse = local_to_surface.inverse();
         return inverse ? placement.content_position(inverse->map(surface), bounds) : None<Point>();
     }
+};
+
+struct FrameImage {
+    FrameIdentity frame;
+    ImageData image;
+    ImagePlacement placement;
+    Transform local_to_surface;
+    Transform node_to_surface;
+    auto content_position(Point surface, ContentBounds bounds = ContentBounds::RequireInside) const -> Option<Point>;
 };
 
 class FramePlanner;
@@ -94,6 +103,7 @@ class FramePlan {
             if (draw.is_Text()) for (const auto &font : draw.as_Text().layout.fonts())
                 if (!font.concurrent_rasterization()) return false;
             if (draw.is_External() && !draw.as_External().frame.concurrent_read()) return false;
+            if (draw.is_Image() && !draw.as_Image().data.concurrent_read()) return false;
         }
         return true;
     }
@@ -106,6 +116,7 @@ class FramePlan {
     }
     auto contents() const -> slice<DisplayList> { return data_->contents.as_slice(); }
     auto sources() const -> slice<ContentSelection> { return data_->sources.as_slice(); }
+    auto image(RenderId node, Serial image_id) const -> Result<Option<FrameImage>, FrameError>;
     auto content(RenderId node, Serial source_id) const -> Result<Option<FrameContent>, FrameError> {
         Option<FrameContent> result;
         for (const auto &pass : data_->passes) for (const auto &draw : pass.draws) if (draw.is_External()) {
@@ -192,7 +203,7 @@ class FramePlanner {
                 output_.passes[usize(target)].draws.push(FrameDraw::Image(
                     ImageData(value.data), value.destination, value.source, value.sampling,
                     (value.color_source == DrawColorSource::Current ? node->properties.paint_color : value.tint).modulate(node->properties.content_tint), value.edges, value.clamp_source, state.transform, state.clip, id,
-                    value.blend, value.radial));
+                    value.blend, value.radial, world));
             } else if (op.is_External()) {
                 const auto &value = op.as_External();
                 const auto &selected = select(value.source);

@@ -16,7 +16,7 @@ struct TextInlineImage {
             vui::valid(blend);
     }
     auto operator==(const TextInlineImage &other) const -> bool {
-        return image.id() == other.image.id() && source == other.source && tint == other.tint && sampling == other.sampling && blend == other.blend;
+        return image == other.image && source == other.source && tint == other.tint && sampling == other.sampling && blend == other.blend;
     }
 };
 struct TextInlineImagePlacement { Index image; Rect destination; };

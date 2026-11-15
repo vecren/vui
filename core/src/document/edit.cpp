@@ -153,7 +153,7 @@ auto UiDocument::prepare(UiEditBatch edit) -> Result<PreparedEdit, UiEditError> 
             if (entry.before_image.is_some()) {
                 auto &before = *entry.before_image;
                 bool same_data = before.data.is_some() == value.data.is_some() &&
-                    (before.data.is_none() || before.data->id() == value.data->id());
+                    (before.data.is_none() || *before.data == *value.data);
                 if (same_data) value.data = old.data.is_some() ? Some(ImageData(*old.data)) : None<ImageData>();
                 if (before.fit == value.fit) value.fit = old.fit;
                 if (before.sampling == value.sampling) value.sampling = old.sampling;
@@ -161,7 +161,7 @@ auto UiDocument::prepare(UiEditBatch edit) -> Result<PreparedEdit, UiEditError> 
                 if (before.radial == value.radial) value.radial = old.radial;
             }
             bool same_image = old.data.is_some() == value.data.is_some() &&
-                (old.data.is_none() || old.data->id() == value.data->id());
+                (old.data.is_none() || *old.data == *value.data);
             if (!same_image && value_occupied(*node, UiValueProperty::Image)) return fail(UiError::PropertyOwned);
             if (entry.existing.is_none() || !same_image || old.fit != value.fit || old.sampling != value.sampling ||
                 old.tint != value.tint || old.radial != value.radial) {

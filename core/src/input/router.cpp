@@ -944,12 +944,20 @@ auto EventRouter::can_coalesce(const InputEvent &a, const InputEvent &b) -> bool
     return false;
 }
 
-auto EventRouter::completed_content(UiId id, Serial source_id) const -> Result<Option<FrameContent>, FrameError> {
+auto EventRouter::completed_node(UiId id) const -> bool {
     auto current = update_ ? update_->get(id) : nullptr;
     auto completed = completed_frame_ ? completed_frame_->update().get(id) : nullptr;
-    if (!current || !completed || current->mount_generation != completed->mount_generation)
-        return Ok(None<FrameContent>());
+    return current && completed && current->mount_generation == completed->mount_generation;
+}
+
+auto EventRouter::completed_content(UiId id, Serial source_id) const -> Result<Option<FrameContent>, FrameError> {
+    if (!completed_node(id)) return Ok(None<FrameContent>());
     return completed_frame_->content(id, source_id);
+}
+
+auto EventRouter::completed_image(UiId id, Serial image_id) const -> Result<Option<FrameImage>, FrameError> {
+    if (!completed_node(id)) return Ok(None<FrameImage>());
+    return completed_frame_->image(id, image_id);
 }
 
 auto EventRouter::dispatch(InputEvent input) -> Result<empty, InputError> {
@@ -1272,6 +1280,10 @@ auto EventContext::visual(UiId id) const -> const UiVisual * {
 }
 auto EventContext::completed_content(UiId id, Serial source_id) const -> Result<Option<FrameContent>, FrameError> {
     return router_.completed_content(id, source_id);
+}
+
+auto EventContext::completed_image(UiId id, Serial image_id) const -> Result<Option<FrameImage>, FrameError> {
+    return router_.completed_image(id, image_id);
 }
 auto EventContext::hit_within() const -> bool {
     auto hit = HitTest::target_at(*router_.update_, event_.input.position);

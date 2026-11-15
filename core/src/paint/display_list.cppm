@@ -118,6 +118,7 @@ class DisplayListRecorder {
     }
 
   public:
+    auto local_transform() const -> Transform { return coordinates_; }
     void save() {
         if (!active())
             return;

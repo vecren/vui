@@ -31,6 +31,7 @@ class UiFrame {
     auto identity() const -> FrameIdentity { return data_->plan.identity(); }
     auto surface() const -> SurfaceInfo { return data_->plan.surface(); }
     auto update() const -> const UiUpdate & { return data_->update; }
+    auto image(UiId node, Serial image_id) const -> Result<Option<FrameImage>, FrameError>;
     auto content(UiId node, Serial source_id) const -> Result<Option<FrameContent>, FrameError> {
         if (!data_->update.get(node)) return Ok(None<FrameContent>());
         return data_->plan.content(data_->ids[usize(node.slot)], source_id);

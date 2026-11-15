@@ -1,5 +1,6 @@
 export module vui:image.types;
 import :types;
+import :metadata;
 using namespace rstd::prelude;
 
 export namespace vui {
@@ -8,6 +9,7 @@ inline constexpr Serial image_max_pixels = 16 * 1024 * 1024;
 enum class ImageError { InvalidValue, Limit };
 enum class ImageFit { Fill, Contain, Cover };
 enum class ImageSampling { Nearest, Linear };
+enum class ContentBounds { RequireInside, AllowOutside };
 // Additive matches straight-alpha SrcAlpha/One for both color and alpha.
 enum class ImageBlend { SourceOver, Additive, AdditiveRgb, Plus };
 constexpr auto valid(ImageBlend value) -> bool {
@@ -48,12 +50,13 @@ class ImageData {
             :width(w),height(h),density(d),options(o),levels(rstd::move(p)),bytes(b){}
     };
     rstd::sync::Arc<Data> data_;
+    Option<detail::FrameMetadata> metadata_;
     ImageData(Index w,Index h,Scalar d,ImageTextureOptions o,Vec<Vec<unsigned char>> p,Serial b)
         :data_(rstd::sync::Arc<Data>::make(w,h,d,o,rstd::move(p),b)){}
   public:
-    ImageData(const ImageData &other):data_(other.data_.clone()){}
+    ImageData(const ImageData &other):data_(other.data_.clone()){if(other.metadata_)metadata_=Some(other.metadata_->clone());}
     auto operator=(const ImageData &other) -> ImageData & {
-        if(this!=&other)data_=other.data_.clone();
+        if(this!=&other){data_=other.data_.clone();metadata_=other.metadata_ ? Some(other.metadata_->clone()):None<detail::FrameMetadata>();}
         return *this;
     }
     ImageData(ImageData &&)=default;
@@ -85,6 +88,12 @@ class ImageData {
         return rgba8_srgb_mipmaps(slice<ImageMipLevel>::from_raw_parts(&level,usize(1)),{},density);
     }
     auto id() const -> Serial {return data_->id;}
+    auto operator==(const ImageData &other) const -> bool;
+    template<class T> auto with_metadata(T value,bool concurrent_read=false) const -> ImageData {
+        auto result=ImageData(*this);result.metadata_=Some(detail::FrameMetadata::make(rstd::move(value),concurrent_read));return result;
+    }
+    template<class T> auto metadata() const -> const T * {return metadata_ ? metadata_->get<T>():nullptr;}
+    auto concurrent_read() const -> bool;
     auto width() const -> Index {return data_->width;}
     auto height() const -> Index {return data_->height;}
     auto density() const -> Scalar {return data_->density;}
@@ -111,6 +120,7 @@ inline constexpr auto operator|(ImageEdges left, ImageEdges right) -> ImageEdges
 struct ImagePlacement {
     Rect destination, source;
     ImageEdges edges{ImageEdges::All};
+    auto content_position(Point local, ContentBounds bounds = ContentBounds::RequireInside) const -> Option<Point>;
 };
 inline auto place_image(Size image, Rect box, ImageFit fit) -> Result<ImagePlacement, ImageError> {
     if (!image.valid() || !image.width || !image.height || !box.valid() ||

@@ -7,7 +7,7 @@ namespace vui {
 auto UiDocument::write_image(UiId id, Node &node, Option<ImageData> data) -> bool {
     auto &image = **node.image;
     if (image.data.is_some() == data.is_some() &&
-        (data.is_none() || image.data->id() == data->id()))
+        (data.is_none() || *image.data == *data))
         return false;
     auto old_size = image.data.is_some() ? image.data->natural_size() : Size{};
     auto new_size = data.is_some() ? data->natural_size() : Size{};

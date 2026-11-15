@@ -1,5 +1,6 @@
 export module vui:content.source;
-import :image.types;
+export import :image.types;
+import :metadata;
 import :runtime.wakeup;
 using namespace rstd::prelude;
 
@@ -32,47 +33,23 @@ struct TextureFrameInfo {
     }
     friend auto operator==(const TextureFrameInfo &, const TextureFrameInfo &) -> bool = default;
 };
-enum class ContentBounds { RequireInside, AllowOutside };
 struct ScenePlacement {
     TextureFrameInfo frame;
     ImagePlacement image;
     auto content_position(Point local, ContentBounds bounds = ContentBounds::RequireInside) const -> Option<Point> {
-        const auto &d = image.destination;
-        const auto &s = image.source;
-        if (!finite(local.x) || !finite(local.y) || !d.valid() || d.width <= 0 || d.height <= 0 ||
-            !s.valid() || s.width <= 0 || s.height <= 0 ||
-            (bounds != ContentBounds::RequireInside && bounds != ContentBounds::AllowOutside) ||
-            (bounds == ContentBounds::RequireInside && (local.x < d.x || local.y < d.y || local.x >= d.x + d.width || local.y >= d.y + d.height)))
-            return None();
-        auto result = Point{s.x + (local.x - d.x) * s.width / d.width,
-                            s.y + (local.y - d.y) * s.height / d.height};
-        return finite(result.x) && finite(result.y) ? Some(result) : None<Point>();
+        return image.content_position(local,bounds);
     }
 };
 class TextureFrame {
-    struct Payload {
-        virtual ~Payload() = default;
-        virtual auto type() const -> rstd::any::TypeId = 0;
-    };
-    template <class T> struct Stored : Payload {
-        T value;
-        explicit Stored(T v) : value(rstd::move(v)) {}
-        auto type() const -> rstd::any::TypeId override { return rstd::any::TypeId::of<T>(); }
-    };
     struct Data {
         TextureFrameInfo info;
-        Box<Payload> payload;
+        detail::FramePayload payload;
         bool concurrent_read{};
-        Data(TextureFrameInfo i, Box<Payload> p, bool shared) : info(i), payload(rstd::move(p)), concurrent_read(shared) {}
+        Data(TextureFrameInfo i, detail::FramePayload p, bool shared) : info(i), payload(rstd::move(p)), concurrent_read(shared) {}
     };
     rstd::sync::Arc<Data> data_;
-    struct Metadata {
-        Box<Payload> value;
-        bool concurrent_read{};
-        Metadata(Box<Payload> v, bool shared) : value(rstd::move(v)), concurrent_read(shared) {}
-    };
-    Option<rstd::sync::Arc<Metadata>> metadata_;
-    TextureFrame(TextureFrameInfo info, Box<Payload> payload, bool shared)
+    Option<detail::FrameMetadata> metadata_;
+    TextureFrame(TextureFrameInfo info, detail::FramePayload payload, bool shared)
         : data_(rstd::sync::Arc<Data>::make(info, rstd::move(payload), shared)) {}
 
   public:
@@ -82,7 +59,7 @@ class TextureFrame {
     auto operator=(const TextureFrame &other) -> TextureFrame & {
         if (this != &other) {
             data_ = other.data_.clone();
-            metadata_ = other.metadata_ ? Some(other.metadata_->clone()) : Option<rstd::sync::Arc<Metadata>>{};
+            metadata_ = other.metadata_ ? Some(other.metadata_->clone()) : Option<detail::FrameMetadata>{};
         }
         return *this;
     }
@@ -93,28 +70,21 @@ class TextureFrame {
     static auto make(TextureFrameInfo info, T payload, bool concurrent_read = false) -> Result<TextureFrame, ContentError> {
         if (!info.valid())
             return Err(ContentError::InvalidValue);
-        auto stored = Box<Stored<T>>::make(rstd::move(payload));
-        return Ok(TextureFrame(
-            info, Box<Payload>::from_raw(rstd::move(stored).into_raw().template cast<Payload>()), concurrent_read));
+        return Ok(TextureFrame(info,detail::FramePayload::make(rstd::move(payload)),concurrent_read));
     }
-    auto concurrent_read() const -> bool { return data_->concurrent_read && (!metadata_ || (*metadata_)->concurrent_read); }
+    auto concurrent_read() const -> bool { return data_->concurrent_read && (!metadata_ || metadata_->concurrent_read()); }
     auto valid() const -> bool { return bool(data_); }
     auto info() const -> TextureFrameInfo { return data_->info; }
     template <class T> auto payload() const -> const T * {
-        if (!valid() || data_->payload->type() != rstd::any::TypeId::of<T>())
-            return nullptr;
-        return &static_cast<const Stored<T> &>(*data_->payload).value;
+        return valid() ? data_->payload.get<T>():nullptr;
     }
     template <class T> auto with_metadata(T value, bool concurrent_read = false) const -> TextureFrame {
-        auto stored = Box<Stored<T>>::make(rstd::move(value));
         auto result = TextureFrame(*this);
-        result.metadata_ = Some(rstd::sync::Arc<Metadata>::make(
-            Box<Payload>::from_raw(rstd::move(stored).into_raw().template cast<Payload>()), concurrent_read));
+        result.metadata_ = Some(detail::FrameMetadata::make(rstd::move(value),concurrent_read));
         return result;
     }
     template <class T> auto metadata() const -> const T * {
-        if (!metadata_ || (*metadata_)->value->type() != rstd::any::TypeId::of<T>()) return nullptr;
-        return &static_cast<const Stored<T> &>(*(*metadata_)->value).value;
+        return metadata_ ? metadata_->get<T>():nullptr;
     }
 };
 class ContentSubscription {
