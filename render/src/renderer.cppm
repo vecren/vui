@@ -74,7 +74,7 @@ class SurfaceHost {
   public:
     virtual ~SurfaceHost() = default;
     virtual auto instance_extensions() -> Result<Vec<vrento::vulkan::Extension>, Error> = 0;
-    virtual auto create_surface(VkInstance) -> Result<NativeSurface, Error> = 0;
+    virtual auto create_surface(const vvk::Instance &) -> Result<NativeSurface, Error> = 0;
     virtual auto pixel_extent() const -> VkExtent2D = 0;
 };
 enum class PresentStatus { Queued, Suboptimal, OutOfDate };

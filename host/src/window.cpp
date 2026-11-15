@@ -2,10 +2,10 @@ module;
 #include <rstd/macro.hpp>
 
 module vui.host;
+import vvk;
 #if RSTD_OS_WINDOWS
 import :platform.win32_window;
 import :ffi.win32;
-import :ffi.vulkan_win32;
 using namespace rstd::prelude;
 
 namespace vui::host {
@@ -201,21 +201,20 @@ auto Window::wait(Index milliseconds) -> Result<WindowEvents, gpu::Error> {
 auto Window::instance_extensions() -> Result<Vec<vrento::vulkan::Extension>, gpu::Error> {
     if (!configured()) return Err(gpu::Error{gpu::Stage::State});
     Vec<vrento::vulkan::Extension> result;
-    result.push(extension(ffi::vulkan_win32::surface));
-    result.push(extension(ffi::vulkan_win32::win32_surface));
+    result.push(extension(VK_KHR_SURFACE_EXTENSION_NAME));
+    result.push(extension(VK_KHR_WIN32_SURFACE_EXTENSION_NAME));
     return Ok(rstd::move(result));
 }
-auto Window::create_surface(VkInstance instance) -> Result<gpu::NativeSurface, gpu::Error> {
+auto Window::create_surface(const vvk::Instance &instance) -> Result<gpu::NativeSurface, gpu::Error> {
     if (!instance || impl_->native.is_none()) return Err(gpu::Error{gpu::Stage::State});
-    auto create = reinterpret_cast<ffi::vulkan_win32::PFN_vkCreateWin32SurfaceKHR>(
-        ffi::vulkan_win32::vkGetInstanceProcAddr(instance, "vkCreateWin32SurfaceKHR"));
+    auto create = instance.Dispatch().vkCreateWin32SurfaceKHR;
     if (!create) return Err(gpu::Error{gpu::Stage::Surface});
     auto &native = **impl_->native;
-    ffi::vulkan_win32::VkWin32SurfaceCreateInfoKHR info{};
-    info.sType = ffi::vulkan_win32::VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR;
+    VkWin32SurfaceCreateInfoKHR info{};
+    info.sType = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR;
     info.hinstance = native.instance(); info.hwnd = native.handle();
     VkSurfaceKHR surface{};
-    auto result = create(instance, &info, nullptr, &surface);
+    auto result = create(*instance, &info, nullptr, &surface);
     if (result != VK_SUCCESS) return Err(gpu::Error{gpu::Stage::Surface, result});
     return Ok(gpu::NativeSurface{surface, Box<dyn<gpu::SurfaceLifetime>>::make(
         NativeLease<detail::Win32Window>(impl_->native->clone()))});
@@ -230,7 +229,6 @@ auto Window::pixel_extent() const -> VkExtent2D {
 import :platform.wayland_window;
 import :platform.x11_window;
 import :platform.x11;
-import :ffi.vulkan;
 import :ffi.linux;
 import :ffi.wayland;
 import :ffi.x11;
@@ -721,26 +719,25 @@ auto Window::instance_extensions() -> Result<Vec<vrento::vulkan::Extension>, gpu
     if (impl_->selected == WindowBackend::Automatic)
         return Err(gpu::Error{gpu::Stage::State});
     Vec<vrento::vulkan::Extension> result;
-    result.push(extension(ffi::vulkan::surface));
-    result.push(extension(impl_->selected == WindowBackend::Wayland ? ffi::vulkan::wayland_surface
-                                                                    : ffi::vulkan::xlib_surface));
+    result.push(extension(VK_KHR_SURFACE_EXTENSION_NAME));
+    result.push(extension(impl_->selected == WindowBackend::Wayland ? VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME
+                                                                    : VK_KHR_XLIB_SURFACE_EXTENSION_NAME));
     return Ok(rstd::move(result));
 }
-auto Window::create_surface(VkInstance instance) -> Result<gpu::NativeSurface, gpu::Error> {
+auto Window::create_surface(const vvk::Instance &instance) -> Result<gpu::NativeSurface, gpu::Error> {
     if (!instance)
         return Err(gpu::Error{gpu::Stage::State});
     VkSurfaceKHR surface{};
     if (impl_->wayland.is_some()) {
-        auto create = reinterpret_cast<ffi::vulkan::PFN_vkCreateWaylandSurfaceKHR>(
-            ffi::vulkan::vkGetInstanceProcAddr(instance, "vkCreateWaylandSurfaceKHR"));
+        auto create = instance.Dispatch().vkCreateWaylandSurfaceKHR;
         if (!create)
             return Err(gpu::Error{gpu::Stage::Surface});
         auto native = impl_->wayland->as_ptr().as_raw_ptr();
-        ffi::vulkan::VkWaylandSurfaceCreateInfoKHR info{};
-        info.sType = ffi::vulkan::VK_STRUCTURE_TYPE_WAYLAND_SURFACE_CREATE_INFO_KHR;
+        VkWaylandSurfaceCreateInfoKHR info{};
+        info.sType = VK_STRUCTURE_TYPE_WAYLAND_SURFACE_CREATE_INFO_KHR;
         info.display = native->display();
         info.surface = native->surface();
-        auto result = create(instance, &info, nullptr, &surface);
+        auto result = create(*instance, &info, nullptr, &surface);
         if (result != VK_SUCCESS)
             return Err(gpu::Error{gpu::Stage::Surface, result});
         return Ok(gpu::NativeSurface{
@@ -748,16 +745,15 @@ auto Window::create_surface(VkInstance instance) -> Result<gpu::NativeSurface, g
                          NativeLease<detail::WaylandWindow>(impl_->wayland->clone()))});
     }
     if (impl_->x11.is_some()) {
-        auto create = reinterpret_cast<ffi::vulkan::PFN_vkCreateXlibSurfaceKHR>(
-            ffi::vulkan::vkGetInstanceProcAddr(instance, "vkCreateXlibSurfaceKHR"));
+        auto create = instance.Dispatch().vkCreateXlibSurfaceKHR;
         if (!create)
             return Err(gpu::Error{gpu::Stage::Surface});
         auto native = impl_->x11->as_ptr().as_raw_ptr();
-        ffi::vulkan::VkXlibSurfaceCreateInfoKHR info{};
-        info.sType = ffi::vulkan::VK_STRUCTURE_TYPE_XLIB_SURFACE_CREATE_INFO_KHR;
+        VkXlibSurfaceCreateInfoKHR info{};
+        info.sType = VK_STRUCTURE_TYPE_XLIB_SURFACE_CREATE_INFO_KHR;
         info.dpy = native->display();
         info.window = native->window();
-        auto result = create(instance, &info, nullptr, &surface);
+        auto result = create(*instance, &info, nullptr, &surface);
         if (result != VK_SUCCESS)
             return Err(gpu::Error{gpu::Stage::Surface, result});
         return Ok(

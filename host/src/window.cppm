@@ -1,4 +1,5 @@
 export module vui.host:window;
+import vvk;
 import vui.render;
 import :display;
 using namespace rstd::prelude;
@@ -69,7 +70,7 @@ class Window final : public gpu::SurfaceHost {
     auto restore() -> Result<empty, WindowActionError>;
     auto displays() const -> DisplaySnapshot;
     auto instance_extensions() -> Result<Vec<vrento::vulkan::Extension>, gpu::Error> override;
-    auto create_surface(VkInstance instance) -> Result<gpu::NativeSurface, gpu::Error> override;
+    auto create_surface(const vvk::Instance &instance) -> Result<gpu::NativeSurface, gpu::Error> override;
     auto pixel_extent() const -> VkExtent2D override;
 };
 } // namespace vui::host

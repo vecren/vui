@@ -1164,7 +1164,7 @@ struct SurfaceAdapter {
     SurfaceHost &host;
     Option<Error> error;
     explicit SurfaceAdapter(SurfaceHost &host) : host(host) {}
-    auto create(VkInstance instance) -> Result<vk::SessionSurface, vk::DeviceSessionError> {
+    auto create(const vvk::Instance &instance) -> Result<vk::SessionSurface, vk::DeviceSessionError> {
         auto result = host.create_surface(instance);
         if (result.is_err()) {
             error = Some(result.unwrap_err());
