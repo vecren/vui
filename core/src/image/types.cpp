@@ -10,6 +10,11 @@ auto ImageData::operator==(const ImageData &other) const -> bool {
 auto ImageData::concurrent_read() const -> bool {
     return !metadata_ || metadata_->concurrent_read();
 }
+auto ImageData::without_metadata() const -> ImageData {
+    auto result = ImageData(*this);
+    result.metadata_ = None();
+    return result;
+}
 auto ImagePlacement::content_position(Point local, ContentBounds bounds) const -> Option<Point> {
     const auto &d = destination;
     const auto &s = source;

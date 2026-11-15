@@ -32,7 +32,7 @@ auto ImageCache::reserve_frame(const FramePlan &plan, Index max_extent) -> Resul
             if (image.width() > max_extent || image.height() > max_extent)
                 return Err(Error{Stage::ImageCacheLimit});
             bytes += image.byte_size();
-            required.push(ImageData(image));
+            required.push(image.without_metadata());
         }
     if (required.len() > usize(limits.max_entries) || bytes > limits.max_bytes)
         return Err(Error{Stage::ImageCacheLimit});
@@ -79,7 +79,7 @@ auto ImageCache::resolve(const ImageData &data, Index max_extent) -> Result<Inde
         stats.cpu_bytes > limits.max_bytes - bytes)
         return Err(Error{Stage::ImageCacheLimit});
     auto index = static_cast<Index>(entries.len().to_primitive());
-    entries.push(ImageEntry{ImageData(data), {}, false});
+    entries.push(ImageEntry{data.without_metadata(), {}, false});
     stats.cpu_bytes += bytes;
     stats.entries = index + 1;
     return Ok(index);

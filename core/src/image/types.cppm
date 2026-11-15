@@ -94,6 +94,7 @@ class ImageData {
     }
     template<class T> auto metadata() const -> const T * {return metadata_ ? metadata_->get<T>():nullptr;}
     auto concurrent_read() const -> bool;
+    auto without_metadata() const -> ImageData;
     auto width() const -> Index {return data_->width;}
     auto height() const -> Index {return data_->height;}
     auto density() const -> Scalar {return data_->density;}
