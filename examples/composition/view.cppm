@@ -9,6 +9,36 @@ export namespace composition_example {
 using namespace vui;
 namespace cx = vui::compose;
 
+struct PhaseDecoration {
+    state::Value<bool> active;
+    auto measure(ModifierMeasureContext &context, LayoutConstraints constraints) -> Result<Size, UiError> {
+        return context.measure_content(constraints);
+    }
+    auto arrange(ModifierArrangeContext &context, Size size) -> Result<empty, UiError> {
+        auto value = state::read(active);
+        if (value.is_err()) return Err(UiError::LayoutFailed);
+        return context.place_content({{0, 0, size.width, size.height}, size,
+            {1, 0, 0, 1, value.unwrap().value() ? Scalar(4) : Scalar(), 0}});
+    }
+    auto draw(ModifierDrawContext &context) -> Result<empty, UiError> {
+        auto content = context.draw_content();
+        if (content.is_err()) return content;
+        auto value = state::read(active);
+        if (value.is_err()) return Err(UiError::PaintFailed);
+        auto &paint = context.paint();
+        auto size = paint.size();
+        paint.rect({18, size.height - 8, size.width - 36, 3},
+            value.unwrap().value() ? theme::accent : theme::tint, 1.5);
+        return Ok(empty{});
+    }
+};
+struct PhaseDecorationDescriptor {
+    using State = PhaseDecoration;
+    state::Value<bool> active;
+    auto create() const -> State { return {active}; }
+    void update(State &state, cx::BehaviorContext &) const { state.active = active; }
+};
+
 template <class F>
 auto Content([[vui::content]] F content) {
     return content();
@@ -21,6 +51,9 @@ auto card(cx::Element value, cx::NodeRef target) -> cx::Element {
 
 [[vui::compose]]
 auto Screen() -> cx::ComposeResult<cx::Element> {
+    auto phase_state = cx::state(false);
+    if (phase_state.is_err()) return Err(phase_state.unwrap_err());
+    auto phase = phase_state.unwrap();
     auto saved_order = cx::state(false);
     if (saved_order.is_err()) return Err(saved_order.unwrap_err());
     auto order = saved_order.unwrap();
@@ -41,7 +74,8 @@ auto Screen() -> cx::ComposeResult<cx::Element> {
         auto target = saved.unwrap();
         auto item = Counter(id, target);
         if (item.is_err()) return Err(item.unwrap_err());
-        repeated.push(card(item.unwrap(), target));
+        repeated.push(cx::stack({card(item.unwrap(), target)})
+            .behavior(cx::Key{90}, PhaseDecorationDescriptor{phase.value()}));
     }
     Vec<cx::Element> keyed;
     for (int position = 0; position < 3; ++position) {
@@ -62,6 +96,9 @@ auto Screen() -> cx::ComposeResult<cx::Element> {
     }, theme::button_style(true)).style(NodeStyleBuilder{}.width(144).height(40).build());
     auto toggle_button = cx::button(theme::button_label(is_visible ? "移除计数器 05"_str : "恢复计数器 05"_str), [shown] {
         return shown.update([](bool current) { return !current; });
+    }, theme::button_style()).style(NodeStyleBuilder{}.width(176).height(40).build());
+    auto phase_button = cx::button(theme::button_label("切换位置与强调色"_str), [phase] {
+        return phase.update([](bool current) { return !current; });
     }, theme::button_style()).style(NodeStyleBuilder{}.width(176).height(40).build());
     auto extra = [] [[vui::compose]] { return Badge(6); };
     auto saved_badge = cx::node();
@@ -102,7 +139,7 @@ auto Screen() -> cx::ComposeResult<cx::Element> {
             cx::row(rstd::move(repeated)).gap(16)}).gap(10),
         cx::column({theme::label("试着改变顺序"_str, 18, theme::ink, true),
             cx::row(rstd::move(keyed)).gap(16)}).gap(10),
-        cx::row({rstd::move(reverse_button), rstd::move(toggle_button)}).gap(12),
+        cx::row({rstd::move(reverse_button), rstd::move(toggle_button), rstd::move(phase_button)}).gap(12),
         label(caption.unwrap()->as_str(), 13, theme::muted),
         cx::row({label("内容样本"_str, 12, theme::muted)
                 .style(NodeStyleBuilder{}.vertical(Alignment::Center).hit_test_visible(false).build()),

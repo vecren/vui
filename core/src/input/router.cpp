@@ -1278,6 +1278,10 @@ auto EventContext::write_clipboard(ref<str> text) -> Result<empty, ClipboardErro
 auto EventContext::visual(UiId id) const -> const UiVisual * {
     return router_.update_->get(id);
 }
+auto EventContext::content_position() const -> Option<Point> {
+    auto node = visual(event_.current);
+    return node ? node->content_position(event_.local) : None<Point>();
+}
 auto EventContext::completed_content(UiId id, Serial source_id) const -> Result<Option<FrameContent>, FrameError> {
     return router_.completed_content(id, source_id);
 }

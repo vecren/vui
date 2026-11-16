@@ -2,6 +2,7 @@ export module vui:document.snapshot;
 import :scene.composition;
 import :node.types;
 import :diagnostics;
+import :modifier.protocol;
 using namespace rstd::prelude;
 
 export namespace vui {
@@ -23,6 +24,13 @@ struct UiVisual {
     Option<Rect> layout_slot;
     bool hit_self{true};
     Option<Rect> text_input_area;
+    ModifierGeometry content_geometry;
+    auto content_position(Point local) const -> Option<Point> {
+        auto inverse = content_geometry.local_to_node.inverse();
+        if (inverse.is_none()) return None();
+        auto point = inverse->map(local);
+        return finite(point.x) && finite(point.y) ? Some(point) : None<Point>();
+    }
 };
 enum class RevealStatus { Contained, Partial, Hidden, NonInvertible };
 struct BringIntoViewResult {
@@ -79,6 +87,16 @@ auto surface_transform(const Snapshot &snapshot, UiId id) -> Result<Transform, U
     return Ok(result);
 }
 template <class Snapshot>
+auto content_surface_transform(const Snapshot &snapshot, UiId id) -> Result<Transform, UiError> {
+    auto node = snapshot.get(id);
+    if (!node) return Err(UiError::InvalidId);
+    auto outer = surface_transform(snapshot, id);
+    if (outer.is_err()) return Err(outer.unwrap_err());
+    auto transform = outer.unwrap() * node->content_geometry.local_to_node;
+    return transform.valid() ? Result<Transform, UiError>(Ok(transform))
+                             : Result<Transform, UiError>(Err(UiError::InvalidValue));
+}
+template <class Snapshot>
 auto between_transform(const Snapshot &snapshot, UiId from, UiId to) -> Result<Transform, UiError> {
     auto source = surface_transform(snapshot, from), target = surface_transform(snapshot, to);
     if (source.is_err())
@@ -114,6 +132,18 @@ auto between_transform(const Snapshot &snapshot, UiId from, UiId to) -> Result<T
             return Ok(*local_inverse * local_source);
     }
     return Ok(*inverse * source.unwrap());
+}
+template <class Snapshot>
+auto between_content_transform(const Snapshot &snapshot, UiId from, UiId to) -> Result<Transform, UiError> {
+    auto source = snapshot.get(from), target = snapshot.get(to);
+    if (!source || !target) return Err(UiError::InvalidId);
+    auto outer = between_transform(snapshot, from, to);
+    if (outer.is_err()) return Err(outer.unwrap_err());
+    auto inverse = target->content_geometry.local_to_node.inverse();
+    if (inverse.is_none()) return Err(UiError::InvalidValue);
+    auto transform = *inverse * outer.unwrap() * source->content_geometry.local_to_node;
+    return transform.valid() ? Result<Transform, UiError>(Ok(transform))
+                             : Result<Transform, UiError>(Err(UiError::InvalidValue));
 }
 template <class Snapshot>
 auto relative_geometry(const Snapshot &snapshot, UiId from, UiId to) -> Option<RelativeGeometry> {
@@ -188,6 +218,12 @@ class UiUpdate {
     }
     auto transform_to(UiId from, UiId to) const -> Result<Transform, UiError> {
         return between_transform(*this, from, to);
+    }
+    auto content_to_surface(UiId id) const -> Result<Transform, UiError> {
+        return content_surface_transform(*this, id);
+    }
+    auto content_transform_to(UiId from, UiId to) const -> Result<Transform, UiError> {
+        return between_content_transform(*this, from, to);
     }
     auto map_point(UiId from, UiId to, Point point) const -> Result<Point, UiError> {
         auto transform = transform_to(from, to);
@@ -281,6 +317,12 @@ class InputSnapshot {
     }
     auto transform_to(UiId from, UiId to) const -> Result<Transform, UiError> {
         return between_transform(*this, from, to);
+    }
+    auto content_to_surface(UiId id) const -> Result<Transform, UiError> {
+        return content_surface_transform(*this, id);
+    }
+    auto content_transform_to(UiId from, UiId to) const -> Result<Transform, UiError> {
+        return between_content_transform(*this, from, to);
     }
     auto map_point(UiId from, UiId to, Point point) const -> Result<Point, UiError> {
         auto transform = transform_to(from, to);

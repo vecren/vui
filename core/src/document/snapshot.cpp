@@ -15,13 +15,17 @@ auto UiDocument::make_visual(UiId id) -> Result<UiVisual, UiError> {
             placement.tx -= (*parent->viewport)->metrics.offset.x;
             placement.ty -= (*parent->viewport)->metrics.offset.y;
         }
+        if (!parent->modifiers.is_empty()) placement = parent->modifier_content_transform * placement;
     }
     auto clip = node.style.clip;
+    Transform clip_transform;
     if (node.viewport.is_some()) {
         auto size = (*node.viewport)->metrics.viewport;
+        auto padding = node.modifiers.is_empty() ? node.style.layout.padding : Scalar(0);
         clip = {true,
-                {node.style.layout.padding, node.style.layout.padding, size.width, size.height},
+                {padding, padding, size.width, size.height},
                 0};
+        if (!node.modifiers.is_empty()) clip_transform = node.modifier_content_transform;
     }
     Rect layout_bounds{0, 0, node.measured.width, node.measured.height};
     auto content_bounds = layout_bounds;
@@ -37,7 +41,8 @@ auto UiDocument::make_visual(UiId id) -> Result<UiVisual, UiError> {
                          ? placement * style.transform
                          : placement * node.layout_mapping * style.transform;
     RenderProperties properties{transform,     content_bounds, clip,
-                                style.opacity, style.visible,  node.layout_clip, style.content_tint, style.paint_color};
+                                style.opacity, style.visible,  node.layout_clip, style.content_tint, style.paint_color,
+                                node.layout_clip_transform, clip_transform};
     if (!properties.valid())
         return Err(UiError::InvalidValue);
     UiVisual visual{
@@ -57,6 +62,9 @@ auto UiDocument::make_visual(UiId id) -> Result<UiVisual, UiError> {
         node.arranged_slot,
         node.style.hit_self,
         node.layout_has_text_input_area ? node.layout_text_input_area : node.style.text_input_area};
+    auto geometry = content_geometry(id);
+    if (geometry.is_err()) return Err(geometry.unwrap_err());
+    visual.content_geometry = geometry.unwrap();
     for (auto child : node.children)
         visual.children.push(UiId(child));
     return Ok(rstd::move(visual));
@@ -94,6 +102,18 @@ auto UiDocument::update_impl(Size viewport, bool recording) -> Result<UiUpdate::
         return Err(UiError::Routing);
     if (!viewport.valid())
         return Err(UiError::InvalidValue);
+    apply_phase_invalidations();
+    phase_diagnostics_.clear();
+    DocumentPhaseTransaction phase_transaction(phase_diagnostics_);
+    phase_transaction_ = &phase_transaction;
+    struct PhaseGuard {
+        UiDocument &document;
+        DocumentPhaseTransaction &transaction;
+        ~PhaseGuard() {
+            document.phase_transaction_ = nullptr;
+            document.discard_phase_reads(transaction);
+        }
+    } phase_guard{*this, phase_transaction};
     if (viewport != viewport_) {
         viewport_ = viewport;
         changed(true, root_);
@@ -153,6 +173,7 @@ auto UiDocument::update_impl(Size viewport, bool recording) -> Result<UiUpdate::
     }
     output.layout_revision = layout_revision_;
     output.stats = stats_;
+    if (auto error = publish_phase_reads(phase_transaction); error.is_some()) return Err(*error);
     return Ok(rstd::move(output));
 }
 
@@ -160,6 +181,7 @@ auto UiDocument::input_snapshot(Size viewport, DiagnosticsOptions options)
     -> Result<InputSnapshot, UiError> {
     if (updating_ || !can_route())
         return Err(UiError::Routing);
+    apply_phase_invalidations();
     input_stats_ = {};
     sweep_bindings();
     if (layout_dirty_ || viewport != viewport_ || input_base_.is_none()) {

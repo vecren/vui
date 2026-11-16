@@ -121,6 +121,7 @@ inline constexpr auto operator|(ImageEdges left, ImageEdges right) -> ImageEdges
 struct ImagePlacement {
     Rect destination, source;
     ImageEdges edges{ImageEdges::All};
+    Transform local_to_node;
     auto content_position(Point local, ContentBounds bounds = ContentBounds::RequireInside) const -> Option<Point>;
 };
 inline auto place_image(Size image, Rect box, ImageFit fit) -> Result<ImagePlacement, ImageError> {

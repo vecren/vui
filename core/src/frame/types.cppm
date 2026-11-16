@@ -165,8 +165,8 @@ class FramePlanner {
         auto world = parent_transform * node->properties.transform;
         if (!world.valid())
             return Some(FrameError::InvalidTransform);
-        auto node_clip = clip(node->properties.clip, world, inherited_clip);
-        node_clip = clip(node->properties.layout_clip, world, node_clip);
+        auto node_clip = clip(node->properties.clip, world * node->properties.clip_transform, inherited_clip);
+        node_clip = clip(node->properties.layout_clip, world * node->properties.layout_clip_transform, node_clip);
         auto target = destination;
         bool isolated = node->properties.opacity < 1;
         if (isolated) {
@@ -223,7 +223,8 @@ class FramePlanner {
                 }
             } else if (op.is_Children()) {
                 for (auto child : node->children.values()) {
-                    auto error = append(scene, child, world, base_clip, target, depth + 1);
+                    auto error = append(scene, child, state.transform * op.as_Children().parent_coordinates,
+                                        state.clip, target, depth + 1);
                     if (error.is_some())
                         return error;
                 }

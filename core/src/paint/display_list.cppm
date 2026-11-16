@@ -25,7 +25,7 @@ class DrawOp {
               (External, (ContentSource source; Rect destination; ImageFit fit;
                           ImageSampling sampling; Color placeholder;
                           ImageBlend blend{ImageBlend::SourceOver};)),
-              (Children))
+              (Children, (Transform parent_coordinates{};)))
 };
 
 enum class RecordingError {
@@ -271,6 +271,17 @@ class DisplayListRecorder {
         children_ = true;
         operations_.push(DrawOp::Children());
     }
+    void children(Transform parent_coordinates) {
+        if (!active()) return;
+        if (children_) { reject(RecordingError::DuplicateChildren); return; }
+        if (!parent_coordinates.valid()) { reject(RecordingError::InvalidValue); return; }
+        children_ = true;
+        operations_.push(DrawOp::Children(parent_coordinates));
+    }
+    void suppress_children() {
+        if (active()) children_ = true;
+    }
+    auto has_children() const -> bool { return children_; }
     auto finish() && -> Result<DisplayList, RecordingError> {
         if (!active())
             return Err(*error_);

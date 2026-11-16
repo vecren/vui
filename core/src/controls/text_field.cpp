@@ -208,16 +208,19 @@ void TextFieldState::handle(EventContext &context, const RoutedEvent &event) {
     }
     PointerKey pointer{input.device, input.pointer};
     if (input.type == EventType::PointerDown && (input.pointer_kind == PointerKind::Touch || input.button == PointerButton::Primary)) {
+        auto position = context.content_position();
+        if (position.is_none()) return;
         if (pointer_.is_some() || context.capture_pointer().is_err()) return;
         auto select_all=options_.select_all_on_focus && !focused_;
         pointer_ = Some(pointer); context.focus();
-        if (auto at = hit(event.local); !select_all && at.is_some() && accept(edit_.select({input.modifiers.shift ? value.selection.anchor : *at, *at})))
+        if (auto at = hit(*position); !select_all && at.is_some() && accept(edit_.select({input.modifiers.shift ? value.selection.anchor : *at, *at})))
             reset_native(context, value.composing);
         reset_blink();
         consume(context); return;
     }
     if (input.type == EventType::PointerMove && pointer_ == Some(pointer)) {
-        if (auto at = hit(event.local); at.is_some()) accept(edit_.select({value.selection.anchor, *at}));
+        auto position = context.content_position();
+        if (position.is_some()) if (auto at = hit(*position); at.is_some()) accept(edit_.select({value.selection.anchor, *at}));
         consume(context); return;
     }
     if (input.type == EventType::PointerUp && pointer_ == Some(pointer) && (input.pointer_kind == PointerKind::Touch || input.button == PointerButton::Primary)) {

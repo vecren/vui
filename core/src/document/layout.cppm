@@ -2,6 +2,7 @@ export module vui:document.layout;
 import :node.types;
 import :document.snapshot;
 import :binding.signal;
+import :document.reveal;
 using namespace rstd::prelude;
 using namespace rstd::literals;
 

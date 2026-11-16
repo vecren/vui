@@ -9,6 +9,7 @@ export import :text;
 export import :image;
 export import :layout;
 export import :paint;
+export import :modifier;
 export import :content;
 export import :scene;
 export import :document;

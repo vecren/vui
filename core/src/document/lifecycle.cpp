@@ -10,6 +10,16 @@ void UiDocument::sweep_bindings() {
         if (!value)
             continue;
         auto &node = *value;
+        bool modifiers_changed{};
+        for (usize i{}; i < node.modifiers.len();) {
+            if (node.modifiers[i].binding.alive()) { ++i; continue; }
+            node.modifiers.remove(i);
+            modifiers_changed = true;
+        }
+        if (modifiers_changed) {
+            node.paint_dirty = true;
+            changed(true, Some(id));
+        }
         if (node.layout_binding.is_some() && !node.layout_binding->alive()) {
             node.layout_strategy = None();
             node.layout_binding = None();
@@ -24,7 +34,7 @@ void UiDocument::sweep_bindings() {
     }
     bound_nodes_.retain([&](UiId id) {
         auto node = resolve(id);
-        return node && (node->layout_binding.is_some() || node->paint_binding.is_some());
+        return node && (node->layout_binding.is_some() || node->paint_binding.is_some() || !node->modifiers.is_empty());
     });
 }
 
@@ -40,7 +50,7 @@ auto UiDocument::acquire_read() -> Result<ReadScope, UiError> {
     evaluating_ = true; return Ok(ReadScope(*this));
 }
 
-UiDocument::~UiDocument() { bindings_.close(); }
+UiDocument::~UiDocument() { bindings_.close(); clear_phase_observations(); }
 
 auto UiDocument::acquire_route() -> Result<RouteScope, UiError> {
     if (!can_route())
@@ -53,6 +63,7 @@ auto UiDocument::cancel_mutations() -> Result<Vec<MutationResult>, UiError> {
     if (routing_ || draining_ || animation_dispatching_ || (layout_active_ || painting_ || evaluating_ || editing_))
         return Err(UiError::Routing);
     auto pending = rstd::exchange(mutations_, Vec<Box<Mutation>>{});
+    apply_phase_invalidations();
     Vec<MutationResult> results;
     for (const auto &mutation : pending)
         results.push({mutation->id, Some(UiError::Cancelled)});
@@ -62,6 +73,7 @@ auto UiDocument::cancel_mutations() -> Result<Vec<MutationResult>, UiError> {
 auto UiDocument::flush_mutations() -> Result<Vec<MutationResult>, UiError> {
     if (routing_ || draining_ || animation_dispatching_ || (layout_active_ || painting_ || evaluating_ || editing_))
         return Err(UiError::Routing);
+    apply_phase_invalidations();
     draining_ = true;
     auto pending = rstd::exchange(mutations_, Vec<Box<Mutation>>{});
     Vec<MutationResult> results;

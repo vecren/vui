@@ -16,6 +16,9 @@ auto ImageData::without_metadata() const -> ImageData {
     return result;
 }
 auto ImagePlacement::content_position(Point local, ContentBounds bounds) const -> Option<Point> {
+    auto inverse = local_to_node.inverse();
+    if (inverse.is_none()) return None();
+    local = inverse->map(local);
     const auto &d = destination;
     const auto &s = source;
     if (!finite(local.x) || !finite(local.y) || !d.valid() || d.width <= 0 || d.height <= 0 ||

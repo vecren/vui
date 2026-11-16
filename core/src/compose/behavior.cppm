@@ -30,6 +30,8 @@ struct AttachedBehaviorConfig {
     virtual auto update(AttachedBehaviorState &, BehaviorContext &) const -> ComposeResult<empty> = 0;
     virtual auto attach(AttachedBehaviorState &, BehaviorContext &) const -> ComposeResult<EffectLease> = 0;
     virtual auto input() const -> bool = 0;
+    virtual auto modifier() const -> bool = 0;
+    virtual auto bind_modifier(UiDocument &, UiId, NodeStateKey, AttachedBehaviorState &) const -> Result<Binding, UiError> = 0;
     virtual auto prepare_input(EventRouter &, EventRouter::BehaviorEdit &, const UiDocument::PreparedEdit &,
                                UiNodeRef, NodeStateKey, AttachedBehaviorState &) const -> Result<Binding, InputError> = 0;
 };
@@ -68,6 +70,16 @@ template <class T> struct AttachedBehaviorModel final : AttachedBehaviorConfig {
         } else return Ok(EffectLease{});
     }
     auto input() const -> bool override { return rstd::Impled<State, vui::Behavior>; }
+    auto modifier() const -> bool override {
+        return rstd::Impled<State, vui::LayoutModifier> || rstd::Impled<State, vui::DrawModifier>;
+    }
+    auto bind_modifier(UiDocument &document, UiId target, NodeStateKey role, AttachedBehaviorState &state) const
+        -> Result<Binding, UiError> override {
+        if constexpr (rstd::Impled<State, vui::LayoutModifier> || rstd::Impled<State, vui::DrawModifier>)
+            return document.bind_modifier(target,
+                static_cast<AttachedBehaviorValue<State> &>(state).receiver.downgrade(), role);
+        else return Err(UiError::InvalidValue);
+    }
     auto prepare_input(EventRouter &input, EventRouter::BehaviorEdit &edit, const UiDocument::PreparedEdit &document,
                        UiNodeRef target, NodeStateKey role, AttachedBehaviorState &state) const -> Result<Binding, InputError> override {
         if constexpr (rstd::Impled<State, vui::Behavior>)

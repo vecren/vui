@@ -22,9 +22,16 @@ class HitTest {
         if (inverse.is_none())
             return None();
         auto local = inverse->map(parent_point);
-        if (!finite(local.x) || !finite(local.y) || !node->properties.clip.contains(local) ||
-            !node->properties.layout_clip.contains(local))
+        if (!finite(local.x) || !finite(local.y))
             return None();
+        if (node->properties.clip.enabled) {
+            auto coordinates = node->properties.clip_transform.inverse();
+            if (coordinates.is_none() || !node->properties.clip.contains(coordinates->map(local))) return None();
+        }
+        if (node->properties.layout_clip.enabled) {
+            auto coordinates = node->properties.layout_clip_transform.inverse();
+            if (coordinates.is_none() || !node->properties.layout_clip.contains(coordinates->map(local))) return None();
+        }
         for (auto i = node->children.len(); i > usize(); --i) {
             auto hit = target(update, node->children[i - usize(1)], local, depth + 1);
             if (hit.is_some())

@@ -12,7 +12,7 @@ auto ScrollInteraction::acquire() -> bool {
 }
 
 auto ScrollInteraction::local_event(const InputSnapshot &snapshot,const InputEvent &input) -> Option<InputEvent> {
-    auto transform=snapshot.local_to_surface(root_);if (transform.is_err()) return None();
+    auto transform=snapshot.content_to_surface(root_);if (transform.is_err()) return None();
     auto inverse=transform->inverse();if (inverse.is_none()) return None();
     auto local=inverse->map(input.position);if (!finite(local.x) || !finite(local.y)) return None();
     bool reset=inverse_.is_some() && *inverse_!=*inverse;

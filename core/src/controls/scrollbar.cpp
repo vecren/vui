@@ -42,8 +42,8 @@ auto ScrollbarState::sample_repeat(UiId id,MotionContext &context) -> Result<Mot
         repeat_sampled_=context.now_ns();auto generation=press_generation_;
         session_.document().defer(id,lifetime_.guard(),[id,generation](UiDocument &ui)->Result<empty,UiError>{
             auto state=ui.state<ScrollbarState>(id);if (!state || !state->repeating_ || state->press_generation_!=generation || !state->session_.input().pointer_available(id)) return Ok(empty{});
-            auto snapshot=state->session_.input().snapshot();if (snapshot.is_none()) return Ok(empty{});auto transform=snapshot->local_to_surface(id);if (transform.is_err() || transform->inverse().is_none()) return Ok(empty{});
-            auto bounds=snapshot->get(id)->layout_bounds;state->page_at(id,transform->inverse()->map(state->track_position_),{bounds.width,bounds.height});return Ok(empty{});
+            auto snapshot=state->session_.input().snapshot();if (snapshot.is_none()) return Ok(empty{});auto transform=snapshot->content_to_surface(id);if (transform.is_err() || transform->inverse().is_none()) return Ok(empty{});
+            auto visual=snapshot->get(id);if (!visual) return Ok(empty{});state->page_at(id,transform->inverse()->map(state->track_position_),visual->content_geometry.size);return Ok(empty{});
         }).unwrap();
     }
     return Ok(MotionStatus::Running);
@@ -90,10 +90,26 @@ auto ScrollbarState::bind_scroll(UiDocument &ui,UiId id,UiId scroll) -> Result<e
 }
 
 void ScrollbarState::handle(EventContext &context,const RoutedEvent &event) {
-    const auto &input=event.input;auto visual=context.visual(event.current);if (!visual) return;
-    PointerKey pointer{input.device,input.pointer};bool vertical=this->vertical();auto coordinate=vertical ? event.local.y : event.local.x;
-    auto track=vertical ? visual->layout_bounds.height : visual->layout_bounds.width;
-    auto geometry=ScrollbarLayout{options_,value_};auto rect=geometry.bounds({visual->layout_bounds.width,visual->layout_bounds.height});auto length=vertical ? rect.height : rect.width;auto travel=track-geometry.length(track);
+    const auto &input=event.input;
+    PointerKey pointer{input.device,input.pointer};bool vertical=this->vertical();
+    if (input.type==EventType::PointerCancel || input.type==EventType::CaptureLost) {
+        if (pointer_==Some(pointer)) clear_press();
+        return;
+    }
+    if (input.type==EventType::KeyDown) {
+        if (event.target!=event.current) return;Scalar next=value_.position;
+        if (input.key==Key::Home) next=0;else if (input.key==Key::End) next=1;
+        else if (input.key==Key::PageUp) next-=page();else if (input.key==Key::PageDown) next+=page();
+        else if (input.key==(vertical ? Key::Up : Key::Left)) next-=options_.line_step;
+        else if (input.key==(vertical ? Key::Down : Key::Right)) next+=options_.line_step;else return;
+        write(context.document(),event.current,next);context.prevent_default();context.stop_propagation();return;
+    }
+    auto visual=context.visual(event.current);if (!visual) return;
+    auto local=context.content_position();if (local.is_none()) return;
+    auto size=visual->content_geometry.size;
+    auto coordinate=vertical ? local->y : local->x;
+    auto track=vertical ? size.height : size.width;
+    auto geometry=ScrollbarLayout{options_,value_};auto rect=geometry.bounds(size);auto length=vertical ? rect.height : rect.width;auto travel=track-geometry.length(track);
     auto lead=vertical ? options_.handle_insets.top : options_.handle_insets.left;
     auto drag=[&]{if (travel>0) write(context.document(),event.current,(coordinate-lead-grab_*length)/travel);};
     switch (input.type) {
@@ -101,11 +117,11 @@ void ScrollbarState::handle(EventContext &context,const RoutedEvent &event) {
         if (pointer_.is_some() || (input.pointer_kind!=PointerKind::Touch && input.button!=PointerButton::Primary)) return;
         context.focus();if (scroll_.valid() && ScrollView::stop(context.document(),scroll_).is_err()) unbind_scroll();
         auto start=vertical ? rect.y : rect.x;
-        if (rect.contains(event.local) && travel>0) {
+        if (rect.contains(*local) && travel>0) {
             if (context.capture_pointer().is_err()) return;pointer_=Some(pointer);grab_=length>0 ? (coordinate-start)/length : Scalar(0);
         } else if (travel>0) {
             if (options_.repeat_track) {if (context.capture_pointer().is_err()) return;pointer_=Some(pointer);repeating_=true;track_position_=input.position;++press_generation_;repeat_sampled_=context.document().animation_sample_time().unwrap_or(0);wake();}
-            page_at(event.current,event.local,{visual->layout_bounds.width,visual->layout_bounds.height});
+            page_at(event.current,*local,size);
         }
         break;
     }
@@ -113,16 +129,6 @@ void ScrollbarState::handle(EventContext &context,const RoutedEvent &event) {
     case EventType::PointerUp:
         if (pointer_!=Some(pointer) || (input.pointer_kind!=PointerKind::Touch && input.button!=PointerButton::Primary)) return;
         if (!repeating_) drag();clear_press();context.release_pointer();break;
-    case EventType::PointerCancel:
-    case EventType::CaptureLost:if (pointer_!=Some(pointer)) return;clear_press();return;
-    case EventType::KeyDown: {
-        if (event.target!=event.current) return;Scalar next=value_.position;
-        if (input.key==Key::Home) next=0;else if (input.key==Key::End) next=1;
-        else if (input.key==Key::PageUp) next-=page();else if (input.key==Key::PageDown) next+=page();
-        else if (input.key==(vertical ? Key::Up : Key::Left)) next-=options_.line_step;
-        else if (input.key==(vertical ? Key::Down : Key::Right)) next+=options_.line_step;else return;
-        write(context.document(),event.current,next);break;
-    }
     default:return;
     }
     context.prevent_default();context.stop_propagation();

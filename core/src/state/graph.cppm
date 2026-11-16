@@ -1,6 +1,7 @@
 export module vui:state.graph;
 import rstd;
 import ligraph;
+import :state.tracking;
 using namespace rstd::prelude;
 
 export namespace vui::state {
@@ -375,6 +376,8 @@ class GraphView {
     }
     template <class T, class F>
     auto watch(const Value<T> &value, F callback) const -> Result<Subscription, StateError>;
+    template <class F>
+    auto watch(NodeId value, F callback) const -> Result<Subscription, StateError>;
 };
 class StateWriteGuard {
     rstd::rc::Rc<GraphData> data_;
@@ -585,6 +588,9 @@ class ReadBatch {
         auto node = data_.get()->resolve(value.id());
         if (node.get()->type != rstd::any::TypeId::of<T>())
             return Err(StateError::TypeMismatch);
+        if (auto observer = ReadTracking::current())
+            if (auto error = observer->observed(value.graph(), value.id()); error.is_some())
+                return Err(*error);
         return Ok(ValueSnapshot<T>(node.get()->current, node.get()->version, epoch_));
     }
 };
@@ -606,6 +612,10 @@ template <class T> auto read(const Value<T> &value) -> Result<ValueSnapshot<T>, 
 }
 template <class T, class F>
 auto GraphView::watch(const Value<T> &value, F callback) const -> Result<Subscription, StateError> {
+    return watch(value.id(), rstd::move(callback));
+}
+template <class F>
+auto GraphView::watch(NodeId value, F callback) const -> Result<Subscription, StateError> {
     auto opened = open();
     if (opened.is_err())
         return Err(opened.unwrap_err());
@@ -615,11 +625,11 @@ auto GraphView::watch(const Value<T> &value, F callback) const -> Result<Subscri
     data.get()->prune_observers();
     if (auto error = data.get()->check(); error.is_some())
         return Err(*error);
-    if (auto error = data.get()->validate(value.id()); error.is_some())
+    if (auto error = data.get()->validate(value); error.is_some())
         return Err(*error);
     if (data.get()->observers.len() >= data.get()->limits.observers)
         return Err(StateError::Capacity);
-    auto observer = rstd::rc::make_rc<Observer>(value.id(), rstd::move(callback));
+    auto observer = rstd::rc::make_rc<Observer>(value, rstd::move(callback));
     data.get()->observers.push(observer.clone());
     data.get()->stats.observers = data.get()->observers.len();
     return Ok(Subscription(rstd::move(observer), data.downgrade()));
@@ -668,6 +678,7 @@ template <class T> class Computed {
     auto operator=(Computed &&) -> Computed & = default;
     auto value() const -> Value<T> { return owner_.value(); }
     auto invalidate() -> Result<empty, StateError> {
+        if (ReadTracking::current()) return Err(StateError::Reentrant);
         auto opened = value().graph().open();
         if (opened.is_err())
             return Err(opened.unwrap_err());
@@ -708,6 +719,7 @@ class GraphUpdate {
             data_.get()->transaction = false;
     }
     template <class T> auto set(const Cell<T> &cell, T value) -> Result<empty, StateError> {
+        if (ReadTracking::current()) return Err(StateError::Reentrant);
         if (!data_)
             return Err(StateError::Closed);
         if (auto error = data_.get()->check(); error.is_some())
@@ -743,6 +755,7 @@ class GraphUpdate {
         return Ok(ValueSnapshot<T>(node.get()->current, node.get()->version, data_.get()->epoch));
     }
     auto commit() -> Result<CommitResult, StateError> {
+        if (ReadTracking::current()) return Err(StateError::Reentrant);
         if (!data_)
             return Err(StateError::Closed);
         auto data = data_;
@@ -786,6 +799,7 @@ class GraphUpdate {
     }
 };
 inline auto begin_update(GraphView graph) -> Result<GraphUpdate, StateError> {
+    if (ReadTracking::current()) return Err(StateError::Reentrant);
     auto opened = graph.open();
     if (opened.is_err())
         return Err(opened.unwrap_err());
@@ -816,6 +830,7 @@ struct ValueEqual {
 };
 template <class T, class Equal>
 auto allocate_node(rstd::rc::Rc<GraphData> &data, Equal comparison, NodeOptions options, bool observed = false) -> Result<rstd::rc::Rc<Node>, StateError> {
+        if (ReadTracking::current()) return Err(StateError::Reentrant);
         if (auto error = data.get()->check(); error.is_some())
             return Err(*error);
         if ((!observed && (data.get()->busy() || data.get()->write_blocks)) || data.get()->transaction)
@@ -911,6 +926,9 @@ class ObservationBatch {
         if (result.is_err()) return Err(result.unwrap_err());
         auto node = data_.get()->resolve(value.id());
         if (node.get()->type != rstd::any::TypeId::of<T>()) return Err(StateError::TypeMismatch);
+        if (auto observer = ReadTracking::current())
+            if (auto error = observer->observed(value.graph(), value.id()); error.is_some())
+                return Err(*error);
         return Ok(ValueSnapshot<T>(node.get()->current, node.get()->version, epoch_));
     }
     template <class T, class F>
@@ -1016,6 +1034,7 @@ class Graph {
         return view().watch(value, rstd::move(callback));
     }
     auto close() -> Result<empty, StateError> {
+        if (ReadTracking::current()) return Err(StateError::Reentrant);
         if (data_.get()->closed)
             return Ok(empty{});
         if (auto error = data_.get()->check(); error.is_some())

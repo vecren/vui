@@ -222,6 +222,7 @@ auto UiSession::settle(Size size, Serial sample_time, UpdateStats &stats) -> Res
 
 UiSession::~UiSession() {
     updates_.close(*this);
+    document_.clear_phase_observations();
     document_.bindings().set_waker(None());
     state_bindings_.close();
 }
@@ -513,6 +514,7 @@ auto UiSession::close() -> Result<empty, SessionError> {
         return Err(SessionError{SessionStage::Input, {}, Some(result.unwrap_err())});
     for (auto &mutation : document_.cancel_mutations().unwrap())
         mutations_.push(rstd::move(mutation));
+    document_.clear_phase_observations();
     document_.bindings().close();
     endpoint_.close();
     content_.clear();

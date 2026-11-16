@@ -56,6 +56,11 @@ auto UiDocument::relation_access(UiId id, const UiTreeAccess &access) -> Result<
 void UiDocument::remount(UiId id) {
     detach_animations(id);
     auto &node = *resolve(id);
+    for (auto &observation : node.phase_observations) {
+        if (observation) observation.get()->close();
+        observation = {};
+    }
+    node.paint_dirty = true;
     node.measure_dirty = true;
     node.arrange_dirty = true;
     node.subtree_arrange_dirty = true;
@@ -88,6 +93,7 @@ void UiDocument::erase(UiId id) {
         slot.node->layout_binding->disconnect();
     if (slot.node->paint_binding.is_some())
         slot.node->paint_binding->disconnect();
+    for (const auto &entry : slot.node->modifiers) entry.binding.disconnect();
     auto children = rstd::move(slot.node->children);
     for (auto child : children)
         erase(child);

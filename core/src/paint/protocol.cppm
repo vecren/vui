@@ -15,10 +15,12 @@ class PaintContext {
     DisplayListRecorder &recorder_;
     bool repaint_{};
     NodeStyle style_;
+    Option<Transform> children_mapping_;
 
   public:
-    PaintContext(UiId id, Size size, DisplayListRecorder &recorder, NodeStyle style)
-        : id_(id), size_(size), recorder_(recorder), style_(style) {}
+    PaintContext(UiId id, Size size, DisplayListRecorder &recorder, NodeStyle style,
+                 Option<Transform> children_mapping = {})
+        : id_(id), size_(size), recorder_(recorder), style_(style), children_mapping_(children_mapping) {}
     auto style() const -> const NodeStyle & { return style_; }
     auto id() const -> UiId { return id_; }
     auto size() const -> Size { return size_; }
@@ -53,7 +55,10 @@ class PaintContext {
                   ImageBlend blend = ImageBlend::SourceOver) {
         recorder_.external(rstd::move(source), destination, fit, sampling, placeholder, blend);
     }
-    void children() { recorder_.children(); }
+    void children() {
+        if (children_mapping_.is_some()) recorder_.children(*children_mapping_);
+        else recorder_.children();
+    }
     void request_repaint() { repaint_ = true; }
     auto repaint_requested() const -> bool { return repaint_; }
 };

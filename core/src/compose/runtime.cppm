@@ -132,11 +132,16 @@ struct AttachedBehaviorSlot {
     rstd::rc::Rc<AttachedBehaviorState> state;
     rstd::rc::Rc<AttachedBehaviorConfig> config;
     Option<Binding> input;
+    Option<Binding> modifier;
     Option<EffectLease> lease;
     bool attempted{};
     AttachedBehaviorSlot(Key name, rstd::rc::Rc<AttachedBehaviorState> value, rstd::rc::Rc<AttachedBehaviorConfig> descriptor)
         : key(rstd::move(name)), state(rstd::move(value)), config(rstd::move(descriptor)) {}
-    void close() { if (input.is_some()) input->disconnect(); lease = None(); }
+    void close() {
+        if (input.is_some()) input->disconnect();
+        if (modifier.is_some()) modifier->disconnect();
+        lease = None();
+    }
 };
 struct AttachedBehaviorDraft {
     rstd::rc::Rc<AttachedBehaviorSlot> slot;

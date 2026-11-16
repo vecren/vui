@@ -195,7 +195,7 @@ class TextDecorations {
                ((*data_)->text == (*other.data_)->text && spans() == other.spans());
     }
 };
-struct TextPlacement { TextLayout layout; Point origin; };
+struct TextPlacement { TextLayout layout; Point origin; Transform local_to_node; };
 using vectext::TextService;
 using FontFace = vectext::FontInstance;
 } // namespace vui

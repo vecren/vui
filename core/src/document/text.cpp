@@ -307,7 +307,9 @@ auto UiDocument::text_placement(UiId id) -> Result<TextPlacement, UiError> {
     if (result.is_err())
         return Err(result.unwrap_err());
     auto layout = rstd::move(result).unwrap();
-    return Ok(TextPlacement{rstd::move(layout), text_origin(*resolve(id))});
+    auto &node = *resolve(id);
+    return Ok(TextPlacement{rstd::move(layout), text_origin(node),
+        node.modifiers.is_empty() ? Transform{} : node.modifier_content_transform});
 }
 
 auto UiDocument::text_error(UiId id) -> Result<Option<TextError>, UiError> {

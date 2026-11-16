@@ -11,6 +11,7 @@ import :binding.scope;
 import :binding.signal;
 import :layout.protocol;
 import :paint.protocol;
+import :modifier.protocol;
 import :motion.properties;
 import :state.targets;
 import :document.edit;
@@ -21,6 +22,7 @@ import :document.text;
 import :document.content;
 import :document.animation;
 import :document.tree;
+import :document.phase;
 using namespace rstd::prelude;
 using namespace rstd::literals;
 
@@ -85,6 +87,9 @@ class UiDocument {
     Index depth_limit_{256};
     bool routing_{}, draining_{}, evaluating_{}, editing_{};
     Serial rejected_cleanups_{};
+    DocumentPhaseTransaction *phase_transaction_{};
+    Vec<UiPhaseDiagnostic> phase_diagnostics_;
+    Vec<rstd::rc::Weak<DocumentPhaseObservation>> phase_invalidations_;
     Serial next_mutation_{1};
     Vec<Box<Mutation>> mutations_;
 
@@ -132,6 +137,11 @@ class UiDocument {
     }
     void dirty_measure(UiId id);
     void dirty_arrange(UiId id);
+    auto observe_phase(UiId id, UiPhase phase) -> DocumentPhaseReadScope;
+    void schedule_phase(rstd::rc::Rc<DocumentPhaseObservation> observation);
+    void apply_phase_invalidations();
+    auto publish_phase_reads(DocumentPhaseTransaction &transaction) -> Option<UiError>;
+    void discard_phase_reads(DocumentPhaseTransaction &transaction);
     void changed(bool layout, Option<UiId> target = {});
     void request_layout(UiId id);
     void apply_layout_requests();
@@ -209,6 +219,16 @@ class UiDocument {
         -> Option<UiError>;
     struct MeasureContext;
     struct ArrangeContext;
+    struct ModifierMeasure;
+    struct ModifierArrange;
+    struct ModifierDraw;
+    auto measure_content(UiId, LayoutConstraints, Index) -> Result<Size, UiError>;
+    auto measure_modifier(UiId, usize, LayoutConstraints, Index) -> Result<Size, UiError>;
+    auto arrange_content(UiId, Size, Index, Scalar) -> Option<UiError>;
+    auto arrange_modifier(UiId, usize, Size, Transform, Index) -> Option<UiError>;
+    auto paint_content(UiId, Node &, DisplayListRecorder &, bool &) -> Option<UiError>;
+    auto paint_modifier(UiId, Node &, usize, DisplayListRecorder &, Transform, bool &) -> Option<UiError>;
+    auto register_modifier(UiId, NodeStateKey, BindingGuard, Box<ModifierReceiver>) -> Result<empty, UiError>;
     auto measure(UiId id, LayoutConstraints available, Index depth) -> Option<UiError>;
     static auto aligned_offset(Scalar remaining, Alignment align) -> Scalar {
         return align == Alignment::Center ? remaining / 2 : align == Alignment::End ? remaining : 0;
@@ -220,7 +240,8 @@ class UiDocument {
         auto bounds = text.layout->logical_bounds();
         // Explicit alignment keeps the request box origin when content overflows it.
         auto aligned = text.width.is_some() && text.alignment != TextAlignment::Natural;
-        return {node.style.layout.padding - (aligned ? 0 : bounds.x), node.style.layout.padding - bounds.y};
+        auto padding = node.modifiers.is_empty() ? node.style.layout.padding : Scalar(0);
+        return {padding - (aligned ? 0 : bounds.x), padding - bounds.y};
     }
     static auto place_image_content(const Node &node) -> Option<ImagePlacement>;
     auto paint(UiId id, Node &node) -> Option<UiError>;
@@ -336,6 +357,9 @@ class UiDocument {
         return paint_diagnostics_.as_slice();
     }
     auto invalidate_paint(UiId id) -> Result<empty, UiError>;
+    auto invalidate_placement(UiId id) -> Result<empty, UiError>;
+    auto phase_diagnostics() const -> slice<UiPhaseDiagnostic> { return phase_diagnostics_.as_slice(); }
+    void clear_phase_observations();
     auto revision() const -> Serial { return revision_; }
     auto routing() const -> bool { return routing_ || evaluating_ || editing_; }
     auto can_route() const -> bool {
@@ -343,7 +367,7 @@ class UiDocument {
     }
     auto can_animate() const -> bool { return !layout_active_ && !painting_ && !evaluating_ && !editing_; }
     auto acquire_route() -> Result<RouteScope, UiError>;
-    auto pending_mutations() const -> usize { return mutations_.len(); }
+    auto pending_mutations() const -> usize { return mutations_.len() + phase_invalidations_.len(); }
     auto cancel_mutations() -> Result<Vec<MutationResult>, UiError>;
     template <class F> auto defer(F callback) -> Result<Serial, UiError> {
         if (layout_active_ || painting_ || evaluating_ || editing_)
@@ -618,6 +642,50 @@ class UiDocument {
     auto text_placement(UiId id) -> Result<TextPlacement, UiError>;
     auto text_error(UiId id) -> Result<Option<TextError>, UiError>;
     template <class T>
+        requires (rstd::Impled<T, LayoutModifier> || rstd::Impled<T, DrawModifier>)
+    auto bind_modifier(UiId id, rstd::rc::Weak<T> receiver, NodeStateKey role)
+        -> Result<Binding, UiError> {
+        auto binding = bindings_.make(receiver);
+        struct Adapter final : ModifierReceiver {
+            rstd::rc::Weak<T> receiver;
+            explicit Adapter(rstd::rc::Weak<T> value) : receiver(rstd::move(value)) {}
+            auto layout() const -> bool override { return rstd::Impled<T, LayoutModifier>; }
+            auto drawing() const -> bool override { return rstd::Impled<T, DrawModifier>; }
+            auto measure(ModifierMeasureContext &context, LayoutConstraints constraints)
+                -> Result<Size, UiError> override {
+                if constexpr (rstd::Impled<T, LayoutModifier>) {
+                    auto value = receiver.upgrade();
+                    if (value.is_none()) return Err(UiError::Cancelled);
+                    return rstd::as<LayoutModifier>(*value->get()).measure(context, constraints);
+                } else return Err(UiError::InvalidValue);
+            }
+            auto arrange(ModifierArrangeContext &context, Size size)
+                -> Result<empty, UiError> override {
+                if constexpr (rstd::Impled<T, LayoutModifier>) {
+                    auto value = receiver.upgrade();
+                    if (value.is_none()) return Err(UiError::Cancelled);
+                    return rstd::as<LayoutModifier>(*value->get()).arrange(context, size);
+                } else return Err(UiError::InvalidValue);
+            }
+            auto draw(ModifierDrawContext &context) -> Result<empty, UiError> override {
+                if constexpr (rstd::Impled<T, DrawModifier>) {
+                    auto value = receiver.upgrade();
+                    if (value.is_none()) return Err(UiError::Cancelled);
+                    return rstd::as<DrawModifier>(*value->get()).draw(context);
+                } else return Err(UiError::InvalidValue);
+            }
+        };
+        auto adapter = Box<Adapter>::make(rstd::move(receiver));
+        auto installed = register_modifier(id, role, binding.guard(),
+            Box<ModifierReceiver>::from_raw(rstd::move(adapter).into_raw().template cast<ModifierReceiver>()));
+        if (installed.is_err()) return Err(installed.unwrap_err());
+        return Ok(rstd::move(binding));
+    }
+    auto set_modifier_order(UiId, Vec<NodeStateKey>) -> Result<empty, UiError>;
+    auto invalidate_modifier(UiId, NodeStateKey) -> Result<empty, UiError>;
+    auto modifier_geometry(UiId, NodeStateKey) -> Result<ModifierGeometry, UiError>;
+    auto content_geometry(UiId) -> Result<ModifierGeometry, UiError>;
+    template <class T>
         requires rstd::Impled<T, Layout>
     auto install_layout(UiId id, T strategy) -> Result<empty, UiError> {
         if (layout_active_ || painting_ || evaluating_ || editing_ || routing_)
@@ -839,6 +907,7 @@ class UiDocument {
         auto rect = region.is_some() ? *region : item->layout_bounds;
         if (!rect.valid())
             return Err(UiError::InvalidValue);
+        DocumentRevealRegion visible(rect);
         Vec<UiId> path;
         auto cursor = Some(target);
         while (cursor.is_some()) {
@@ -882,6 +951,13 @@ class UiDocument {
             const auto &node = *update.get(id);
             const auto &clip = node.properties.clip;
             if (node.viewport.is_some() && id != target) {
+                auto inverse = node.properties.clip_transform.inverse();
+                if (inverse.is_none()) return Ok(BringIntoViewResult{RevealStatus::NonInvertible});
+                auto mapped = visible.map(*inverse);
+                if (mapped.is_err()) return Err(mapped.unwrap_err());
+                auto bounds = visible.bounds();
+                if (bounds.is_err()) return Err(bounds.unwrap_err());
+                rect = bounds.unwrap();
                 const auto &metrics = *node.viewport;
                 Point requested{metrics.offset.x + nearest(rect.x, rect.width, clip.rect.x,
                                                            metrics.viewport.width),
@@ -891,50 +967,36 @@ class UiDocument {
                     return Err(UiError::InvalidValue);
                 Point offset{limit(requested.x, metrics.maximum.x),
                              limit(requested.y, metrics.maximum.y)};
-                rect.x -= offset.x - metrics.offset.x;
-                rect.y -= offset.y - metrics.offset.y;
-                if (!rect.valid())
-                    return Err(UiError::InvalidValue);
+                auto shifted = visible.map({1, 0, 0, 1, metrics.offset.x - offset.x,
+                                           metrics.offset.y - offset.y});
+                if (shifted.is_err()) return Err(shifted.unwrap_err());
+                mapped = visible.map(node.properties.clip_transform);
+                if (mapped.is_err()) return Err(mapped.unwrap_err());
                 if (offset != metrics.offset)
                     changes.push(OffsetChange{id, offset});
             }
             Clip clips[]{node.properties.clip, node.properties.layout_clip};
-            for (const auto &clip : clips)
-                if (clip.enabled) {
-                    auto right = rect.x + rect.width, bottom = rect.y + rect.height;
-                    auto clip_right = clip.rect.x + clip.rect.width,
-                         clip_bottom = clip.rect.y + clip.rect.height;
-                    if (rect.x < clip.rect.x || rect.y < clip.rect.y || right > clip_right ||
-                        bottom > clip_bottom)
-                        result.status = RevealStatus::Partial;
-                    auto left = maximum(rect.x, clip.rect.x), top = maximum(rect.y, clip.rect.y);
-                    right = right < clip_right ? right : clip_right;
-                    bottom = bottom < clip_bottom ? bottom : clip_bottom;
-                    if (right < left || bottom < top) {
-                        result.status = RevealStatus::Partial;
-                        break;
-                    }
-                    rect = {left, top, right - left, bottom - top};
-                }
-            if (node.parent.is_some()) {
-                auto matrix = node.properties.transform;
-                Point corners[]{matrix.map({rect.x, rect.y}),
-                                matrix.map({rect.x + rect.width, rect.y}),
-                                matrix.map({rect.x, rect.y + rect.height}),
-                                matrix.map({rect.x + rect.width, rect.y + rect.height})};
-                auto left = corners[0].x, right = left, top = corners[0].y, bottom = top;
-                for (auto corner : corners) {
-                    if (!finite(corner.x) || !finite(corner.y))
-                        return Err(UiError::InvalidValue);
-                    left = corner.x < left ? corner.x : left;
-                    right = maximum(right, corner.x);
-                    top = corner.y < top ? corner.y : top;
-                    bottom = maximum(bottom, corner.y);
-                }
-                rect = {left, top, right - left, bottom - top};
-                if (!rect.valid())
-                    return Err(UiError::InvalidValue);
+            Transform coordinates[]{node.properties.clip_transform, node.properties.layout_clip_transform};
+            for (unsigned index = 0; index < 2; ++index) {
+                if (!clips[index].enabled) continue;
+                auto inverse = coordinates[index].inverse();
+                if (inverse.is_none()) return Ok(BringIntoViewResult{RevealStatus::NonInvertible});
+                auto mapped = visible.map(*inverse);
+                if (mapped.is_err()) return Err(mapped.unwrap_err());
+                auto clipped = visible.clip(clips[index].rect);
+                if (clipped.is_err()) return Err(clipped.unwrap_err());
+                if (clipped.unwrap()) result.status = RevealStatus::Partial;
+                mapped = visible.map(coordinates[index]);
+                if (mapped.is_err()) return Err(mapped.unwrap_err());
             }
+            if (visible.points.is_empty()) { result.status = RevealStatus::Partial; break; }
+            if (node.parent.is_some()) {
+                auto mapped = visible.map(node.properties.transform);
+                if (mapped.is_err()) return Err(mapped.unwrap_err());
+            }
+            auto bounds = visible.bounds();
+            if (bounds.is_err()) return Err(bounds.unwrap_err());
+            rect = bounds.unwrap();
         }
         for (const auto &change : changes) {
             auto &view = **resolve(change.id)->viewport;

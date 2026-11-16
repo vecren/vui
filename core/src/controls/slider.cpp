@@ -19,15 +19,21 @@ auto SliderOptions::bounded(Scalar value) const -> Scalar {
 auto SliderState::geometry(UiId id,Point local) const -> Option<Geometry> {
     auto snapshot=session_.input().snapshot();if(snapshot.is_none())return None();
     auto range=parts_.range.valid() ? parts_.range : id;auto node=snapshot->get(range);if(!node)return None();
-    auto mapped=snapshot->map_point(id,range,local);if(mapped.is_err())return None();
-    Geometry result{*mapped,options_.axis==SliderAxis::Horizontal ? node->layout_bounds.width : node->layout_bounds.height};
+    auto source=snapshot->get(id);if(!source)return None();
+    auto source_point=source->content_position(local);if(source_point.is_none())return None();
+    auto transform=snapshot->content_transform_to(id,range);if(transform.is_err())return None();
+    auto mapped=transform->map(*source_point);if(!finite(mapped.x) || !finite(mapped.y))return None();
+    auto size=node->content_geometry.size;
+    Geometry result{mapped,options_.axis==SliderAxis::Horizontal ? size.width : size.height};
     if(parts_.handle.valid()){
         auto thumb=snapshot->get(parts_.handle);if(!thumb)return None();
-        const Point corners[]{{0,0},{thumb->layout_bounds.width,0},{0,thumb->layout_bounds.height},{thumb->layout_bounds.width,thumb->layout_bounds.height}};
+        auto bounds=thumb->content_geometry.size;
+        const Point corners[]{{0,0},{bounds.width,0},{0,bounds.height},{bounds.width,bounds.height}};
+        auto handle_transform=snapshot->content_transform_to(parts_.handle,range);if(handle_transform.is_err())return None();
         Scalar left{},top{},right{},bottom{};bool first=true;
-        for(auto corner:corners){auto point=snapshot->map_point(parts_.handle,range,corner);if(point.is_err())return None();
-            if(first){left=right=point->x;top=bottom=point->y;first=false;}
-            else{left=rstd::cmp::min(left,point->x);right=rstd::cmp::max(right,point->x);top=rstd::cmp::min(top,point->y);bottom=rstd::cmp::max(bottom,point->y);}}
+        for(auto corner:corners){auto point=handle_transform->map(corner);if(!finite(point.x) || !finite(point.y))return None();
+            if(first){left=right=point.x;top=bottom=point.y;first=false;}
+            else{left=rstd::cmp::min(left,point.x);right=rstd::cmp::max(right,point.x);top=rstd::cmp::min(top,point.y);bottom=rstd::cmp::max(bottom,point.y);}}
         result.handle={left,top,right-left,bottom-top};result.handle_length=options_.axis==SliderAxis::Horizontal ? right-left : bottom-top;
     }
     return Some(result);

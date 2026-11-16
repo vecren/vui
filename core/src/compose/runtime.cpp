@@ -184,11 +184,34 @@ void CompositionRuntime::activate(ComposeDraft &draft, CommittedContext &context
         };
         auto updated = behavior.config->update(*slot.get()->state.get(), attached);
         if (updated.is_err()) { slot.get()->attempted = true; report(updated.unwrap_err()); continue; }
+        if (slot->modifier.is_some() && slot->modifier->alive()) {
+            auto invalidated = attached.document().invalidate_modifier(attached.target(), slot->role);
+            if (invalidated.is_err()) report(ComposeError(ComposeStage::Effect, Some(invalidated.unwrap_err())));
+        }
         if (slot->attempted) continue;
         slot.get()->attempted = true;
+        if (behavior.config->modifier() && slot->modifier.is_none()) {
+            auto bound = behavior.config->bind_modifier(attached.document(), attached.target(), slot->role, *slot.get()->state.get());
+            if (bound.is_err()) { report(ComposeError(ComposeStage::Effect, Some(bound.unwrap_err()))); continue; }
+            slot.get()->modifier = Some(bound.unwrap());
+        }
         auto started = behavior.config->attach(*slot.get()->state.get(), attached);
         if (started.is_ok()) slot.get()->lease = Some(started.unwrap());
         else report(started.unwrap_err());
+    }
+    if (draft.instance->id.is_some()) {
+        Vec<NodeStateKey> order;
+        for (const auto &behavior : draft.attached)
+            if (behavior.slot->modifier.is_some() && behavior.slot->modifier->alive())
+                order.push(NodeStateKey(behavior.slot->role));
+        if (!order.is_empty()) {
+            auto ordered = context.session().document().set_modifier_order(*draft.instance->id, rstd::move(order));
+            if (ordered.is_err()) {
+                auto error = ComposeError(ComposeStage::Effect, Some(ordered.unwrap_err()));
+                error.node = draft.instance->id; error.source = draft.element.data().source;
+                signal.get()->report(rstd::move(error));
+            }
+        }
     }
     if (draft.scope.is_some())
         for (auto &effect : draft.instance.get()->scope.get()->effects) {

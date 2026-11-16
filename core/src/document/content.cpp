@@ -21,6 +21,12 @@ auto UiDocument::place_image_content(const Node &node) -> Option<ImagePlacement>
     const auto &image = **node.image;
     if (image.data.is_none())
         return None();
+    if (!node.modifiers.is_empty()) {
+        auto size = node.modifier_content_size;
+        auto placed = place_image(*image.data, {0, 0, size.width, size.height}, image.fit).unwrap();
+        placed.local_to_node = node.modifier_content_transform;
+        return Some(rstd::move(placed));
+    }
     auto padding = node.style.layout.padding;
     return Some(place_image(*image.data,
                             {padding, padding,
@@ -84,14 +90,17 @@ auto UiDocument::scene_placement(UiId id) -> Result<Option<ScenePlacement>, UiEr
     if (frame.is_none())
         return Ok(Option<ScenePlacement>{});
     auto info = frame->info();
-    auto padding = node->style.layout.padding;
+    auto chained = !node->modifiers.is_empty();
+    auto size = chained ? node->modifier_content_size : node->measured;
+    auto padding = chained ? Scalar(0) : node->style.layout.padding;
     auto placed = place_image(
         Size{Scalar(info.width), Scalar(info.height)},
-        {padding, padding, limit(node->measured.width - 2 * padding, node->measured.width),
-         limit(node->measured.height - 2 * padding, node->measured.height)},
+        {padding, padding, limit(size.width - 2 * padding, size.width),
+         limit(size.height - 2 * padding, size.height)},
         scene.fit);
     if (placed.is_err())
         return Err(UiError::InvalidValue);
+    if (chained) placed->local_to_node = node->modifier_content_transform;
     return Ok(Some(ScenePlacement{info, placed.unwrap()}));
 }
 
@@ -183,52 +192,77 @@ auto UiDocument::image_placement(UiId id) -> Result<Option<ImagePlacement>, UiEr
     return Ok(place_image_content(*node));
 }
 
-auto UiDocument::paint(UiId id, Node &node) -> Option<UiError> {
-    painting_ = true;
-    struct Guard {
-        bool &active;
-        ~Guard() { active = false; }
-    } guard{painting_};
-    CpuTimer timer(active_timings_ ? &active_timings_->paint : nullptr);
-    DisplayListRecorder recorder;
+auto UiDocument::paint_content(UiId id, Node &node, DisplayListRecorder &recorder, bool &repaint)
+    -> Option<UiError> {
     auto style = effective_style(node);
+    auto chained = !node.modifiers.is_empty();
+    if (chained) style.layout.padding = 0;
+    auto size = chained ? node.modifier_content_size : node.measured;
+    auto child_space = chained ? node.modifier_content_transform.inverse() : None<Transform>();
     if (style.background.a > 0)
-        recorder.rect({0, 0, node.measured.width, node.measured.height}, style.background,
+        recorder.rect({0, 0, size.width, size.height}, style.background,
                       style.radius);
     if (node.text.is_some() && (*node.text)->layout.is_some()) {
         auto &text = **node.text;
-        recorder.text(TextLayout(*text.layout), text_origin(node), text.color, text.effects, TextColors(text.colors), TextDecorations(text.decorations), TextInlineImages(text.inline_images));
+        auto origin = text_origin(node);
+        recorder.text(TextLayout(*text.layout), origin, text.color, text.effects, TextColors(text.colors), TextDecorations(text.decorations), TextInlineImages(text.inline_images));
     }
     if (node.image.is_some() && (*node.image)->data.is_some()) {
         auto &image = **node.image;
-        auto placed = *place_image_content(node);
+        auto placed = chained ? place_image(*image.data, {0, 0, size.width, size.height}, image.fit).unwrap()
+                              : *place_image_content(node);
         recorder.image(ImageData(*image.data), placed.destination, placed.source,
                        image.sampling, image.tint, ImageEdges::All, false,
                        ImageBlend::SourceOver, image.radial);
     }
     if (node.scene.is_some()) {
         const auto &scene = **node.scene;
-        auto padding = node.style.layout.padding;
+        auto padding = chained ? Scalar(0) : node.style.layout.padding;
         Rect box{padding, padding,
-                 limit(node.measured.width - 2 * padding, node.measured.width),
-                 limit(node.measured.height - 2 * padding, node.measured.height)};
+                 limit(size.width - 2 * padding, size.width),
+                 limit(size.height - 2 * padding, size.height)};
         if (scene.source.is_some())
             recorder.external(*scene.source, box, scene.fit, scene.sampling, scene.placeholder);
         else
             recorder.rect(box, scene.placeholder);
     }
-    bool repaint{};
     if (node.painter.is_some()) {
-        PaintContext context(id, node.measured, recorder, style);
+        PaintContext context(id, size, recorder, style, child_space);
         auto result = (*node.painter)->paint(context);
         if (result.is_err()) {
-            paint_diagnostics_.push({id, {}, result.unwrap_err()});
             return Some(result.unwrap_err());
         }
-        repaint = context.repaint_requested();
+        repaint |= context.repaint_requested();
     } else if (node.kind != LayoutKind::Leaf && node.kind != LayoutKind::Text &&
                node.kind != LayoutKind::Image && node.kind != LayoutKind::Scene) {
-        recorder.children();
+        if (child_space.is_some()) recorder.children(*child_space);
+        else recorder.children();
+    }
+    return None();
+}
+
+auto UiDocument::paint(UiId id, Node &node) -> Option<UiError> {
+    painting_ = true;
+    struct Guard {
+        bool &active;
+        ~Guard() { active = false; }
+    } guard{painting_};
+    auto observation = observe_phase(id, UiPhase::Paint);
+    CpuTimer timer(active_timings_ ? &active_timings_->paint : nullptr);
+    DisplayListRecorder recorder;
+    bool repaint{};
+    Option<UiError> error;
+    if (node.modifiers.is_empty()) error = paint_content(id, node, recorder, repaint);
+    else {
+        recorder.save();
+        recorder.transform(node.modifiers[usize()].local_to_node);
+        error = paint_modifier(id, node, usize(), recorder, node.modifiers[usize()].local_to_node, repaint);
+        recorder.restore();
+        if (!recorder.has_children()) recorder.suppress_children();
+    }
+    if (error.is_some()) {
+        paint_diagnostics_.push({id, {}, *error});
+        return error;
     }
     auto recorded = rstd::move(recorder).finish();
     if (recorded.is_err()) {
@@ -240,6 +274,7 @@ auto UiDocument::paint(UiId id, Node &node) -> Option<UiError> {
         paint_diagnostics_.push({id, {}, UiError::MissingChild});
         return Some(UiError::PaintFailed);
     }
+    if (auto error = observation.finish(); error.is_some()) return error;
     node.content = rstd::move(content);
     node.paint_dirty = repaint;
     if (repaint)

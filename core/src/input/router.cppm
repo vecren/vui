@@ -42,6 +42,7 @@ class EventContext {
   public:
     auto document() -> UiDocument &;
     auto visual(UiId id) const -> const UiVisual *;
+    auto content_position() const -> Option<Point>;
     auto completed_content(UiId id, Serial source_id) const -> Result<Option<FrameContent>, FrameError>;
     auto completed_image(UiId id, Serial image_id) const -> Result<Option<FrameImage>, FrameError>;
     auto scroll_remaining() const -> Point { return remaining_scroll_; }
