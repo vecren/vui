@@ -27,14 +27,21 @@ struct NinePatchSpec {
     Option<Insets> destination_insets;
     bool draw_center{true};
 };
-inline auto compute_nine_patch(const ImageRegion &region, const NinePatchSpec &spec,
+struct NinePatchRegion {
+    Rect source;
+    Scalar density{1};
+    auto valid() const -> bool {
+        return source.valid() && finite(density) && density > 0;
+    }
+};
+inline auto compute_nine_patch(NinePatchRegion region, const NinePatchSpec &spec,
                                Rect destination) -> Result<Vec<ImagePlacement>, ImageError> {
     auto border = spec.source_insets;
     auto target =
         spec.destination_insets.is_some()
             ? *spec.destination_insets
-            : Insets{border.left / region.image.density(), border.top / region.image.density(),
-                     border.right / region.image.density(), border.bottom / region.image.density()};
+            : Insets{border.left / region.density, border.top / region.density,
+                     border.right / region.density, border.bottom / region.density};
     if (!region.valid() || !destination.valid() || !border.valid() || !target.valid() ||
         border.left + border.right > region.source.width ||
         border.top + border.bottom > region.source.height || !finite(target.left + target.right) ||
@@ -86,5 +93,11 @@ inline auto compute_nine_patch(const ImageRegion &region, const NinePatchSpec &s
                                                                                          : 0u))});
         }
     return Ok(rstd::move(pieces));
+}
+inline auto compute_nine_patch(const ImageRegion &region, const NinePatchSpec &spec,
+                               Rect destination) -> Result<Vec<ImagePlacement>, ImageError> {
+    if (!region.valid()) return Err(ImageError::InvalidValue);
+    return compute_nine_patch(NinePatchRegion{region.source, region.image.density()}, spec,
+                              destination);
 }
 } // namespace vui

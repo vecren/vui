@@ -388,6 +388,7 @@ class StateAnimationPlayer {
     StateAnimationPlayer(const StateAnimationPlayer &)=delete;
     StateAnimationPlayer(StateAnimationPlayer &&)=default;
     auto operator=(StateAnimationPlayer &&) -> StateAnimationPlayer & =default;
+    auto clone() const -> StateAnimationPlayer {return copy();}
     auto values() const -> slice<Scalar> {return values_.as_slice();}
     auto owner() const -> Serial {return owner_;}
     auto status() const -> StateAnimationStatus {

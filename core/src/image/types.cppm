@@ -31,9 +31,11 @@ struct ImageTextureOptions {
     ImageWrap wrap_u{ImageWrap::Clamp},wrap_v{ImageWrap::Clamp};
     ImageMipmapSampling mipmaps{ImageMipmapSampling::None};
     Scalar mip_bias{};
+    Scalar max_anisotropy{1};
     auto valid() const -> bool {
         return unsigned(wrap_u)<=unsigned(ImageWrap::Mirror) && unsigned(wrap_v)<=unsigned(ImageWrap::Mirror) &&
-            unsigned(mipmaps)<=unsigned(ImageMipmapSampling::Linear) && finite(mip_bias) && mip_bias>=-16 && mip_bias<=16;
+            unsigned(mipmaps)<=unsigned(ImageMipmapSampling::Linear) && finite(mip_bias) && mip_bias>=-16 && mip_bias<=16 &&
+            finite(max_anisotropy) && max_anisotropy>=1 && max_anisotropy<=16;
     }
     auto operator==(const ImageTextureOptions &) const -> bool=default;
 };
