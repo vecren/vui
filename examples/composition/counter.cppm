@@ -48,6 +48,23 @@ auto MakeContent(int id) -> cx::Content {
     });
 }
 
+auto MakeMovingBadge() -> cx::MovableContent {
+    return cx::MovableContent([] [[vui::compose]] () -> cx::ComposeResult<cx::Element> {
+        auto saved = cx::state(0);
+        if (saved.is_err()) return Err(saved.unwrap_err());
+        auto count = saved.unwrap();
+        auto value = cx::read(count.value());
+        if (value.is_err()) return Err(value.unwrap_err());
+        auto accent = cx::read(theme::local_accent);
+        if (accent.is_err()) return Err(accent.unwrap_err());
+        auto title = rstd::format("移动 {}", value.unwrap().value());
+        return Ok(cx::button(theme::button_label(title.as_str(), theme::surface, 12), [count] {
+            return count.update([](int value) { return value + 1; });
+        }, ButtonStyleBuilder{theme::button_style(true)}.normal(accent.unwrap().value()).build())
+            .style(NodeStyleBuilder{}.width(92).height(28).build()));
+    });
+}
+
 auto MakeIncrement(cx::State<int> count) -> cx::Action<cx::ComposeResult<empty>()> {
     return cx::Action<cx::ComposeResult<empty>()>{[count] {
         return count.update([](int current) { return current + 1; });

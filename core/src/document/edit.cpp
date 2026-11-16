@@ -244,6 +244,25 @@ auto UiDocument::prepare(UiEditBatch edit) -> Result<PreparedEdit, UiEditError> 
         auto node = entry.fresh.is_some() ? &*entry.fresh : resolve(entry.id);
         node->states.reserve(entry.states.len());
     }
+    for (usize i{}; i < edit.entries_.len(); ++i) {
+        if (!edit.entries_[i].preserve_mount) continue;
+        active_ref = Some(UiNodeRef{edit.owner_, i}); operation = UiEditOperation::Relation;
+        auto &entry = result.entries_[i];
+        if (entry.created || !mounted(entry.id)) return fail(UiError::InvalidValue);
+        auto allowed = relation_access(entry.id, edit.access_);
+        if (allowed.is_err()) return fail(allowed.unwrap_err());
+        auto cursor = Some(entry.id);
+        bool connected{};
+        for (Index depth{}; cursor.is_some() && depth < depth_limit_; ++depth) {
+            for (auto retired : result.retired_) if (*cursor == retired) return fail(UiError::InvalidValue);
+            if (cursor == root_) { connected = true; break; }
+            auto candidate = lookup(*cursor);
+            auto live = resolve(*cursor);
+            cursor = candidate ? candidate->parent : live ? live->parent : None<UiId>();
+        }
+        if (!connected) return fail(UiError::InvalidValue);
+        result.preserved_.push(UiId(entry.id));
+    }
     result.slots_ = next_slot > slots_.len() ? next_slot : slots_.len();
     slots_.reserve(result.slots_ - slots_.len());
     input_changes_.reserve(result.entries_.len() + result.retired_.len());
@@ -285,7 +304,7 @@ auto UiDocument::publish(PreparedEdit edit) -> Result<UiCommitReport, UiError> {
         auto node = resolve(id); node->parent = None(); ++node->relation_generation;
     }
     for (auto &entry : edit.entries_) {
-        if (entry.relation_changed && !entry.created) remount(entry.id);
+        if (entry.relation_changed && !entry.created) remount(entry.id, edit.preserved_.as_slice());
         if (entry.previous_style.is_some()) style_changed(entry.id, *resolve(entry.id), *entry.previous_style);
         if (entry.created || !entry.states.is_empty() || !entry.patches.is_empty() || entry.children_owner.is_some() || entry.text.is_some() || entry.image.is_some() || entry.axes.is_some() || entry.children_changed || entry.relation_changed)
             changed(true, Some(entry.id));

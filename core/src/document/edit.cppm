@@ -110,6 +110,7 @@ class UiEditBatch {
         Option<UiTreePermit> children_owner;
         Option<UiTextValue> before_text;
         Option<UiImageValue> before_image;
+        bool preserve_mount{};
     };
     Vec<Entry> entries_;
     Vec<UiId> removed_;
@@ -152,6 +153,7 @@ class UiEditBatch {
     void children(UiNodeRef id, Vec<UiNodeRef> values) {
         if (auto target = entry(id)) target->children = Some(rstd::move(values));
     }
+    void preserve_mount(UiNodeRef id) { if (auto target = entry(id)) target->preserve_mount = true; }
     template <class T> void state(UiNodeRef id, T value, NodeStateKey key = {}) {
         auto target = entry(id); if (!target) return;
         if (node_state(target->states, key)) { error_ = Some(UiError::InvalidValue); return; }

@@ -11,6 +11,86 @@ auto ComposeBuild::observe(vui::state::GraphView graph) -> ComposeResult<vui::st
     observations.push({graph, batch.unwrap()}); return Ok(&observations[observations.len() - usize(1)].batch);
 }
 
+void ComposeBuild::index_movable(const rstd::rc::Rc<ComposeInstance> &instance) {
+    if (!instance) return;
+    if (instance->element.data().kind == ElementKind::Movable)
+        movable.push({instance->element.data().movable.clone(), instance.clone()});
+    for (const auto &child : instance->children) index_movable(child);
+}
+
+auto ComposeBuild::previous_movable(const rstd::rc::Rc<MovableIdentity> &identity) const
+    -> rstd::rc::Rc<ComposeInstance> {
+    for (const auto &entry : movable) if (entry.identity.get() == identity.get()) return entry.instance.clone();
+    return {};
+}
+
+auto ComposeBuild::claim_movable(rstd::rc::Rc<MovableIdentity> identity, rstd::rc::Rc<ComposeInstance> instance)
+    -> ComposeResult<usize> {
+    auto owner = identity->owner.upgrade();
+    if (owner.is_some() && !owner->get()->closed && owner->get()->lifetime.alive() && owner->get() != signal.get()) {
+        auto error = ComposeError(ComposeStage::Key);
+        error.operation = String::make("movable content belongs to another composition"_str);
+        return Err(rstd::move(error));
+    }
+    for (const auto &claim : claims) if (claim.identity.get() == identity.get()) {
+        auto error = ComposeError(ComposeStage::Key);
+        error.operation = String::make("movable content is emitted more than once"_str);
+        return Err(rstd::move(error));
+    }
+    auto position = claims.len();
+    MovableClaim claim{rstd::move(identity), rstd::move(instance)};
+    auto previous = previous_movable(claim.identity);
+    if (previous) committed_roots(*previous, claim.before);
+    claims.push(rstd::move(claim));
+    return Ok(position);
+}
+
+auto ComposeBuild::claim_reused(const rstd::rc::Rc<ComposeInstance> &instance, bool root_claimed)
+    -> ComposeResult<empty> {
+    if (!root_claimed && instance->element.data().kind == ElementKind::Movable) {
+        auto claimed = claim_movable(instance->element.data().movable.clone(), instance.clone());
+        if (claimed.is_err()) return Err(claimed.unwrap_err());
+        committed_roots(*instance, claims[claimed.unwrap()].after);
+    }
+    for (const auto &child : instance->children) {
+        auto claimed = claim_reused(child);
+        if (claimed.is_err()) return claimed;
+    }
+    return Ok(empty{});
+}
+
+auto ComposeBuild::retains(const rstd::rc::Rc<ComposeInstance> &instance) const -> bool {
+    for (const auto &claim : claims) if (claim.instance.get() == instance.get()) return true;
+    return false;
+}
+
+auto ComposeBuild::preserve_moves() -> ComposeResult<empty> {
+    for (const auto &claim : claims) for (const auto &root : claim.after) {
+        if (root.existing.is_none()) continue;
+        bool retained{};
+        for (const auto &previous : claim.before) retained |= previous.existing == root.existing;
+        if (!retained) continue;
+        auto mount = session.document().mount_state(*root.existing);
+        if (mount.is_err()) return Err(ComposeError(ComposeStage::External, Some(mount.unwrap_err())));
+        if (mount->mounted) edit.preserve_mount(edit.existing(*root.existing));
+    }
+    return Ok(empty{});
+}
+
+auto ComposeBuild::retired_roots() const -> Vec<UiId> {
+    Vec<UiId> roots;
+    auto collect = [&](auto &&self, const rstd::rc::Rc<ComposeInstance> &instance) -> void {
+        if (retains(instance)) return;
+        if (instance->id.is_some()) {
+            for (auto id : roots) if (id == *instance->id) return;
+            roots.push(UiId(*instance->id)); return;
+        }
+        for (const auto &child : instance->children) self(self, child);
+    };
+    for (const auto &instance : retired) collect(collect, instance);
+    return roots;
+}
+
 auto ComposeBuild::dirty(const ComposeInstance &instance, const CompositionEnvironment &environment) -> bool {
     if (instance.scope && (instance.scope->dirty || environment.changed(instance.scope->local_reads.as_slice()))) return true;
     for (const auto &mount : instance.mounts) if (!mount->attempted) return true;
@@ -78,9 +158,10 @@ auto CompositionContext::node(Key key) -> ComposeResult<NodeRef> {
     return Ok(NodeRef(static_cast<MemoryValue<rstd::rc::Rc<NodeLink>> &>(*owned.get()->payload.get()).value.clone()));
 }
 
-void CompositionRuntime::cleanup(const rstd::rc::Rc<ComposeInstance> &instance) {
+void CompositionRuntime::cleanup(const rstd::rc::Rc<ComposeInstance> &instance, const ComposeBuild *retained) {
+    if (retained && retained->retains(instance)) return;
     auto value = instance.clone();
-    for (auto &child : value.get()->children) cleanup(child);
+    for (auto &child : value.get()->children) cleanup(child, retained);
     for (usize i = value->attached.len(); i > usize(); --i) value.get()->attached[i - usize(1)].get()->close();
     value.get()->attached.clear();
     if (value->scope) {
@@ -93,12 +174,13 @@ void CompositionRuntime::cleanup(const rstd::rc::Rc<ComposeInstance> &instance) 
     value.get()->mounts.clear(); value.get()->native.clear();
 }
 
-void CompositionRuntime::invalidate_links(const rstd::rc::Rc<ComposeInstance> &instance) {
+void CompositionRuntime::invalidate_links(const rstd::rc::Rc<ComposeInstance> &instance, const ComposeBuild *retained) {
+    if (retained && retained->retains(instance)) return;
     auto value = instance.clone(); value.get()->link.get()->active = false; value.get()->link.get()->alive = false;
     if (value->element.data().reference.is_some()) {
         auto link = value->element.data().reference->link(); link.get()->active = false; link.get()->alive = false;
     }
-    for (const auto &child : value->children) invalidate_links(child);
+    for (const auto &child : value->children) invalidate_links(child, retained);
 }
 
 auto CompositionRuntime::retained_references(const ComposeInstance &instance, UiDocument &document,
@@ -269,6 +351,7 @@ auto CompositionRuntime::perform(UiSession &session) -> ComposeResult<CommitRepo
     }
     if (!content_) return Ok(CommitReport{session.document().revision(), attempt_});
     ComposeBuild build(session, graph_.view(), signal, children_claim_);
+    build.index_movable(root_);
     auto data = rstd::rc::make_rc<ElementData>(); data.get()->kind = ElementKind::Component;
     data.get()->component_type = rstd::any::TypeId::of<RootTag>(); data.get()->view = content_; data.get()->source = content_source_;
     auto built = build.reconcile(Element(rstd::move(data)), root_, !root_ || root_->scope->dirty);
@@ -277,6 +360,9 @@ auto CompositionRuntime::perform(UiSession &session) -> ComposeResult<CommitRepo
         return Err(rstd::move(error));
     }
     auto draft = built.unwrap();
+    auto moves = build.preserve_moves();
+    if (moves.is_err()) return Err(moves.unwrap_err());
+    auto retired_roots = build.retired_roots();
     Vec<ComposeRoot> before;
     if (root_) ComposeBuild::committed_roots(*root_.get(), before);
     if (!ComposeBuild::same_roots(before, draft->roots)) build.children(build.edit.existing(mount_), draft->roots);
@@ -314,6 +400,7 @@ auto CompositionRuntime::perform(UiSession &session) -> ComposeResult<CommitRepo
     auto report = published.unwrap();
     signal.get()->published = true; signal.get()->committed_revision = report.revision;
     commit(*draft.get(), old); root_ = draft.get()->instance.clone();
+    for (auto &claim : build.claims) claim.identity.get()->owner = signal.downgrade();
     for (auto &observation : build.observations) observation.batch.publish();
     auto input_published = session.input().publish_behaviors(rstd::move(behaviors));
     if (input_published.is_err()) {
@@ -322,11 +409,9 @@ auto CompositionRuntime::perform(UiSession &session) -> ComposeResult<CommitRepo
     for (usize i = build.retired_behaviors.len(); i > usize(); --i) build.retired_behaviors[i - usize(1)].get()->close();
     build.retired_behaviors.clear();
     build.observations.clear();
-    for (auto id : report.retired) {
-        auto cancelled = session.input().cancel_subtree(id);
-        if (cancelled.is_err()) { ComposeError error(ComposeStage::Input); error.input = Some(cancelled.unwrap_err()); signal.get()->report(rstd::move(error)); }
-    }
-    for (auto &instance : build.retired) cleanup(instance);
+    auto cancelled = session.input().cancel_detached();
+    if (cancelled.is_err()) { ComposeError error(ComposeStage::Input); error.input = Some(cancelled.unwrap_err()); signal.get()->report(rstd::move(error)); }
+    for (auto &instance : build.retired) cleanup(instance, &build);
     for (usize i = old.len(); i > usize(); --i) {
         auto &entry = old[i - usize(1)];
         for (usize i = entry.effects.len(); i > usize(); --i) {
@@ -340,8 +425,21 @@ auto CompositionRuntime::perform(UiSession &session) -> ComposeResult<CommitRepo
         }
     }
     old.clear();
-    for (auto &instance : build.retired) invalidate_links(instance);
-    for (auto id : report.retired) if (session.document().valid(id)) session.document().destroy(id).unwrap();
+    for (auto &instance : build.retired) invalidate_links(instance, &build);
+    for (auto id : report.retired) {
+        bool present{}; for (auto previous : retired_roots) present |= previous == id;
+        if (!present) retired_roots.push(UiId(id));
+    }
+    Vec<UiId> removed;
+    for (auto id : retired_roots) {
+        bool nested{};
+        for (auto other : retired_roots) if (id != other && session.document().valid(other)) {
+            auto descendant = session.document().is_descendant(other, id);
+            nested |= descendant.is_ok() && descendant.unwrap();
+        }
+        if (!nested) removed.push(UiId(id));
+    }
+    for (auto id : removed) if (session.document().valid(id)) session.document().destroy(id, children_claim_.access()).unwrap();
     old_elements.clear();
     report.retirement = None();
     session.document().notify_edit_targets();
@@ -351,7 +449,7 @@ auto CompositionRuntime::perform(UiSession &session) -> ComposeResult<CommitRepo
         auto applied = (*action)(context); if (applied.is_err()) signal.get()->report(applied.unwrap_err());
     }
     activate(*draft.get(), context);
-    return Ok(CommitReport{report.revision, attempt_, build.evaluations, report.created, report.updated, report.retired.len(), build.comparisons, build.skipped});
+    return Ok(CommitReport{report.revision, attempt_, build.evaluations, report.created, report.updated, removed.len(), build.comparisons, build.skipped});
 }
 
 auto CompositionRuntime::update(UiSession &session) -> Result<empty, UiError> {
@@ -426,10 +524,13 @@ auto compatible(const ElementData &a, const ElementData &b) -> bool {
     if (a.kind == ElementKind::Native) return a.layout == b.layout;
     if (a.kind == ElementKind::Component) return a.component_type == b.component_type;
     if (a.kind == ElementKind::Custom) return a.adapter->type == b.adapter->type;
+    if (a.kind == ElementKind::Movable) return a.movable.get() == b.movable.get();
     return true;
 }
 
 auto same_identity(const ElementData &a, const ElementData &b) -> bool {
+    if (a.kind == ElementKind::Movable || b.kind == ElementKind::Movable)
+        return a.kind == b.kind && a.movable.get() == b.movable.get();
     if (a.identity.is_some() != b.identity.is_some() || a.key.is_some() != b.key.is_some()) return false;
     if (a.identity.is_some() && !a.identity->same_group(*b.identity)) return false;
     if (a.key.is_some()) return *a.key == *b.key;
@@ -442,19 +543,35 @@ auto ComposeBuild::reconcile(Element value, rstd::rc::Rc<ComposeInstance> previo
     if (++nodes > usize(65536) || depth >= 128) return Err(ComposeError(ComposeStage::Limit));
     const auto &data = value.data();
     if (data.invalid) return Err(ComposeError(ComposeStage::Prepare, Some(UiError::InvalidValue)));
+    if (data.kind == ElementKind::Movable && !data.movable) return Err(ComposeError(ComposeStage::Type));
     if (previous && previous->id.is_some() && !session.document().valid(*previous->id))
         return Err(ComposeError(ComposeStage::External, Some(UiError::InvalidId)));
     if (previous && !compatible(data, previous->element.data())) { retire(previous); previous = {}; }
+    if (data.kind == ElementKind::Movable) {
+        auto indexed = previous_movable(data.movable);
+        if (previous && previous.get() != indexed.get()) retire(previous);
+        previous = rstd::move(indexed);
+    }
     auto plan = rstd::rc::make_rc<ComposeDraft>(); auto &draft = *plan.get();
     draft.element = value; draft.fresh = !previous;
     draft.instance = previous ? previous.clone() : rstd::rc::make_rc<ComposeInstance>();
+    Option<usize> movable_claim;
+    if (data.kind == ElementKind::Movable) {
+        auto claimed = claim_movable(data.movable.clone(), draft.instance.clone());
+        if (claimed.is_err()) return Err(claimed.unwrap_err());
+        movable_claim = Some(claimed.unwrap());
+    }
     if (previous && !force && !dirty(*previous.get(), environment)) {
-        draft.reused = true; committed_roots(*previous.get(), draft.roots); return Ok(rstd::move(plan));
+        auto claimed = claim_reused(previous, data.kind == ElementKind::Movable);
+        if (claimed.is_err()) return Err(claimed.unwrap_err());
+        draft.reused = true; committed_roots(*previous.get(), draft.roots);
+        if (movable_claim.is_some()) for (auto root : draft.roots) claims[*movable_claim].after.push(ComposeRoot(root));
+        return Ok(rstd::move(plan));
     }
     for (const auto &payload : draft.instance->native) draft.native.push(payload.clone());
     draft.owns_children = draft.instance->owns_children;
     Vec<Element> children;
-    if (data.kind == ElementKind::Component) {
+    if (data.kind == ElementKind::Component || data.kind == ElementKind::Movable) {
         auto refresh_modifiers = force;
         auto scope = draft.instance->scope ? draft.instance->scope.clone() : rstd::rc::make_rc<ScopeState>();
         auto scope_dirty = scope->dirty || environment.changed(scope->local_reads.as_slice());
@@ -548,6 +665,8 @@ auto ComposeBuild::reconcile(Element value, rstd::rc::Rc<ComposeInstance> previo
             if (match) { old = draft.instance->children[j].clone(); used[j] = true; break; }
         }
         if (old && !force && compatible(child, old->element.data()) && !dirty(*old.get(), environment)) {
+            auto claimed = claim_reused(old);
+            if (claimed.is_err()) return Err(claimed.unwrap_err());
             committed_roots(*old.get(), descendants);
             draft.reused_children.push(old.clone()); draft.committed_children.push(rstd::move(old)); continue;
         }
@@ -637,6 +756,7 @@ auto ComposeBuild::reconcile(Element value, rstd::rc::Rc<ComposeInstance> previo
         }
         draft.roots.push({draft.node, draft.instance->id});
     } else draft.roots = rstd::move(descendants);
+    if (movable_claim.is_some()) for (auto root : draft.roots) claims[*movable_claim].after.push(ComposeRoot(root));
     return Ok(rstd::move(plan));
 }
 } // namespace vui::compose

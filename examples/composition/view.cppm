@@ -60,6 +60,15 @@ auto Screen() -> cx::ComposeResult<cx::Element> {
     auto theme_value = cx::read(theme_choice.value());
     if (theme_value.is_err()) return Err(theme_value.unwrap_err());
     auto accent = theme_value.unwrap().value() ? Color::from_srgba8(117, 76, 157).unwrap() : theme::accent;
+    auto dialog_state = cx::state(false);
+    if (dialog_state.is_err()) return Err(dialog_state.unwrap_err());
+    auto dialog_shown = dialog_state.unwrap();
+    auto dialog_value = cx::read(dialog_shown.value());
+    if (dialog_value.is_err()) return Err(dialog_value.unwrap_err());
+    auto moving_saved = cx::remember<cx::MovableContent>([] { return MakeMovingBadge(); });
+    if (moving_saved.is_err()) return Err(moving_saved.unwrap_err());
+    auto moving = moving_saved.unwrap().get();
+    if (moving.is_err()) return Err(moving.unwrap_err());
     auto saved_order = cx::state(false);
     if (saved_order.is_err()) return Err(saved_order.unwrap_err());
     auto order = saved_order.unwrap();
@@ -141,9 +150,31 @@ auto Screen() -> cx::ComposeResult<cx::Element> {
     auto title = rstd::format("vui {}", "composition"_str);
     auto owned = rstd::format("{}", "ok"_str);
     int samples[]{1, 2, 3};
-    return Ok(cx::provide({theme::local_accent.provides(accent)}, cx::column({
-        cx::column({Title(title.as_str()),
-            label("每张卡片独立计数，移动位置也能保留。"_str, 14, theme::muted)}).gap(8),
+    auto mobile = moving.unwrap()->operator()();
+    auto destinations = cx::row({
+        cx::stack({reversed ? cx::fragment() : mobile})
+            .style(NodeStyleBuilder{}.width(92).height(28).build()).key(cx::Key{1}),
+        cx::column({reversed ? mobile : cx::fragment()})
+            .style(NodeStyleBuilder{}.width(92).height(28).build()).key(cx::Key{2}),
+    }).gap(8);
+    auto help = cx::button(theme::button_label("使用说明"_str), [dialog_shown] { return dialog_shown.set(true); },
+        theme::button_style()).style(NodeStyleBuilder{}.width(112).height(36).vertical(Alignment::Center).build());
+    Vec<cx::Element> overlays;
+    if (dialog_value.unwrap().value()) {
+        auto close = cx::button(theme::button_label("知道了"_str, theme::surface),
+            [dialog_shown] { return dialog_shown.set(false); }, theme::button_style(true))
+            .style(NodeStyleBuilder{}.width(112).height(36).build());
+        auto panel = cx::column({theme::label("试试组合交互"_str, 22, theme::ink, true),
+            theme::label("点击计数，再反转顺序。"_str, 14, theme::muted),
+            theme::label("底部的移动按钮会跨容器保留计数。"_str, 14, theme::muted),
+            theme::label("Esc 或点击遮罩也能关闭说明。"_str, 14, theme::muted), rstd::move(close)})
+            .style(NodeStyleBuilder{}.width(360).height(232).background(theme::surface).radius(14).build())
+            .padding(24).gap(12);
+        overlays.push(cx::dialog(rstd::move(panel), [dialog_shown](PopupCloseReason) { return dialog_shown.set(false); }));
+    }
+    auto body = cx::column({
+        cx::row({cx::column({Title(title.as_str()),
+            label("每张卡片独立计数，移动位置也能保留。"_str, 14, theme::muted)}).gap(8), rstd::move(help)}).gap(24),
         cx::column({theme::label("独立计数"_str, 18, theme::ink, true),
             cx::row(rstd::move(repeated)).gap(16)}).gap(10),
         cx::column({theme::label("试着改变顺序"_str, 18, theme::ink, true),
@@ -154,7 +185,8 @@ auto Screen() -> cx::ComposeResult<cx::Element> {
                 .style(NodeStyleBuilder{}.vertical(Alignment::Center).hit_test_visible(false).build()),
             rstd::move(badge), Badge(6).key(cx::Key{Serial(7)}),
             Content([] { return Badge(2); }), extra(), stored.unwrap(),
-            OwnedBadge(owned), SampleBadge(slice<int>::from_raw_parts(samples, usize(3)))}).gap(8),
-    }).style(NodeStyleBuilder{}.width(800).height(720).build()).gap(18).padding(32)));
+            OwnedBadge(owned), SampleBadge(slice<int>::from_raw_parts(samples, usize(3))), rstd::move(destinations)}).gap(8),
+    }).style(NodeStyleBuilder{}.width(800).height(720).build()).gap(18).padding(32);
+    return Ok(cx::provide({theme::local_accent.provides(accent)}, cx::popup_host(rstd::move(body), rstd::move(overlays))));
 }
 } // namespace composition_example

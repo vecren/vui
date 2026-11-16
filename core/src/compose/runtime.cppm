@@ -166,6 +166,15 @@ struct ComposeRoot {
     Option<UiNodeRef> prepared;
     Option<UiId> existing;
 };
+struct MovableEntry {
+    rstd::rc::Rc<MovableIdentity> identity;
+    rstd::rc::Rc<ComposeInstance> instance;
+};
+struct MovableClaim {
+    rstd::rc::Rc<MovableIdentity> identity;
+    rstd::rc::Rc<ComposeInstance> instance;
+    Vec<ComposeRoot> before, after;
+};
 struct ComposeDraft {
     Element element;
     Option<Element> output;
@@ -196,6 +205,8 @@ class ComposeBuild {
     UiEditBatch edit;
     Vec<Observation> observations;
     Vec<rstd::rc::Rc<ComposeInstance>> retired;
+    Vec<MovableEntry> movable;
+    Vec<MovableClaim> claims;
     Vec<rstd::rc::Rc<AttachedBehaviorSlot>> retired_behaviors;
     Vec<Box<rstd::dyn<rstd::FnMut<ComposeResult<empty>(CommittedContext &)>>>> actions;
     Vec<Box<rstd::dyn<rstd::FnMut<ComposeResult<empty>(UiDocument::PreparedEdit &)>>>> preparers;
@@ -207,12 +218,14 @@ class ComposeBuild {
     auto observe(vui::state::GraphView graph) -> ComposeResult<vui::state::ObservationBatch *>;
     void retire(rstd::rc::Rc<ComposeInstance> instance) {
         retired.push(instance.clone());
-        retire_nodes(*instance.get());
     }
-    void retire_nodes(const ComposeInstance &instance) {
-        if (instance.id.is_some()) { edit.remove(*instance.id); return; }
-        for (const auto &child : instance.children) retire_nodes(*child.get());
-    }
+    void index_movable(const rstd::rc::Rc<ComposeInstance> &);
+    auto previous_movable(const rstd::rc::Rc<MovableIdentity> &) const -> rstd::rc::Rc<ComposeInstance>;
+    auto claim_movable(rstd::rc::Rc<MovableIdentity>, rstd::rc::Rc<ComposeInstance>) -> ComposeResult<usize>;
+    auto claim_reused(const rstd::rc::Rc<ComposeInstance> &, bool root_claimed = false) -> ComposeResult<empty>;
+    auto retains(const rstd::rc::Rc<ComposeInstance> &) const -> bool;
+    auto preserve_moves() -> ComposeResult<empty>;
+    auto retired_roots() const -> Vec<UiId>;
     static auto dirty(const ComposeInstance &instance, const CompositionEnvironment &environment) -> bool;
     static void committed_roots(const ComposeInstance &instance, Vec<ComposeRoot> &roots) {
         if (instance.id.is_some()) roots.push({{}, instance.id});
@@ -385,7 +398,9 @@ class PrepareContext {
     }
 };
 auto compatible(const ElementData &a, const ElementData &b) -> bool;
-inline auto identified(const ElementData &value) -> bool { return value.key.is_some() || value.identity.is_some(); }
+inline auto identified(const ElementData &value) -> bool {
+    return value.kind == ElementKind::Movable || value.key.is_some() || value.identity.is_some();
+}
 auto same_identity(const ElementData &a, const ElementData &b) -> bool;
 
 class CompositionRuntime {
@@ -398,8 +413,8 @@ class CompositionRuntime {
     rstd::source_location content_source_;
     Serial attempt_{};
     Option<CommitReport> last_;
-    static void cleanup(const rstd::rc::Rc<ComposeInstance> &instance);
-    static void invalidate_links(const rstd::rc::Rc<ComposeInstance> &instance);
+    static void cleanup(const rstd::rc::Rc<ComposeInstance> &instance, const ComposeBuild *retained = nullptr);
+    static void invalidate_links(const rstd::rc::Rc<ComposeInstance> &instance, const ComposeBuild *retained = nullptr);
     static void native_roots(const ComposeInstance &instance, Vec<UiId> &result) {
         if (instance.id.is_some()) { result.push(UiId(*instance.id)); return; }
         for (const auto &child : instance.children) native_roots(*child.get(), result);

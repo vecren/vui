@@ -16,6 +16,11 @@ inline auto input_descendant(const InputSnapshot &snapshot, UiId root, UiId id) 
     }
     return false;
 }
+inline auto input_current_mount(UiDocument &document, const InputSnapshot &snapshot, UiId target) -> bool {
+    auto node = snapshot.get(target);
+    auto mount = document.mount_state(target);
+    return node && mount.is_ok() && mount->mounted && mount->generation == node->mount_generation;
+}
 inline auto input_eligible(const InputSnapshot &snapshot, UiId id, bool pointer,
                            bool require_focus = true) -> bool {
     auto cursor = Some(id);
@@ -43,6 +48,7 @@ struct InputScopeOptions {
     FocusBoundary focus{FocusBoundary::Contained};
     PointerBoundary pointer{PointerBoundary::Unrestricted};
     Option<ScopeId> parent;
+    auto operator==(const InputScopeOptions &) const -> bool = default;
 };
 class InputScopes;
 class FocusBookmark {
@@ -73,7 +79,7 @@ class InputScopeRegistration {
         BindingGuard guard;
         ScopeStatus status{ScopeStatus::Pending};
         Serial mount{};
-        bool closing{}, fallback{};
+        bool closing{}, fallback{}, options_dirty{};
         Option<FocusBookmark> restore;
     };
     rstd::rc::Rc<State> state_;
@@ -129,6 +135,29 @@ class InputScopes {
                 return state.get();
         return nullptr;
     }
+    auto validate(UiId root, InputScopeOptions options, Option<ScopeId> current = {}, bool parent_changed = true) -> Option<InputError> {
+        if ((options.focus != FocusBoundary::Unrestricted && options.focus != FocusBoundary::Contained) ||
+            (options.pointer != PointerBoundary::Unrestricted && options.pointer != PointerBoundary::BlockOutside))
+            return Some(InputError::InvalidEvent);
+        if (!parent_changed) return None();
+        auto cursor = options.parent;
+        if (cursor.is_none()) return None();
+        auto direct = find(*cursor);
+        if (!direct || !direct->guard.alive() || direct->closing ||
+            (direct->status != ScopeStatus::Pending && direct->status != ScopeStatus::Active))
+            return Some(InputError::InvalidId);
+        auto contained = document_.is_descendant(direct->root, root);
+        if (contained.is_err() || !contained.unwrap()) return Some(InputError::InvalidId);
+        for (unsigned depth{}; cursor.is_some() && depth < 64; ++depth) {
+            if (cursor == current) return Some(InputError::InvalidId);
+            auto parent = find(*cursor);
+            if (!parent || !parent->guard.alive() || parent->closing ||
+                (parent->status != ScopeStatus::Pending && parent->status != ScopeStatus::Active))
+                return None();
+            cursor = parent->options.parent;
+        }
+        return cursor.is_some() ? Some(InputError::InvalidId) : None<InputError>();
+    }
     template <class T> static void record(Vec<T> &events, T event, Serial &omitted) {
         if (events.len() == usize(256)) {
             events.remove(usize());
@@ -165,15 +194,7 @@ class InputScopes {
         });
         if (scopes_.len() >= usize(64) || next_ == ~Serial{})
             return Err(InputError::Limit);
-        if (options.parent.is_some()) {
-            auto parent = find(*options.parent);
-            if (!parent ||
-                (parent->status != ScopeStatus::Pending && parent->status != ScopeStatus::Active))
-                return Err(InputError::InvalidId);
-            auto contained = document_.is_descendant(parent->root, root);
-            if (contained.is_err() || !contained.unwrap())
-                return Err(InputError::InvalidId);
-        }
+        if (auto error = validate(root, options); error.is_some()) return Err(*error);
         auto lifetime = document_.bindings().make([receiver] { return receiver.alive(); });
         auto state = rstd::rc::make_rc<InputScopeState>();
         state.get()->id = {owner_, static_cast<Index>(next_), next_++};
@@ -185,6 +206,22 @@ class InputScopes {
         scopes_.push(state.clone());
         document_.bindings().wake();
         return Ok(InputScopeRegistration(rstd::move(state), rstd::move(lifetime)));
+    }
+    auto set_options(const InputScopeRegistration &registration, InputScopeOptions options)
+        -> Result<empty, InputError> {
+        if (closed_) return Err(InputError::Unavailable);
+        auto state = find(registration.id());
+        if (!state || state != registration.state_.get() || !state->guard.alive() || state->closing ||
+            (state->status != ScopeStatus::Pending && state->status != ScopeStatus::Active))
+            return Err(InputError::InvalidId);
+        if (state->options == options) return Ok(empty{});
+        if (auto error = validate(state->root, options, Some(ScopeId(state->id)), options.parent != state->options.parent); error.is_some()) return Err(*error);
+        if (state->options != options) {
+            state->options = options;
+            state->options_dirty = true;
+            document_.bindings().wake();
+        }
+        return Ok(empty{});
     }
     auto request(UiId target, Option<ScopeId> scope, BindingGuard guard)
         -> Result<FocusRequestId, InputError> {
@@ -220,52 +257,66 @@ class InputScopes {
             return true;
         for (const auto &value : scopes_)
             if (value.get()->status == ScopeStatus::Pending ||
-                (value.get()->status == ScopeStatus::Active && !value.get()->guard.alive()))
+                (value.get()->status == ScopeStatus::Active &&
+                 (!value.get()->guard.alive() || value.get()->options_dirty)))
                 return true;
         return false;
     }
     auto synchronize(const InputSnapshot &next) -> Option<ScopeRestore> {
-        Option<ScopeRestore> restore;
+        Vec<ScopeRestore> restores;
         InputScopeState *top{};
         for (auto &value : scopes_)
             if (value.get()->status == ScopeStatus::Active)
                 top = value.get();
-        for (auto &value : scopes_) {
-            auto &state = *value.get();
-            if (state.status != ScopeStatus::Active && state.status != ScopeStatus::Pending)
-                continue;
-            auto node = next.get(state.root);
-            auto parent = state.status == ScopeStatus::Pending && state.options.parent.is_some()
-                              ? find(*state.options.parent)
-                              : nullptr;
-            bool valid = node && input_eligible(next, state.root, false, false) &&
-                         (!state.mount || state.mount == node->mount_generation) &&
-                         (state.status == ScopeStatus::Active || state.options.parent.is_none() ||
-                          (parent && parent->status == ScopeStatus::Active &&
-                           input_descendant(next, parent->root, state.root)));
-            if (!state.guard.alive() || state.closing || !valid) {
-                if (&state == top && state.closing && (state.restore.is_some() || state.fallback))
-                    restore = Some(
-                        ScopeRestore{state.restore.is_some() ? *state.restore : FocusBookmark{},
-                                     state.fallback});
-                state.status = state.status == ScopeStatus::Pending && !valid && state.guard.alive()
-                                   ? ScopeStatus::Rejected
-                                   : ScopeStatus::Closed;
-                record(scope_events_,
-                       ScopeEvent{state.id, state.status, next.revision(),
-                                  !valid ? Some(InputError::InvalidId) : None<InputError>()},
-                       diagnostics_.omitted_scope_events);
-                continue;
+        for (usize pass{}; pass <= scopes_.len(); ++pass) {
+            bool progressed{};
+            for (auto &value : scopes_) {
+                auto &state = *value.get();
+                if (state.status != ScopeStatus::Active && state.status != ScopeStatus::Pending)
+                    continue;
+                auto node = next.get(state.root);
+                auto parent = state.options.parent.is_some()
+                                  ? find(*state.options.parent)
+                                  : nullptr;
+                bool root_valid = node && input_eligible(next, state.root, false, false) &&
+                                  (!state.mount || state.mount == node->mount_generation);
+                bool parent_pending = state.status == ScopeStatus::Pending && parent && parent->status == ScopeStatus::Pending &&
+                                      parent->guard.alive() && !parent->closing;
+                if (root_valid && state.guard.alive() && !state.closing && parent_pending) continue;
+                // An active range can outlive the registration used to enter it.
+                bool valid = root_valid && (state.status == ScopeStatus::Active || state.options.parent.is_none() ||
+                    (parent && parent->status == ScopeStatus::Active && parent->guard.alive() && !parent->closing &&
+                     input_descendant(next, parent->root, state.root)));
+                if (!state.guard.alive() || state.closing || !valid) {
+                    if (state.closing && (state.restore.is_some() || state.fallback))
+                        restores.push(ScopeRestore{state.restore.is_some() ? *state.restore : FocusBookmark{}, state.fallback});
+                    state.status = state.status == ScopeStatus::Pending && !valid && state.guard.alive() && !state.closing
+                                       ? ScopeStatus::Rejected
+                                       : ScopeStatus::Closed;
+                    record(scope_events_,
+                           ScopeEvent{state.id, state.status, next.revision(),
+                                      !valid && !state.closing ? Some(InputError::InvalidId) : None<InputError>()},
+                           diagnostics_.omitted_scope_events);
+                    progressed = true;
+                    continue;
+                }
+                if (state.status == ScopeStatus::Pending) {
+                    state.mount = node->mount_generation;
+                    state.status = ScopeStatus::Active;
+                    record(scope_events_, ScopeEvent{state.id, state.status, next.revision(), {}},
+                           diagnostics_.omitted_scope_events);
+                    progressed = true;
+                }
+                state.options_dirty = false;
             }
-            if (state.status == ScopeStatus::Pending) {
-                state.mount = node->mount_generation;
-                state.status = ScopeStatus::Active;
-                record(scope_events_, ScopeEvent{state.id, state.status, next.revision(), {}},
-                       diagnostics_.omitted_scope_events);
-            }
+            if (!progressed) break;
         }
         roots();
-        return restore;
+        if (top && top->status == ScopeStatus::Active) return None();
+        for (usize i = restores.len(); i > usize(); --i)
+            if (restore_target(next, restores[i - usize(1)]).is_some())
+                return Some(ScopeRestore(restores[i - usize(1)]));
+        return restores.is_empty() ? None<ScopeRestore>() : Some(ScopeRestore(restores[usize()]));
     }
     auto restore_target(const InputSnapshot &snapshot, const ScopeRestore &restore)
         -> Option<UiId> {

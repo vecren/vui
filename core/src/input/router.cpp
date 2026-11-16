@@ -219,18 +219,23 @@ auto EventRouter::event(EventType type, const Pointer &pointer) -> InputEvent {
 }
 
 void EventRouter::hover(Pointer &pointer, Option<UiId> target) {
-    if (pointer.hover == target)
+    if (pointer.hover == target && !pointer.hover_dirty)
         return;
-    auto old = pointer.hover.is_some() ? path(*update_, *pointer.hover) : Vec<UiId>{};
+    auto old = rstd::move(pointer.hover_path);
+    if (old.is_empty() && pointer.hover.is_some()) old = path(*update_, *pointer.hover);
     auto next = target.is_some() ? path(*update_, *target) : Vec<UiId>{};
-    usize common{};
-    while (common < old.len() && common < next.len() && old[common] == next[common])
-        ++common;
     pointer.hover = target;
-    for (auto i = old.len(); i > common; --i)
-        route(*update_, old[i - usize(1)], event(EventType::PointerLeave, pointer), true);
-    for (auto i = common; i < next.len(); ++i)
-        route(*update_, next[i], event(EventType::PointerEnter, pointer), true);
+    pointer.hover_dirty = false;
+    for (auto id : next) pointer.hover_path.push(UiId(id));
+    auto contains = [](const Vec<UiId> &nodes, UiId id) {
+        for (auto value : nodes) if (value == id) return true;
+        return false;
+    };
+    for (auto i = old.len(); i > usize(); --i)
+        if (!contains(next, old[i - usize(1)]))
+            route(*update_, old[i - usize(1)], event(EventType::PointerLeave, pointer), true);
+    for (auto id : next)
+        if (!contains(old, id)) route(*update_, id, event(EventType::PointerEnter, pointer), true);
 }
 
 void EventRouter::capture_native(Pointer &pointer, bool enabled) {
@@ -306,15 +311,22 @@ void EventRouter::change_focus(Option<UiId> target, CancelReason text_reason) {
         route(*update_, *target, {EventType::FocusGained}, true);
 }
 
-void EventRouter::cancel_subtree_inputs(UiId root) {
+void EventRouter::cancel_subtree_inputs(UiId root, bool current) {
     if (!update_.is_some() || !update_->get(root)) return;
+    auto affected = [&](UiId target) {
+        if (!current) return input_descendant(*update_, root, target);
+        auto descendant = document_.is_descendant(root, target);
+        return descendant.is_ok() && descendant.unwrap();
+    };
     for (auto &pointer : pointers_) {
-        bool affected = (pointer.capture && input_descendant(*update_, root, *pointer.capture)) ||
-                        (pointer.sequence_target && input_descendant(*update_, root, *pointer.sequence_target));
-        for (auto owner : arena_.owners({pointer.device, pointer.id})) affected |= input_descendant(*update_, root, owner);
-        if (affected) cancel(pointer, CancelReason::Explicit);
+        bool cancel_pointer = (pointer.capture && affected(*pointer.capture)) ||
+                              (pointer.sequence_target && affected(*pointer.sequence_target));
+        for (auto owner : arena_.owners({pointer.device, pointer.id})) cancel_pointer |= affected(owner);
+        if (cancel_pointer) cancel(pointer, CancelReason::Explicit);
     }
-    if (focus_ && input_descendant(*update_, root, *focus_)) change_focus({}, CancelReason::Explicit);
+    if (focus_ && affected(*focus_)) change_focus({}, CancelReason::Explicit);
+    auto cancelled = arena_.cancel_subtree(root, *update_, contacts_.as_slice(), current);
+    if (cancelled.is_err()) failure_ = Some(cancelled.unwrap_err());
 }
 
 auto EventRouter::current_text_state() const -> Option<TextInputState> {
@@ -609,7 +621,7 @@ auto EventRouter::publish_behaviors(BehaviorEdit edit) -> Result<empty, InputErr
         for (usize i{}; i < edit.retired_.len(); ++i) {
             bool previous{};
             for (usize j{}; j < i; ++j) previous |= edit.retired_[j].target == edit.retired_[i].target;
-            if (!previous) cancel_subtree_inputs(edit.retired_[i].target);
+            if (!previous) cancel_subtree_inputs(edit.retired_[i].target, true);
         }
         auto cancelled = end(); if (cancelled.is_err()) failure = Some(cancelled.unwrap_err());
     }
@@ -835,6 +847,39 @@ auto EventRouter::cancel_subtree(UiId root) -> Result<empty,InputError> {
     return command({CommandType::CancelSubtree,0,Some(root)});
 }
 
+auto EventRouter::cancel_detached() -> Result<empty, InputError> {
+    if (closed_) return Err(InputError::Unavailable);
+    if (busy_ || !document_.can_route()) return Err(InputError::Reentrant);
+    if (update_.is_none()) return Ok(empty{});
+    index_routes();
+    begin();
+    auto detached = [&](UiId id) { return !input_current_mount(document_, *update_, id); };
+    for (auto &pointer : pointers_) {
+        bool lost_capture = pointer.capture.is_some() && detached(*pointer.capture);
+        if (pointer.claimed) for (auto owner : arena_.owners({pointer.device, pointer.id}))
+            lost_capture |= detached(owner);
+        auto lost_sequence = pointer.capture.is_none() && pointer.sequence_target.is_some() && detached(*pointer.sequence_target);
+        auto lost_hover = pointer.hover.is_some() && detached(*pointer.hover);
+        if (lost_capture || lost_sequence || (pointer.capture.is_none() && lost_hover)) cancel(pointer, CancelReason::Detached);
+        if (lost_hover) hover(pointer, None());
+        else if (pointer.hover.is_some()) {
+            for (auto i = pointer.hover_path.len(); i > usize(); --i) {
+                auto id = pointer.hover_path[i - usize(1)];
+                if (!detached(id)) continue;
+                route(*update_, id, event(EventType::PointerLeave, pointer), true);
+                pointer.hover_path.remove(i - usize(1));
+                pointer.hover_dirty = true;
+            }
+        }
+    }
+    auto cancelled = arena_.cancel_detached(*update_, contacts_.as_slice());
+    if (cancelled.is_err()) failure_ = Some(cancelled.unwrap_err());
+    if (focus_.is_some() && detached(*focus_)) change_focus(None(), CancelReason::Detached);
+    if (text_client_.is_some() && detached(*text_client_)) cancel_text_input(CancelReason::Detached);
+    availability_dirty_ = true;
+    return end();
+}
+
 auto EventRouter::captured(Index id, DeviceId device) const -> Option<UiId> {
     for (const auto &state : pointers_)
         if (state.id == id && state.device == device)
@@ -850,7 +895,8 @@ auto EventRouter::synchronize(InputSnapshot update) -> Result<empty, InputError>
     if (update.document() != document_.session() ||
         (update_.is_some() && update.revision() < update_->revision()))
         return Err(InputError::InvalidId);
-    if (update_.is_none() || update_->layout_revision() != update.layout_revision())
+    auto route_changed = update_.is_none() || update_->layout_revision() != update.layout_revision();
+    if (route_changed)
         prune_requested_ = true;
     begin();
     controls_ = false;
@@ -910,6 +956,7 @@ auto EventRouter::synchronize(InputSnapshot update) -> Result<empty, InputError>
     if (window_focused_)
         for (auto &state : pointers_) {
             if (state.kind != PointerKind::Touch && state.inside_window) {
+                state.hover_dirty |= route_changed;
                 auto hit = hit_at(*update_, state.position);
                 hover(state, hit.is_some() ? Some(*hit) : None<UiId>());
             }

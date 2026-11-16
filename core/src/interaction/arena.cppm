@@ -168,12 +168,7 @@ class InputArena {
     auto eligible(const InputSnapshot &snapshot, UiId target) -> bool {
         if (scope_root_.is_some() && !input_descendant(snapshot, *scope_root_, target))
             return false;
-        auto node = snapshot.get(target);
-        auto mount = document_.mount_state(target);
-        if (!node || mount.is_err())
-            return false;
-        auto state = mount.unwrap();
-        if (!state.mounted || state.generation != node->mount_generation)
+        if (!input_current_mount(document_, snapshot, target))
             return false;
         auto cursor = Some(target);
         for (unsigned depth{}; cursor.is_some() && depth < 256; ++depth) {
@@ -194,6 +189,23 @@ class InputArena {
         auto value = entry(candidate.id);
         if (value && value->guard.alive())
             value->participant->cancel(context, reason);
+    }
+    template <class Match>
+    auto cancel_matching(const InputSnapshot &previous, slice<PointerContact> contacts, Match match,
+                         CancelReason reason = CancelReason::Detached)
+        -> Result<empty, InputError> {
+        if (busy_) return Err(InputError::Reentrant);
+        busy_ = true;
+        struct Guard { bool &busy; ~Guard() { busy = false; } } guard{busy_};
+        for (auto &stream : streams_) {
+            InputContext context(previous, contacts, stream.key);
+            for (auto &candidate : stream.candidates) {
+                auto value = entry(candidate.id);
+                if (!value || !value->guard.alive()) cancel_candidate(candidate, context, CancelReason::ReceiverLost);
+                else if (match(value->target)) cancel_candidate(candidate, context, reason);
+            }
+        }
+        return Ok(empty{});
     }
 
   public:
@@ -298,6 +310,20 @@ class InputArena {
                 document_.valid(slot.entry->target))
                 return true;
         return false;
+    }
+    auto cancel_detached(const InputSnapshot &previous, slice<PointerContact> contacts)
+        -> Result<empty, InputError> {
+        return cancel_matching(previous, contacts,
+            [&](UiId target) { return !input_current_mount(document_, previous, target); });
+    }
+    auto cancel_subtree(UiId root, const InputSnapshot &previous, slice<PointerContact> contacts, bool current = false)
+        -> Result<empty, InputError> {
+        if (!document_.valid(root)) return Err(InputError::InvalidId);
+        return cancel_matching(previous, contacts, [&](UiId target) {
+            if (!current) return input_descendant(previous, root, target);
+            auto descendant = document_.is_descendant(root, target);
+            return descendant.is_ok() && descendant.unwrap();
+        }, CancelReason::Explicit);
     }
     auto synchronize(const InputSnapshot &previous, const InputSnapshot &next,
                      slice<PointerContact> contacts) -> Result<empty, InputError> {

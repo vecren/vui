@@ -16,21 +16,28 @@ struct PopupOptions {
     EscapePolicy escape{EscapePolicy::Ignore};
     OutsidePressPolicy outside_press{OutsidePressPolicy::Ignore};
     Color backdrop{0, 0, 0, 0};
+    auto operator==(const PopupOptions &) const -> bool = default;
 };
 class Popup {
     struct State {
         UiSession &session;
-        UiId root, content;
+        UiId root, content, host;
         PopupOptions options;
-        Binding lifetime;
+        Binding lifetime, focus_lifetime;
         Binding key_bubble, key_target, outside, global_outside_capture, global_outside_target;
         InputScopeRegistration scope;
         FocusBookmark bookmark;
         Signal<void(PopupCloseReason)> requested;
-        bool opened{};
-        State(UiSession &s, UiId r, UiId c, PopupOptions o)
+        rstd::rc::Weak<State> self;
+        Serial identity{new_session()};
+        bool opened{}, owns_root{};
+        State(UiSession &s, UiId r, UiId c, PopupOptions o, bool owned)
             : session(s), root(r), content(c), options(o),
-              lifetime(s.document().bindings().make()) {}
+              lifetime(s.document().bindings().make()), owns_root(owned) {}
+        auto connect() -> Result<empty, ControlError>;
+        auto connect_outside() -> Result<empty, ControlError>;
+        auto configure(PopupOptions) -> Result<empty, ControlError>;
+        auto replace_content(UiId) -> Result<empty, ControlError>;
         auto open() -> Result<empty, ControlError>;
         auto restore() -> Option<FocusBookmark>;
         void outside_press(EventContext &, const RoutedEvent &event);
@@ -38,9 +45,11 @@ class Popup {
         void key(EventContext &context, const RoutedEvent &event);
         void press(EventContext &context, const RoutedEvent &event);
     };
+    struct RootBinding { rstd::rc::Weak<State> receiver; Serial identity{}; };
     rstd::rc::Rc<State> state_;
     explicit Popup(rstd::rc::Rc<State> state) : state_(rstd::move(state)) {}
     auto change(bool open) -> Result<empty, ControlError>;
+    static auto initialize(UiSession &, UiId, UiId, PopupOptions, bool) -> Result<Popup, ControlError>;
     void dispose();
 
   public:
@@ -51,6 +60,10 @@ class Popup {
     ~Popup() { dispose(); }
     static auto create(UiSession &session, UiId parent, UiId content, PopupOptions options = {})
         -> Result<Popup, ControlError>;
+    static auto bind(UiSession &session, UiId root, UiId content, PopupOptions options = {})
+        -> Result<Popup, ControlError>;
+    auto set_options(PopupOptions options) -> Result<empty, ControlError>;
+    auto set_content(UiId content) -> Result<empty, ControlError>;
     auto root() const -> UiId { return state_ ? state_.get()->root : UiId{}; }
     auto scope_id() const -> ScopeId { return state_ ? state_.get()->scope.id() : ScopeId{}; }
     auto is_open() const -> bool;

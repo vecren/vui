@@ -188,7 +188,7 @@ class UiDocument {
     void detach_animations(UiId id);
     auto start_animation(UiId id, AnimationProperty property, AnimationValue to,
                          AnimationOptions options) -> Result<AnimationId, AnimationError>;
-    void remount(UiId id);
+    void remount(UiId id, slice<UiId> preserved = {});
     static auto limit(Scalar value, Scalar maximum) -> Scalar {
         return value < 0 ? 0 : value > maximum ? maximum : value;
     }
@@ -295,6 +295,7 @@ class UiDocument {
         UiDocument *document_{};
         Vec<Entry> entries_;
         Vec<UiId> retired_;
+        Vec<UiId> preserved_;
         usize slots_{};
         Option<Box<Retirement>> retirement_;
         friend class UiDocument;
@@ -355,6 +356,7 @@ class UiDocument {
     UiDocument(const UiDocument &) = delete;
     auto operator=(const UiDocument &) -> UiDocument & = delete;
     auto session() const -> Serial { return session_; }
+    auto root() const -> Option<UiId> { return root_; }
     auto bindings() -> BindingRegistry & { return bindings_; }
     auto make_tree_owner() -> UiTreeOwner { return UiTreeOwner(session_, bindings_.make()); }
     auto claim_children(UiId id, const UiTreeOwner &owner) -> Result<empty, UiError>;

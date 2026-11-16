@@ -116,6 +116,8 @@ class EventRouter {
         SampleTime sample_time;
         NativeCaptureResult native_capture{NativeCaptureResult::Unsupported};
         bool inside_window{true};
+        Vec<UiId> hover_path;
+        bool hover_dirty{};
     };
     enum class CommandType { Capture, Release, Focus, RestartText, CancelSubtree };
     struct Command {
@@ -217,7 +219,7 @@ class EventRouter {
     void release(Pointer &pointer, bool shared = true);
     void cancel(Pointer &pointer, CancelReason reason = CancelReason::Explicit);
     void change_focus(Option<UiId> target, CancelReason text_reason = CancelReason::FocusLost);
-    void cancel_subtree_inputs(UiId root);
+    void cancel_subtree_inputs(UiId root, bool current = false);
     auto current_text_state() const -> Option<TextInputState>;
     void notify_text_input(bool force);
     void cancel_text_input(CancelReason reason);
@@ -532,12 +534,15 @@ class EventRouter {
     auto contacts() const -> slice<PointerContact> { return contacts_.as_slice(); }
     auto focused() const -> Option<UiId> { return focus_; }
     auto cancel_subtree(UiId root) -> Result<empty,InputError>;
+    auto cancel_detached() -> Result<empty, InputError>;
     auto focus_revision() const -> Serial { return focus_revision_; }
     auto captured(Index id, DeviceId device = 0) const -> Option<UiId>;
     auto open_scope(UiId root, InputScopeOptions options, BindingGuard guard)
         -> Result<InputScopeRegistration, InputError> {
         return scopes_.open(root, options, guard);
     }
+    auto set_scope_options(const InputScopeRegistration &scope, InputScopeOptions options)
+        -> Result<empty, InputError> { return scopes_.set_options(scope, options); }
     auto focus_when_ready(UiId target, Option<ScopeId> scope, BindingGuard guard)
         -> Result<FocusRequestId, InputError> {
         return scopes_.request(target, scope, guard);

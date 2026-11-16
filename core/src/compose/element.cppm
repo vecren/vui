@@ -11,6 +11,14 @@ struct ViewFunction {
     template <class F> explicit ViewFunction(F callback)
         : invoke(Box<rstd::dyn<rstd::FnMut<ComposeResult<Element>(CompositionContext &)>>>::make(rstd::move(callback))) {}
 };
+struct MovableIdentity {
+    Serial identity{new_session()};
+    rstd::rc::Rc<ViewFunction> view;
+    rstd::rc::Weak<ComposeSignal> owner;
+    rstd::source_location source;
+    MovableIdentity(rstd::rc::Rc<ViewFunction> content, rstd::source_location location)
+        : view(rstd::move(content)), source(location) {}
+};
 struct ComponentParameters {
     virtual ~ComponentParameters() = default;
     virtual auto type() const -> rstd::any::TypeId = 0;
@@ -31,7 +39,7 @@ struct AdapterFunction {
     template <class T> explicit AdapterFunction(T config)
         : type(rstd::any::TypeId::of<T>()), value(Box<rstd::dyn<ElementAdapter>>::make(rstd::move(config))) {}
 };
-enum class ElementKind { Native, Fragment, Component, Custom, Provider };
+enum class ElementKind { Native, Fragment, Component, Custom, Provider, Movable };
 enum class ModifierKind { Style, Gap, Padding, Format, Color, Reference, Behavior };
 struct ElementModifier {
     ModifierKind kind;
@@ -106,6 +114,7 @@ struct ElementData {
     Vec<Element> children;
     rstd::any::TypeId component_type{rstd::any::TypeId::of<void>()};
     rstd::rc::Rc<ViewFunction> view;
+    rstd::rc::Rc<MovableIdentity> movable;
     rstd::rc::Rc<ComponentParameters> parameters;
     rstd::rc::Rc<AdapterFunction> adapter;
     Option<NodeRef> reference;

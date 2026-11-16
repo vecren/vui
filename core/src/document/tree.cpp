@@ -53,7 +53,8 @@ auto UiDocument::relation_access(UiId id, const UiTreeAccess &access) -> Result<
     return node->parent.is_some() ? children_access(*node->parent, access) : Result<empty, UiError>(Ok(empty{}));
 }
 
-void UiDocument::remount(UiId id) {
+void UiDocument::remount(UiId id, slice<UiId> preserved) {
+    for (auto root : preserved) if (root == id) return;
     detach_animations(id);
     auto &node = *resolve(id);
     for (auto &observation : node.phase_observations) {
@@ -70,7 +71,7 @@ void UiDocument::remount(UiId id) {
         revoke_property(node, static_cast<PresentationProperty>(property));
     ++node.mount_generation;
     for (auto child : node.children)
-        remount(child);
+        remount(child, preserved);
 }
 
 auto UiDocument::mounted(UiId id) -> bool {
