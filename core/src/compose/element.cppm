@@ -1,6 +1,7 @@
 export module vui.compose:element;
 import :types;
 import :behavior;
+import :environment;
 using namespace rstd::prelude;
 using namespace rstd::literals;
 
@@ -30,7 +31,7 @@ struct AdapterFunction {
     template <class T> explicit AdapterFunction(T config)
         : type(rstd::any::TypeId::of<T>()), value(Box<rstd::dyn<ElementAdapter>>::make(rstd::move(config))) {}
 };
-enum class ElementKind { Native, Fragment, Component, Custom };
+enum class ElementKind { Native, Fragment, Component, Custom, Provider };
 enum class ModifierKind { Style, Gap, Padding, Format, Color, Reference, Behavior };
 struct ElementModifier {
     ModifierKind kind;
@@ -99,6 +100,7 @@ struct ElementData {
     Option<CallIdentity> identity;
     Vec<ElementModifier> modifiers;
     Vec<BehaviorDeclaration> behaviors;
+    Vec<LocalBinding> locals;
     Option<UiTextValue> text;
     Option<UiImageValue> image;
     Vec<Element> children;
@@ -156,6 +158,13 @@ inline auto fragment(Vec<Element> children = {}, rstd::source_location source = 
     auto data = rstd::rc::make_rc<ElementData>(); data.get()->source = source; data.get()->children = rstd::move(children); return Element(rstd::move(data));
 }
 inline auto fragment(initializer_list<Element> children, rstd::source_location source = rstd::source_location::current()) -> Element { return fragment(elements(children), source); }
+auto provide(Vec<LocalBinding> values, Element content, rstd::source_location source = rstd::source_location::current()) -> Element;
+inline auto provide(initializer_list<LocalBinding> values, Element content,
+                    rstd::source_location source = rstd::source_location::current()) -> Element {
+    Vec<LocalBinding> owned;
+    for (const auto &value : values) owned.push(LocalBinding(value));
+    return provide(rstd::move(owned), rstd::move(content), source);
+}
 auto text(ref<str> value, rstd::source_location source = rstd::source_location::current()) -> Element;
 auto image(ImageData value, rstd::source_location source = rstd::source_location::current()) -> Element;
 template <class Tag, class F> auto component(Key key, F evaluate, rstd::source_location source = rstd::source_location::current(),

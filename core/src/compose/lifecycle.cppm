@@ -76,6 +76,12 @@ auto read(vui::state::Value<T> value, CallSite site = {}) -> ComposeResult<vui::
     auto opened = compiler::context(site); if (opened.is_err()) return Err(opened.unwrap_err());
     return compiler::located(opened.unwrap()->read(value), site);
 }
+template <class T>
+[[clang::annotate("vui.compose.hook.v2")]]
+auto read(const CompositionLocal<T> &local, CallSite site = {}) -> ComposeResult<LocalSnapshot<T>> {
+    auto opened = compiler::context(site); if (opened.is_err()) return Err(opened.unwrap_err());
+    return compiler::located(opened.unwrap()->read(local), site);
+}
 [[clang::annotate("vui.compose.hook.v2")]]
 inline auto node(CallSite site = {}) -> ComposeResult<NodeRef> {
     auto opened = compiler::context(site); if (opened.is_err()) return Err(opened.unwrap_err());

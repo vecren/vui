@@ -11,11 +11,17 @@ auto ComposeBuild::observe(vui::state::GraphView graph) -> ComposeResult<vui::st
     observations.push({graph, batch.unwrap()}); return Ok(&observations[observations.len() - usize(1)].batch);
 }
 
-auto ComposeBuild::dirty(const ComposeInstance &instance) -> bool {
-    if (instance.scope && instance.scope->dirty) return true;
+auto ComposeBuild::dirty(const ComposeInstance &instance, const CompositionEnvironment &environment) -> bool {
+    if (instance.scope && (instance.scope->dirty || environment.changed(instance.scope->local_reads.as_slice()))) return true;
     for (const auto &mount : instance.mounts) if (!mount->attempted) return true;
     for (const auto &behavior : instance.attached) if (!behavior->attempted) return true;
-    for (const auto &child : instance.children) if (dirty(*child.get())) return true;
+    auto nested = environment;
+    if (instance.element.data().kind == ElementKind::Provider) {
+        auto provided = environment.extended(instance.element.data().locals.as_slice());
+        if (provided.is_err()) return true;
+        nested = provided.unwrap();
+    }
+    for (const auto &child : instance.children) if (dirty(*child.get(), nested)) return true;
     return false;
 }
 
@@ -81,7 +87,7 @@ void CompositionRuntime::cleanup(const rstd::rc::Rc<ComposeInstance> &instance) 
         auto &scope = *value.get()->scope.get(); scope.alive = false;
         for (usize i = scope.effects.len(); i > usize(); --i) scope.effects[i - usize(1)].get()->lease = None();
         for (auto &slot : scope.memories) slot.get()->alive = false;
-        scope.effects.clear(); scope.reads.clear(); scope.memories.clear();
+        scope.effects.clear(); scope.reads.clear(); scope.local_reads.clear(); scope.memories.clear();
     }
     for (usize i = value->mounts.len(); i > usize(); --i) value.get()->mounts[i - usize(1)].get()->lease = None();
     value.get()->mounts.clear(); value.get()->native.clear();
@@ -142,6 +148,7 @@ void CompositionRuntime::commit(ComposeDraft &draft, Vec<OldScope> &old) {
         scope.get()->memories = rstd::move((**draft.scope).memories);
         scope.get()->effects = rstd::move((**draft.scope).effects);
         scope.get()->reads = rstd::move((**draft.scope).reads); scope.get()->dirty = false;
+        scope.get()->local_reads = rstd::move((**draft.scope).local_reads);
         for (auto &slot : scope.get()->memories) slot.get()->committed = true;
         instance.scope = scope.clone();
     }
@@ -429,7 +436,8 @@ auto same_identity(const ElementData &a, const ElementData &b) -> bool {
     return a.identity.is_some() && a.identity->occurrence == b.identity->occurrence;
 }
 
-auto ComposeBuild::reconcile(Element value, rstd::rc::Rc<ComposeInstance> previous, bool force, Index depth)
+auto ComposeBuild::reconcile(Element value, rstd::rc::Rc<ComposeInstance> previous, bool force, Index depth,
+                             CompositionEnvironment environment)
     -> ComposeResult<rstd::rc::Rc<ComposeDraft>> {
     if (++nodes > usize(65536) || depth >= 128) return Err(ComposeError(ComposeStage::Limit));
     const auto &data = value.data();
@@ -440,23 +448,25 @@ auto ComposeBuild::reconcile(Element value, rstd::rc::Rc<ComposeInstance> previo
     auto plan = rstd::rc::make_rc<ComposeDraft>(); auto &draft = *plan.get();
     draft.element = value; draft.fresh = !previous;
     draft.instance = previous ? previous.clone() : rstd::rc::make_rc<ComposeInstance>();
-    if (previous && !force && !dirty(*previous.get())) {
+    if (previous && !force && !dirty(*previous.get(), environment)) {
         draft.reused = true; committed_roots(*previous.get(), draft.roots); return Ok(rstd::move(plan));
     }
     for (const auto &payload : draft.instance->native) draft.native.push(payload.clone());
     draft.owns_children = draft.instance->owns_children;
     Vec<Element> children;
     if (data.kind == ElementKind::Component) {
+        auto refresh_modifiers = force;
         auto scope = draft.instance->scope ? draft.instance->scope.clone() : rstd::rc::make_rc<ScopeState>();
-        if (force && !draft.fresh && !scope->dirty && data.parameters) {
+        auto scope_dirty = scope->dirty || environment.changed(scope->local_reads.as_slice());
+        if (force && !draft.fresh && !scope_dirty && data.parameters) {
             const auto &previous_parameters = draft.instance->element.data().parameters;
             ++comparisons;
             if (previous_parameters && data.parameters->type() == previous_parameters->type() &&
                 data.parameters->equal(*previous_parameters.get())) { force = false; ++skipped; }
         }
-        if (force || scope->dirty || draft.fresh) {
+        if (force || scope_dirty || draft.fresh) {
             ++evaluations; draft.scope = Some(Box<ScopeDraft>::make(scope));
-            CompositionContext context(*this, **draft.scope);
+            CompositionContext context(*this, **draft.scope, environment);
             auto evaluate = data.view.clone();
             auto evaluated = [&]() -> ComposeResult<Element> {
                 compiler::Activation activation(context);
@@ -472,10 +482,10 @@ auto ComposeBuild::reconcile(Element value, rstd::rc::Rc<ComposeInstance> previo
         auto modified = apply_modifiers(Element(*draft.output), data.modifiers);
         if (modified.is_err()) return Err(modified.unwrap_err());
         children.push(modified.unwrap());
-        if (!data.modifiers.is_empty() || !draft.instance->element.data().modifiers.is_empty()) force = true;
+        if (refresh_modifiers && (!data.modifiers.is_empty() || !draft.instance->element.data().modifiers.is_empty())) force = true;
     } else {
         for (const auto &child : data.children) children.push(Element(child));
-        if (data.kind == ElementKind::Fragment && !data.modifiers.is_empty()) {
+        if ((data.kind == ElementKind::Fragment || data.kind == ElementKind::Provider) && !data.modifiers.is_empty()) {
             if (children.len() != usize(1)) {
                 auto error = ComposeError(ComposeStage::Type);
                 error.operation = String::make("component modifiers require exactly one root"_str); return Err(rstd::move(error));
@@ -516,6 +526,11 @@ auto ComposeBuild::reconcile(Element value, rstd::rc::Rc<ComposeInstance> previo
         }
     }
     if (draft.owns_children && !children.is_empty()) return Err(ComposeError(ComposeStage::Prepare, Some(UiError::InvalidValue)));
+    if (data.kind == ElementKind::Provider) {
+        auto provided = environment.extended(data.locals.as_slice());
+        if (provided.is_err()) return Err(provided.unwrap_err());
+        environment = provided.unwrap();
+    }
     Vec<bool> used;
     for (usize i{}; i < draft.instance->children.len(); ++i) used.push(false);
     Vec<ComposeRoot> descendants;
@@ -532,11 +547,11 @@ auto ComposeBuild::reconcile(Element value, rstd::rc::Rc<ComposeInstance> previo
             bool match = identified(child) ? same_identity(child, candidate) : !identified(candidate) && i == j;
             if (match) { old = draft.instance->children[j].clone(); used[j] = true; break; }
         }
-        if (old && !force && compatible(child, old->element.data()) && !dirty(*old.get())) {
+        if (old && !force && compatible(child, old->element.data()) && !dirty(*old.get(), environment)) {
             committed_roots(*old.get(), descendants);
             draft.reused_children.push(old.clone()); draft.committed_children.push(rstd::move(old)); continue;
         }
-        auto built = reconcile(children[i], rstd::move(old), force, depth + 1);
+        auto built = reconcile(children[i], rstd::move(old), force, depth + 1, environment);
         if (built.is_err()) {
             auto error = built.unwrap_err();
             if (!error.source.line()) error.source = child.source;

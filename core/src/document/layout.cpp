@@ -88,15 +88,17 @@ struct UiDocument::MeasureContext final : LayoutMeasureContext {
     }
     auto measure_child(usize index, LayoutConstraints constraints)
         -> Result<Size, UiError> override {
-        if (error.is_some())
+        if (error.is_some() && *error != UiError::LayoutPending)
             return Err(*error);
         if (index >= child_count() || !constraints.valid()) {
             error = document.layout_failure(id, LayoutIssue::InvalidChild);
             return Err(*error);
         }
-        error = document.measure(node.children[index], constraints, depth + 1);
-        if (error.is_some())
+        auto measured = document.measure(node.children[index], constraints, depth + 1);
+        if (measured.is_some()) {
+            error = measured;
             return Err(*error);
+        }
         visited[index] = true;
         return Ok(Size(document.resolve(node.children[index])->desired));
     }
@@ -237,6 +239,7 @@ struct UiDocument::ArrangeContext final : LayoutArrangeContext {
 
 auto UiDocument::measure_content(UiId id, LayoutConstraints inner, Index depth) -> Result<Size, UiError> {
     auto &node = *resolve(id);
+    if (auto pending = require_subcomposition(id, inner); pending.is_some()) return Err(*pending);
     const auto style = effective_style(node).layout;
     auto fail = [&](LayoutIssue issue, UiError error = UiError::LayoutFailed) -> Result<Size, UiError> {
         layout_failure(id, issue, error);
@@ -311,10 +314,14 @@ auto UiDocument::measure_content(UiId id, LayoutConstraints inner, Index depth) 
             return fail(LayoutIssue::MissingChild);
         desired = result.unwrap();
     } else {
+        bool pending{};
+        LayoutConstraints child_limits{inner.max_width, inner.max_height};
         for (auto child : node.children) {
-            auto error = measure(child, inner, depth + 1);
-            if (error.is_some())
+            auto error = measure(child, child_limits, depth + 1);
+            if (error.is_some()) {
+                if (*error == UiError::LayoutPending) { pending = true; continue; }
                 return Err(*error);
+            }
             auto size = resolve(child)->desired;
             if (node.kind == LayoutKind::Row) {
                 desired.width += size.width;
@@ -327,6 +334,7 @@ auto UiDocument::measure_content(UiId id, LayoutConstraints inner, Index depth) 
                 desired.height = maximum(desired.height, size.height);
             }
         }
+        if (pending) return Err(UiError::LayoutPending);
         if (node.children.len() > usize(1)) {
             auto gap = style.gap *
                        static_cast<Scalar>((node.children.len() - usize(1)).to_primitive());
@@ -383,7 +391,9 @@ auto UiDocument::measure(UiId id, LayoutConstraints available, Index depth) -> O
         style.width.is_some() ? Some(bounded(*style.width, min_width, max_width)) : max_width;
     auto height = style.height.is_some() ? Some(bounded(*style.height, min_height, max_height))
                                          : max_height;
-    LayoutConstraints inner{inset(width, style.padding), inset(height, style.padding)};
+    LayoutConstraints inner{inset(width, style.padding), inset(height, style.padding),
+        maximum(Scalar(0), (style.width.is_some() ? *width : min_width) - 2 * style.padding),
+        maximum(Scalar(0), (style.height.is_some() ? *height : min_height) - 2 * style.padding)};
     if (node.viewport.is_some()) {
         if ((*node.viewport)->axes.horizontal)
             inner.max_width = None();
@@ -392,7 +402,7 @@ auto UiDocument::measure(UiId id, LayoutConstraints available, Index depth) -> O
     }
     auto content = measure_modifier(id, usize(), inner, depth);
     if (content.is_err()) {
-        if (!node.modifiers.is_empty() &&
+        if (content.unwrap_err() != UiError::LayoutPending && !node.modifiers.is_empty() &&
             (layout_diagnostics_.is_empty() || layout_diagnostics_[layout_diagnostics_.len() - usize(1)].node != id))
             return layout_failure(id, LayoutIssue::Strategy, content.unwrap_err());
         return Some(content.unwrap_err());
@@ -546,7 +556,7 @@ auto UiDocument::arrange(UiId id, Rect slot, Index depth, Option<LayoutPlacement
             : arrange_modifier(id, usize(), inner,
                 Transform{1, 0, 0, 1, style.padding, style.padding}, depth);
         if (error.is_some()) {
-            if (!node.modifiers.is_empty()) return layout_failure(id, LayoutIssue::Strategy, *error);
+            if (*error != UiError::LayoutPending && !node.modifiers.is_empty()) return layout_failure(id, LayoutIssue::Strategy, *error);
             return error;
         }
         if (node.modifiers.is_empty()) {

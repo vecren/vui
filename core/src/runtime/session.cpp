@@ -3,6 +3,30 @@ import :runtime.session;
 using namespace rstd::prelude;
 
 namespace vui {
+namespace {
+struct SubcompositionProgress {
+    struct Entry { UiId target; Serial request{}; unsigned changes{}; };
+    Vec<Entry> entries;
+    auto observe(const Vec<SubcompositionRequest> &requests) -> Result<bool, UiError> {
+        bool progressed{};
+        for (const auto &request : requests) {
+            Entry *found{};
+            for (auto &entry : entries) if (entry.target == request.target) { found = &entry; break; }
+            if (!found) {
+                if (entries.len() >= usize(4096)) return Err(UiError::Limit);
+                entries.push(Entry{request.target, request.id, 1});
+                progressed = true;
+            } else if (found->request != request.id) {
+                if (++found->changes > 16) return Err(UiError::Limit);
+                found->request = request.id;
+                progressed = true;
+            }
+        }
+        return Ok(progressed);
+    }
+};
+}
+
 auto UiSession::begin_input_timings(slice<InputEvent> events) -> Option<InputTimings::Data> {
     if (input_sequence_ == ~Serial{} || successful_input_sequence_ == ~Serial{})
         return None();
@@ -88,9 +112,18 @@ auto UiSession::observe_content() -> bool {
     return changed;
 }
 
+auto UiSession::resume_subcomposition(UiError error) -> Result<bool, SessionError> {
+    if (error != UiError::LayoutPending || document_.pending_subcompositions() == usize()) return Ok(false);
+    auto dispatched = document_.dispatch_subcompositions();
+    if (dispatched.is_err()) return Err(SessionError{SessionStage::Update, Some(dispatched.unwrap_err())});
+    return Ok(dispatched.unwrap() != usize() || updates_.pending());
+}
+
 auto UiSession::settle_input(Size size, Serial sample_time, UpdateStats &stats)
     -> Result<empty, SessionError> {
-    for (unsigned iteration{}; iteration < 16; ++iteration) {
+    SubcompositionProgress progress;
+    for (unsigned iteration{}; iteration < 16;) {
+        ++iteration;
         if (mutations_.len() + document_.pending_mutations() > usize(4096))
             return Err(SessionError{SessionStage::Backpressure});
         auto mutations = document_.flush_mutations();
@@ -129,8 +162,18 @@ auto UiSession::settle_input(Size size, Serial sample_time, UpdateStats &stats)
                 active_timings_->layout.add(timing->layout);
                 active_timings_->collect.add(timing->collect);
             }
-        if (next.is_err())
+        if (next.is_err()) {
+            auto observed = next.unwrap_err() == UiError::LayoutPending
+                ? progress.observe(document_.subcomposition_requests()) : Result<bool, UiError>(Ok(false));
+            if (observed.is_err()) {
+                document_.report_subcomposition_limit();
+                return Err(SessionError{SessionStage::Limit, Some(observed.unwrap_err())});
+            }
+            auto resumed = resume_subcomposition(next.unwrap_err());
+            if (resumed.is_err()) return Err(resumed.unwrap_err());
+            if (resumed.unwrap()) { if (observed.unwrap()) --iteration; continue; }
             return Err(SessionError{SessionStage::Update, Some(next.unwrap_err())});
+        }
         auto snapshot = rstd::move(next).unwrap();
         auto viewport_callbacks = document_.dispatch_viewport_callbacks(snapshot);
         if (viewport_callbacks.is_err()) return Err(SessionError{SessionStage::Update, Some(viewport_callbacks.unwrap_err())});
@@ -151,11 +194,17 @@ auto UiSession::settle_input(Size size, Serial sample_time, UpdateStats &stats)
             return Ok(empty{});
         }
     }
+    if (document_.pending_subcompositions() != usize()) {
+        document_.report_subcomposition_limit();
+        return Err(SessionError{SessionStage::Limit, Some(UiError::Limit)});
+    }
     return Err(SessionError{SessionStage::Limit});
 }
 
 auto UiSession::settle(Size size, Serial sample_time, UpdateStats &stats) -> Result<empty, SessionError> {
-    for (int iteration = 0; iteration < 16; ++iteration) {
+    SubcompositionProgress progress;
+    for (unsigned iteration{}; iteration < 16;) {
+        ++iteration;
         if (mutations_.len() + document_.pending_mutations() > usize(4096))
             return Err(SessionError{SessionStage::Backpressure});
         auto mutations = document_.flush_mutations();
@@ -185,6 +234,7 @@ auto UiSession::settle(Size size, Serial sample_time, UpdateStats &stats) -> Res
         auto composed = updates_.drain(*this);
         if (composed.is_err()) return Err(SessionError{SessionStage::Update, Some(composed.unwrap_err())});
         auto next = document_.update(size, {active_timings_ != nullptr});
+        stats.add(document_.update_stats());
         if (active_timings_) {
             const auto sample = document_.last_update_timings().unwrap();
             active_timings_->update.add(sample.update);
@@ -193,14 +243,23 @@ auto UiSession::settle(Size size, Serial sample_time, UpdateStats &stats) -> Res
             active_timings_->collect.add(sample.collect);
             active_timings_->work.add(sample.work);
         }
-        if (next.is_err())
+        if (next.is_err()) {
+            auto observed = next.unwrap_err() == UiError::LayoutPending
+                ? progress.observe(document_.subcomposition_requests()) : Result<bool, UiError>(Ok(false));
+            if (observed.is_err()) {
+                document_.report_subcomposition_limit();
+                return Err(SessionError{SessionStage::Limit, Some(observed.unwrap_err())});
+            }
+            auto resumed = resume_subcomposition(next.unwrap_err());
+            if (resumed.is_err()) return Err(resumed.unwrap_err());
+            if (resumed.unwrap()) { if (observed.unwrap()) --iteration; continue; }
             return Err(SessionError{SessionStage::Update, Some(next.unwrap_err())});
+        }
         update_ = Some(next.unwrap());
         auto viewport_callbacks = document_.dispatch_viewport_callbacks(*update_);
         if (viewport_callbacks.is_err()) return Err(SessionError{SessionStage::Update, Some(viewport_callbacks.unwrap_err())});
         auto geometry_callbacks = document_.dispatch_geometry_callbacks(*update_);
         if (geometry_callbacks.is_err()) return Err(SessionError{SessionStage::Update, Some(geometry_callbacks.unwrap_err())});
-        stats.add(update_->stats());
         auto synced = input_.synchronize(*update_);
         if (synced.is_err())
             return Err(SessionError{SessionStage::Input, {}, Some(synced.unwrap_err())});
@@ -217,11 +276,16 @@ auto UiSession::settle(Size size, Serial sample_time, UpdateStats &stats) -> Res
             return Ok(empty{});
         }
     }
+    if (document_.pending_subcompositions() != usize()) {
+        document_.report_subcomposition_limit();
+        return Err(SessionError{SessionStage::Limit, Some(UiError::Limit)});
+    }
     return Err(SessionError{SessionStage::Limit});
 }
 
 UiSession::~UiSession() {
     updates_.close(*this);
+    document_.close_subcompositions();
     document_.clear_phase_observations();
     document_.bindings().set_waker(None());
     state_bindings_.close();
@@ -500,6 +564,7 @@ auto UiSession::close() -> Result<empty, SessionError> {
         return Err(SessionError{SessionStage::Reentrant});
     closing_ = true;
     updates_.close(*this);
+    document_.close_subcompositions();
     state_bindings_.close();
     motion_.close();
     frame_content_.close();

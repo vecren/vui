@@ -98,7 +98,7 @@ auto UiDocument::collect(UiId id, UiUpdate::Data &output, Index depth, bool reco
 }
 
 auto UiDocument::update_impl(Size viewport, bool recording) -> Result<UiUpdate::Data, UiError> {
-    if (routing_ || animation_dispatching_ || (layout_active_ || painting_ || evaluating_ || editing_))
+    if (routing_ || animation_dispatching_ || subcomposition_dispatching_ || (layout_active_ || painting_ || evaluating_ || editing_))
         return Err(UiError::Routing);
     if (!viewport.valid())
         return Err(UiError::InvalidValue);
@@ -186,6 +186,7 @@ auto UiDocument::input_snapshot(Size viewport, DiagnosticsOptions options)
     sweep_bindings();
     if (layout_dirty_ || viewport != viewport_ || input_base_.is_none()) {
         auto base = update(viewport, options, false);
+        input_stats_ = stats_;
         if (base.is_err())
             return Err(base.unwrap_err());
         auto frozen = rstd::move(base).unwrap();

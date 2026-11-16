@@ -1,5 +1,6 @@
 export module vui.compose;
 export import :types;
+export import :environment;
 export import :element;
 export import :behavior;
 export import :runtime;
@@ -9,3 +10,4 @@ export import :lifecycle;
 export import :latest;
 export import :animation;
 export import :controls;
+export import :constraints;

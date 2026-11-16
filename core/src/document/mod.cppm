@@ -9,3 +9,4 @@ export import :document.lifecycle;
 export import :document.text;
 export import :document.tree;
 export import :document.phase;
+export import :document.subcomposition;

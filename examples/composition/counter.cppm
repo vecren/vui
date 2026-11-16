@@ -56,6 +56,8 @@ auto MakeIncrement(cx::State<int> count) -> cx::Action<cx::ComposeResult<empty>(
 
 [[vui::compose]]
 auto Counter(int id, cx::NodeRef target) -> cx::ComposeResult<cx::Element> {
+    auto accent = cx::read(theme::local_accent);
+    if (accent.is_err()) return Err(accent.unwrap_err());
     auto saved = cx::state(0);
     if (saved.is_err()) return Err(saved.unwrap_err());
     auto count = saved.unwrap();
@@ -81,7 +83,8 @@ auto Counter(int id, cx::NodeRef target) -> cx::ComposeResult<cx::Element> {
     auto minus = cx::button(theme::button_label("-"_str, theme::ink, 20), [count] {
         return count.update([](int current) { return current - 1; });
     }, theme::button_style()).style(NodeStyleBuilder{}.width(80).height(34).build());
-    auto plus = cx::button(theme::button_label("+"_str, theme::surface, 20), MakeIncrement(count), theme::button_style(true))
+    auto plus = cx::button(theme::button_label("+"_str, theme::surface, 20), MakeIncrement(count),
+        ButtonStyleBuilder{theme::button_style(true)}.normal(accent.unwrap().value()).build())
         .style(NodeStyleBuilder{}.width(80).height(34).build());
     return Ok(cx::column({
         label(title.as_str(), 12, theme::muted),

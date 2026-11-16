@@ -1,5 +1,6 @@
 export module vui.compose:runtime;
 import :element;
+import :environment;
 import :types;
 using namespace rstd::prelude;
 using namespace rstd::literals;
@@ -93,12 +94,14 @@ struct ScopeState {
     Vec<rstd::rc::Rc<MemorySlot>> memories;
     Vec<rstd::rc::Rc<EffectSlot>> effects;
     Vec<rstd::rc::Rc<DependencyWatch>> reads;
+    Vec<LocalRead> local_reads;
 };
 struct ScopeDraft {
     rstd::rc::Rc<ScopeState> scope;
     Vec<rstd::rc::Rc<MemorySlot>> memories;
     Vec<rstd::rc::Rc<EffectSlot>> effects;
     Vec<rstd::rc::Rc<DependencyWatch>> reads;
+    Vec<LocalRead> local_reads;
     explicit ScopeDraft(rstd::rc::Rc<ScopeState> value) : scope(rstd::move(value)) {}
     template <class T, class F>
     auto memory(MemoryKind kind, Key key, F make, EffectKeys dependencies = {}) -> ComposeResult<rstd::rc::Rc<MemorySlot>> {
@@ -210,19 +213,21 @@ class ComposeBuild {
         if (instance.id.is_some()) { edit.remove(*instance.id); return; }
         for (const auto &child : instance.children) retire_nodes(*child.get());
     }
-    static auto dirty(const ComposeInstance &instance) -> bool;
+    static auto dirty(const ComposeInstance &instance, const CompositionEnvironment &environment) -> bool;
     static void committed_roots(const ComposeInstance &instance, Vec<ComposeRoot> &roots) {
         if (instance.id.is_some()) roots.push({{}, instance.id});
         else for (const auto &child : instance.children) committed_roots(*child.get(), roots);
     }
     static auto same_roots(const Vec<ComposeRoot> &before, const Vec<ComposeRoot> &after) -> bool;
     void children(UiNodeRef node, const Vec<ComposeRoot> &roots);
-    auto reconcile(Element value, rstd::rc::Rc<ComposeInstance> previous, bool force, Index depth = 0)
+    auto reconcile(Element value, rstd::rc::Rc<ComposeInstance> previous, bool force, Index depth = 0,
+                   CompositionEnvironment environment = {})
         -> ComposeResult<rstd::rc::Rc<ComposeDraft>>;
 };
 class CompositionContext {
     ComposeBuild &build_;
     ScopeDraft &draft_;
+    CompositionEnvironment environment_;
     Vec<Key> groups_;
     struct Occurrence { CallIdentity identity; Serial next{}; };
     Vec<Occurrence> occurrences_;
@@ -238,7 +243,8 @@ class CompositionContext {
         GroupGuard(GroupGuard &&other) : context_(rstd::exchange(other.context_, nullptr)), depth_(other.depth_) {}
         ~GroupGuard() { if (context_) context_->groups_.truncate(depth_); }
     };
-    CompositionContext(ComposeBuild &build, ScopeDraft &draft) : build_(build), draft_(draft) {}
+    CompositionContext(ComposeBuild &build, ScopeDraft &draft, CompositionEnvironment environment = {})
+        : build_(build), draft_(draft), environment_(rstd::move(environment)) {}
     CompositionContext(const CompositionContext &) = delete;
     auto session() -> UiSession & { return build_.session; }
     template <class F> void on_commit(F action) {
@@ -272,6 +278,18 @@ class CompositionContext {
         return Ok(State<T>(owned.downgrade(), cell.value()));
     }
     auto node(Key key) -> ComposeResult<NodeRef>;
+    template <class T> auto read(const CompositionLocal<T> &local) -> ComposeResult<LocalSnapshot<T>> {
+        auto fallback = local.fallback();
+        auto value = environment_.resolve(fallback);
+        if (value.value_->type() != rstd::any::TypeId::of<T>()) return Err(ComposeError(ComposeStage::Type));
+        bool present{};
+        for (const auto &entry : draft_.local_reads) present |= entry.fallback.identity() == fallback.identity();
+        if (!present) {
+            if (draft_.local_reads.len() >= usize(4096)) return Err(ComposeError(ComposeStage::Limit));
+            draft_.local_reads.push({rstd::move(fallback), LocalBinding(value)});
+        }
+        return Ok(LocalSnapshot<T>(value.value_.clone()));
+    }
     template <class T> auto read(vui::state::Value<T> value) -> ComposeResult<vui::state::ValueSnapshot<T>> {
         auto observation = build_.observe(value.graph());
         if (observation.is_err()) return Err(observation.unwrap_err());

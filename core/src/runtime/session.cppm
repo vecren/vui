@@ -134,6 +134,7 @@ class UiSession {
     auto settle_input(Size size, Serial sample_time, UpdateStats &stats)
         -> Result<empty, SessionError>;
     auto settle(Size size, Serial sample_time, UpdateStats &stats) -> Result<empty, SessionError>;
+    auto resume_subcomposition(UiError) -> Result<bool, SessionError>;
 
   public:
     UiSession() = default;

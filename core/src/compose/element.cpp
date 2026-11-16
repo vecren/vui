@@ -18,12 +18,13 @@ ElementData::ElementData(const ElementData &other)
     }
     for (const auto &modifier : other.modifiers) modifiers.push(ElementModifier(modifier));
     for (const auto &behavior : other.behaviors) behaviors.push(BehaviorDeclaration(behavior));
+    for (const auto &local : other.locals) locals.push(LocalBinding(local));
     for (const auto &child : other.children) children.push(Element(child));
 }
 
 auto Element::style(NodeStyle value) && -> Element {
     auto next = rstd::move(*this).owned();
-    if (next.data_->kind == ElementKind::Component || next.data_->kind == ElementKind::Fragment) {
+    if (next.data_->kind == ElementKind::Component || next.data_->kind == ElementKind::Fragment || next.data_->kind == ElementKind::Provider) {
         auto modifier = ElementModifier(ModifierKind::Style); modifier.style = value; next.data_.get()->modifiers.push(rstd::move(modifier));
     } else next.data_.get()->style = value;
     return next;
@@ -31,7 +32,7 @@ auto Element::style(NodeStyle value) && -> Element {
 
 auto Element::gap(Scalar value) && -> Element {
     auto next = rstd::move(*this).owned();
-    if (next.data_->kind == ElementKind::Component || next.data_->kind == ElementKind::Fragment) {
+    if (next.data_->kind == ElementKind::Component || next.data_->kind == ElementKind::Fragment || next.data_->kind == ElementKind::Provider) {
         auto modifier = ElementModifier(ModifierKind::Gap); modifier.scalar = value; next.data_.get()->modifiers.push(rstd::move(modifier));
     } else next.data_.get()->style.layout.gap = value;
     return next;
@@ -39,7 +40,7 @@ auto Element::gap(Scalar value) && -> Element {
 
 auto Element::padding(Scalar value) && -> Element {
     auto next = rstd::move(*this).owned();
-    if (next.data_->kind == ElementKind::Component || next.data_->kind == ElementKind::Fragment) {
+    if (next.data_->kind == ElementKind::Component || next.data_->kind == ElementKind::Fragment || next.data_->kind == ElementKind::Provider) {
         auto modifier = ElementModifier(ModifierKind::Padding); modifier.scalar = value; next.data_.get()->modifiers.push(rstd::move(modifier));
     } else next.data_.get()->style.layout.padding = value;
     return next;
@@ -47,7 +48,7 @@ auto Element::padding(Scalar value) && -> Element {
 
 auto Element::format(TextFormat value) && -> Element {
     auto next = rstd::move(*this).owned();
-    if (next.data_->kind == ElementKind::Component || next.data_->kind == ElementKind::Fragment) {
+    if (next.data_->kind == ElementKind::Component || next.data_->kind == ElementKind::Fragment || next.data_->kind == ElementKind::Provider) {
         auto modifier = ElementModifier(ModifierKind::Format); modifier.text = Some(UiTextValue{});
         modifier.text->set_format(value); next.data_.get()->modifiers.push(rstd::move(modifier));
     } else if (next.data_->text.is_some()) next.data_.get()->text->set_format(value); else next.data_.get()->invalid = true;
@@ -56,7 +57,7 @@ auto Element::format(TextFormat value) && -> Element {
 
 auto Element::color(Color value) && -> Element {
     auto next = rstd::move(*this).owned();
-    if (next.data_->kind == ElementKind::Component || next.data_->kind == ElementKind::Fragment) {
+    if (next.data_->kind == ElementKind::Component || next.data_->kind == ElementKind::Fragment || next.data_->kind == ElementKind::Provider) {
         auto modifier = ElementModifier(ModifierKind::Color); modifier.color = value; next.data_.get()->modifiers.push(rstd::move(modifier));
     } else if (next.data_->text.is_some()) next.data_.get()->text->color = value; else next.data_.get()->invalid = true;
     return next;
@@ -64,7 +65,7 @@ auto Element::color(Color value) && -> Element {
 
 auto Element::reference(NodeRef value) && -> Element {
     auto next = rstd::move(*this).owned();
-    if (next.data_->kind == ElementKind::Component || next.data_->kind == ElementKind::Fragment) {
+    if (next.data_->kind == ElementKind::Component || next.data_->kind == ElementKind::Fragment || next.data_->kind == ElementKind::Provider) {
         auto modifier = ElementModifier(ModifierKind::Reference); modifier.reference = Some(rstd::move(value)); next.data_.get()->modifiers.push(rstd::move(modifier));
     } else next.data_.get()->reference = Some(rstd::move(value));
     return next;
@@ -72,7 +73,7 @@ auto Element::reference(NodeRef value) && -> Element {
 
 auto Element::behavior(BehaviorDeclaration value) && -> Element {
     auto next = rstd::move(*this).owned();
-    if (next.data_->kind == ElementKind::Component || next.data_->kind == ElementKind::Fragment) {
+    if (next.data_->kind == ElementKind::Component || next.data_->kind == ElementKind::Fragment || next.data_->kind == ElementKind::Provider) {
         auto modifier = ElementModifier(ModifierKind::Behavior); modifier.behavior = Some(rstd::move(value));
         next.data_.get()->modifiers.push(rstd::move(modifier));
     } else next.data_.get()->behaviors.push(rstd::move(value));
@@ -94,9 +95,16 @@ auto image(ImageData value, rstd::source_location source) -> Element {
     data.get()->source = source; data.get()->layout = LayoutKind::Image; data.get()->image = Some(UiImageValue{Some(rstd::move(value))}); return Element(rstd::move(data));
 }
 
+auto provide(Vec<LocalBinding> values, Element content, rstd::source_location source) -> Element {
+    auto data = rstd::rc::make_rc<ElementData>();
+    data.get()->kind = ElementKind::Provider; data.get()->source = source;
+    data.get()->locals = rstd::move(values); data.get()->children.push(rstd::move(content));
+    return Element(rstd::move(data));
+}
+
 auto apply_modifiers(Element value, const Vec<ElementModifier> &modifiers) -> ComposeResult<Element> {
     if (modifiers.is_empty()) return Ok(rstd::move(value));
-    if (value.data().kind == ElementKind::Component || value.data().kind == ElementKind::Fragment) {
+    if (value.data().kind == ElementKind::Component || value.data().kind == ElementKind::Fragment || value.data().kind == ElementKind::Provider) {
         auto data = rstd::rc::make_rc<ElementData>(value.data());
         for (const auto &modifier : modifiers) data.get()->modifiers.push(ElementModifier(modifier));
         return Ok(Element(rstd::move(data)));

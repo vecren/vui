@@ -23,11 +23,13 @@ import :document.content;
 import :document.animation;
 import :document.tree;
 import :document.phase;
+import :document.subcomposition;
 using namespace rstd::prelude;
 using namespace rstd::literals;
 
 export namespace vui {
 class UiDocument {
+    friend class UiSession;
     using GeometryObserver = DocumentGeometryObserver;
     using ViewportObserver = DocumentViewportObserver;
     using ViewportLayout = DocumentViewportLayout;
@@ -54,6 +56,8 @@ class UiDocument {
     Option<UiUpdate> input_base_;
     Vec<UiId> input_changes_;
     Vec<UiId> bound_nodes_;
+    Vec<UiId> subcomposition_nodes_;
+    bool subcomposition_dispatching_{};
     Option<UiId> root_;
     bool layout_dirty_{true}, layout_active_{}, layout_again_{};
     Serial layout_revision_{};
@@ -229,6 +233,10 @@ class UiDocument {
     auto paint_content(UiId, Node &, DisplayListRecorder &, bool &) -> Option<UiError>;
     auto paint_modifier(UiId, Node &, usize, DisplayListRecorder &, Transform, bool &) -> Option<UiError>;
     auto register_modifier(UiId, NodeStateKey, BindingGuard, Box<ModifierReceiver>) -> Result<empty, UiError>;
+    auto install_subcomposition(UiId, rstd::rc::Rc<DocumentSubcomposition>) -> Result<empty, UiError>;
+    auto require_subcomposition(UiId, LayoutConstraints) -> Option<UiError>;
+    void report_subcomposition_limit();
+    void close_subcompositions();
     auto measure(UiId id, LayoutConstraints available, Index depth) -> Option<UiError>;
     static auto aligned_offset(Scalar remaining, Alignment align) -> Scalar {
         return align == Alignment::Center ? remaining / 2 : align == Alignment::End ? remaining : 0;
@@ -685,6 +693,19 @@ class UiDocument {
     auto invalidate_modifier(UiId, NodeStateKey) -> Result<empty, UiError>;
     auto modifier_geometry(UiId, NodeStateKey) -> Result<ModifierGeometry, UiError>;
     auto content_geometry(UiId) -> Result<ModifierGeometry, UiError>;
+    template <class F>
+    auto bind_subcomposition(UiId id, F callback) -> Result<SubcompositionLease, UiError> {
+        auto binding = bindings_.make();
+        auto state = rstd::rc::make_rc<DocumentSubcomposition>(id, binding.guard(),
+            Box<rstd::dyn<rstd::FnMut<Result<empty, UiError>(SubcompositionRequest)>>>::make(rstd::move(callback)));
+        auto installed = install_subcomposition(id, state.clone());
+        if (installed.is_err()) return Err(installed.unwrap_err());
+        return Ok(SubcompositionLease(rstd::move(state), rstd::move(binding)));
+    }
+    auto complete_subcomposition(const SubcompositionLease &, SubcompositionRequest) -> Result<bool, UiError>;
+    auto dispatch_subcompositions() -> Result<usize, UiError>;
+    auto pending_subcompositions() -> usize;
+    auto subcomposition_requests() -> Vec<SubcompositionRequest>;
     template <class T>
         requires rstd::Impled<T, Layout>
     auto install_layout(UiId id, T strategy) -> Result<empty, UiError> {
@@ -1013,6 +1034,7 @@ class UiDocument {
 
   public:
     auto input_stats() const -> UpdateStats { return input_stats_; }
+    auto update_stats() const -> UpdateStats { return stats_; }
     auto input_snapshot(Size viewport, DiagnosticsOptions options = {})
         -> Result<InputSnapshot, UiError>;
     auto last_update_timings() const -> Option<UpdateTimings> { return last_timings_; }

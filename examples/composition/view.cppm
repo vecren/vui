@@ -54,6 +54,12 @@ auto Screen() -> cx::ComposeResult<cx::Element> {
     auto phase_state = cx::state(false);
     if (phase_state.is_err()) return Err(phase_state.unwrap_err());
     auto phase = phase_state.unwrap();
+    auto theme_state = cx::state(false);
+    if (theme_state.is_err()) return Err(theme_state.unwrap_err());
+    auto theme_choice = theme_state.unwrap();
+    auto theme_value = cx::read(theme_choice.value());
+    if (theme_value.is_err()) return Err(theme_value.unwrap_err());
+    auto accent = theme_value.unwrap().value() ? Color::from_srgba8(117, 76, 157).unwrap() : theme::accent;
     auto saved_order = cx::state(false);
     if (saved_order.is_err()) return Err(saved_order.unwrap_err());
     auto order = saved_order.unwrap();
@@ -100,6 +106,9 @@ auto Screen() -> cx::ComposeResult<cx::Element> {
     auto phase_button = cx::button(theme::button_label("切换位置与强调色"_str), [phase] {
         return phase.update([](bool current) { return !current; });
     }, theme::button_style()).style(NodeStyleBuilder{}.width(176).height(40).build());
+    auto theme_button = cx::button(theme::button_label("切换主题色"_str), [theme_choice] {
+        return theme_choice.update([](bool current) { return !current; });
+    }, theme::button_style()).style(NodeStyleBuilder{}.width(144).height(40).build());
     auto extra = [] [[vui::compose]] { return Badge(6); };
     auto saved_badge = cx::node();
     if (saved_badge.is_err()) return Err(saved_badge.unwrap_err());
@@ -132,20 +141,20 @@ auto Screen() -> cx::ComposeResult<cx::Element> {
     auto title = rstd::format("vui {}", "composition"_str);
     auto owned = rstd::format("{}", "ok"_str);
     int samples[]{1, 2, 3};
-    return Ok(cx::column({
+    return Ok(cx::provide({theme::local_accent.provides(accent)}, cx::column({
         cx::column({Title(title.as_str()),
             label("每张卡片独立计数，移动位置也能保留。"_str, 14, theme::muted)}).gap(8),
         cx::column({theme::label("独立计数"_str, 18, theme::ink, true),
             cx::row(rstd::move(repeated)).gap(16)}).gap(10),
         cx::column({theme::label("试着改变顺序"_str, 18, theme::ink, true),
             cx::row(rstd::move(keyed)).gap(16)}).gap(10),
-        cx::row({rstd::move(reverse_button), rstd::move(toggle_button), rstd::move(phase_button)}).gap(12),
+        cx::row({rstd::move(reverse_button), rstd::move(toggle_button), rstd::move(phase_button), rstd::move(theme_button)}).gap(12),
         label(caption.unwrap()->as_str(), 13, theme::muted),
         cx::row({label("内容样本"_str, 12, theme::muted)
                 .style(NodeStyleBuilder{}.vertical(Alignment::Center).hit_test_visible(false).build()),
             rstd::move(badge), Badge(6).key(cx::Key{Serial(7)}),
             Content([] { return Badge(2); }), extra(), stored.unwrap(),
             OwnedBadge(owned), SampleBadge(slice<int>::from_raw_parts(samples, usize(3)))}).gap(8),
-    }).style(NodeStyleBuilder{}.width(800).height(720).build()).gap(18).padding(32));
+    }).style(NodeStyleBuilder{}.width(800).height(720).build()).gap(18).padding(32)));
 }
 } // namespace composition_example

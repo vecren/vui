@@ -94,6 +94,7 @@ void UiDocument::erase(UiId id) {
     if (slot.node->paint_binding.is_some())
         slot.node->paint_binding->disconnect();
     for (const auto &entry : slot.node->modifiers) entry.binding.disconnect();
+    if (auto state = slot.node->subcomposition.upgrade(); state.is_some()) state->get()->guard.disconnect();
     auto children = rstd::move(slot.node->children);
     for (auto child : children)
         erase(child);

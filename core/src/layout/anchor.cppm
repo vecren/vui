@@ -22,18 +22,18 @@ struct AnchorSpec {
 };
 class AnchorLayout {
     LayoutParameters<AnchorSpec> parameters_;
+    static auto axis(Scalar min, Scalar max, Scalar first, Scalar last, Scalar pivot,
+                     Option<Scalar> explicit_size, Scalar parent, Scalar desired) -> Point {
+        if (min == max) {
+            auto size = explicit_size.unwrap_or(desired);
+            return {parent * min + first - pivot * size, size};
+        }
+        auto start = parent * min + first;
+        return {start, parent * max + last - start};
+    }
     static auto placement(AnchorSpec spec, Size parent, Size desired) -> Result<Rect, UiError> {
         if (!spec.valid())
             return Err(UiError::InvalidValue);
-        auto axis = [](Scalar min, Scalar max, Scalar first, Scalar last, Scalar pivot,
-                       Option<Scalar> explicit_size, Scalar parent, Scalar desired) -> Point {
-            if (min == max) {
-                auto size = explicit_size.unwrap_or(desired);
-                return {parent * min + first - pivot * size, size};
-            }
-            auto start = parent * min + first;
-            return {start, parent * max + last - start};
-        };
         auto x = axis(spec.anchor_min.x, spec.anchor_max.x, spec.offset_min.x, spec.offset_max.x,
                       spec.pivot.x, spec.width, parent.width, desired.width);
         auto y = axis(spec.anchor_min.y, spec.anchor_max.y, spec.offset_min.y, spec.offset_max.y,
@@ -55,7 +55,18 @@ class AnchorLayout {
         parameters_.retain(context);
         Size desired;
         for (usize i{}; i < context.child_count(); ++i) {
-            auto result = context.measure_child(i, {});
+            auto stored = parameters_.get(context.child_relation(i).unwrap());
+            auto spec = stored ? *stored : AnchorSpec{};
+            auto width = spec.width, height = spec.height;
+            if (spec.anchor_min.x != spec.anchor_max.x && constraints.max_width.is_some())
+                width = Some(axis(spec.anchor_min.x, spec.anchor_max.x, spec.offset_min.x,
+                    spec.offset_max.x, spec.pivot.x, {}, *constraints.max_width, 0).y);
+            if (spec.anchor_min.y != spec.anchor_max.y && constraints.max_height.is_some())
+                height = Some(axis(spec.anchor_min.y, spec.anchor_max.y, spec.offset_min.y,
+                    spec.offset_max.y, spec.pivot.y, {}, *constraints.max_height, 0).y);
+            LayoutConstraints allocated{width, height, width.unwrap_or(0), height.unwrap_or(0)};
+            if (!allocated.valid()) return Err(UiError::InvalidValue);
+            auto result = context.measure_child(i, allocated);
             if (result.is_err())
                 return Err(result.unwrap_err());
             auto child = result.unwrap();
@@ -75,8 +86,7 @@ class AnchorLayout {
             if (rect.is_err())
                 return Err(rect.unwrap_err());
             auto slot = rect.unwrap();
-            auto arranged =
-                context.place_child(i, LayoutPlacement{slot, {slot.width, slot.height}, {}});
+            auto arranged = context.arrange_child(i, slot);
             if (arranged.is_err())
                 return arranged;
         }

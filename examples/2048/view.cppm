@@ -85,6 +85,26 @@ class View {
             return {};
         }
     };
+    struct BoardCanvas {
+        auto prepare(cx::PrepareContext &context, Option<UiId> previous, NodeStyle style) -> cx::ComposeResult<UiNodeRef> {
+            auto node = previous.is_some() ? context.edit().existing(*previous)
+                : context.edit().create(LayoutKind::Custom, style);
+            context.style(node, style);
+            if (previous.is_none()) {
+                context.edit().state(node, ReferenceCanvas{{500, 700}, CanvasFit::Contain,
+                    {.5, .5}, true, Some(Scalar(1.2))});
+                auto target = context.target();
+                context.on_mount([target](cx::CommittedContext &committed) -> cx::ComposeResult<cx::EffectLease> {
+                    auto resolved = committed.resolve(target);
+                    if (resolved.is_err()) return Err(resolved.unwrap_err());
+                    auto attached = committed.session().document().attach_layout<ReferenceCanvas>(resolved.unwrap());
+                    if (attached.is_err()) return Err(cx::ComposeError(cx::ComposeStage::Effect, Some(attached.unwrap_err())));
+                    return Ok(cx::EffectLease{});
+                });
+            }
+            return Ok(node);
+        }
+    };
     auto ui() -> UiDocument & { return session_.document(); }
     static auto position(unsigned index, Scalar scale = 1) -> Transform {
         auto inset = cell * (1 - scale) / 2;
@@ -277,11 +297,19 @@ class View {
     View(UiSession &session, Game game) : session_(session), game_(game) {
         auto service = Box<vectext::SystemTextService>::make();
         ui().set_text_service(Box<TextService>::from_raw(rstd::move(service).into_raw().template cast<TextService>())).unwrap();
-        root_ = ui().create<CustomLayout>(examples::block(520, 720, background)).unwrap();
-        ui().install_layout(root_, ReferenceCanvas{{500, 700}, CanvasFit::Contain, {.5, .5}, true, Some(Scalar(1.2))}).unwrap();
+        root_ = ui().create<Stack>(examples::block(520, 720, background)).unwrap();
         ui().mount(root_).unwrap(); reset_tiles(); update_status();
         composition_ = Some(cx::Composition::create(session_, root_).unwrap());
-        composition_->set_content(content(cx::borrow(*this), model_.value())).unwrap();
+        composition_->set_content(cx::with_constraints(cx::Key{1},
+            [owner = cx::borrow(*this), source = model_.value()](cx::CompositionContext &, LayoutConstraints constraints)
+                -> cx::ComposeResult<cx::Element> {
+                auto width = constraints.max_width.unwrap_or(rstd::cmp::max(Scalar(500), constraints.min_width));
+                auto height = constraints.max_height.unwrap_or(rstd::cmp::max(Scalar(700), constraints.min_height));
+                auto board = content(owner, source);
+                if (board.is_err()) return Err(board.unwrap_err());
+                return Ok(cx::element(BoardCanvas{}, cx::elements({board.unwrap()}))
+                    .style(NodeStyleBuilder{}.width(width).height(height).build()));
+            })).unwrap();
         resize({{520, 720}, 1, 1});
     }
     ~View() {

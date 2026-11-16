@@ -5,6 +5,7 @@ import :document.content;
 import :document.animation;
 import :document.edit;
 import :document.modifier;
+import :document.subcomposition;
 import :layout.protocol;
 import :paint.protocol;
 import :motion.properties;
@@ -26,6 +27,7 @@ struct DocumentNode {
     Option<Rect> arranged_slot;
     Option<Box<rstd::dyn<Layout>>> layout_strategy;
     Option<BindingGuard> layout_binding;
+    rstd::rc::Weak<DocumentSubcomposition> subcomposition;
     Option<Box<rstd::dyn<Paint>>> painter;
     Option<BindingGuard> paint_binding;
     Vec<DocumentModifier> modifiers;

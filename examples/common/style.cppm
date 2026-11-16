@@ -18,6 +18,7 @@ inline const auto ink = Color::from_srgba8(35, 50, 58).unwrap();
 inline const auto muted = Color::from_srgba8(102, 117, 124).unwrap();
 inline const auto accent = Color::from_srgba8(20, 107, 105).unwrap();
 inline const auto tint = Color::from_srgba8(226, 239, 236).unwrap();
+inline const compose::CompositionLocal<Color> local_accent{accent};
 
 auto label(ref<str> value, Scalar size = 14, Color color = ink, bool bold = false) -> compose::Element {
     return compose::text(value).format(TextFormatBuilder{}.family("Noto Sans"_str).size(size)
