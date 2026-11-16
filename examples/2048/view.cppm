@@ -21,7 +21,7 @@ class View {
         Vec<Tile> tiles;
         uint64_t score{};
         Option<AnimationGate> ready;
-        bool won{}, over{}, busy{};
+        bool won{}, over{}, busy{}, result_visible{};
     };
     UiSession &session_;
     Binding lifetime_{session_.document().bindings().make()};
@@ -39,7 +39,7 @@ class View {
     Option<AnimationGate> ready_;
     cx::NodeRef input_;
     Serial next_tile_{1};
-    bool busy_{}, continued_{};
+    bool busy_{}, continued_{}, result_dismissed_{};
     static constexpr Scalar cell = 96, gap = 12, board_size = 444;
     static constexpr Color ink{.019, .045, .095, 1};
     static constexpr Color background{.933, .953, .973, 1};
@@ -80,10 +80,6 @@ class View {
         BindingGuard lifetime;
         auto create() const -> State { return {enabled, on_move, lifetime}; }
         void update(State &state, cx::BehaviorContext &) const { state.enabled = enabled; state.on_move = on_move; }
-        auto attach(State &, cx::BehaviorContext &context, rstd::rc::Weak<State>) const -> cx::EffectLease {
-            context.session().input().focus_when_ready(context.target(), None<ScopeId>(), context.document().lifetime()).unwrap();
-            return {};
-        }
     };
     struct BoardCanvas {
         auto prepare(cx::PrepareContext &context, Option<UiId> previous, NodeStyle style) -> cx::ComposeResult<UiNodeRef> {
@@ -150,6 +146,22 @@ class View {
                 .focused({.035, .12, .26, 1}).radius(10).build())
             .style(NodeStyleBuilder{}.width(210).height(48).transform({1, 0, 0, 1, x, 562}).visible(visible).build());
     }
+    struct BoardDecoration {
+        auto draw(ModifierDrawContext &context) -> Result<empty, UiError> {
+            auto &paint = context.paint();
+            auto size = paint.size();
+            paint.rect({0, 0, size.width, size.height}, {.729, .788, .851, 1}, 16);
+            for (unsigned i{}; i < 16; ++i) {
+                auto at = position(i);
+                paint.rect({at.tx, at.ty, cell, cell}, {.82, .87, .92, 1}, 10);
+            }
+            return context.draw_content();
+        }
+    };
+    struct BoardDecorationDescriptor {
+        using State = BoardDecoration;
+        auto create() const -> State { return {}; }
+    };
     [[vui::compose]]
     static auto tile(Tile value) -> cx::Element {
         auto number = rstd::format("{}", value.value);
@@ -179,10 +191,24 @@ class View {
         if (enabled.is_err()) return Err(enabled.unwrap_err());
         auto on_move = cx::latest(cx::Action<void(Direction)>([owner](Direction direction) { owner->move(direction); }));
         if (on_move.is_err()) return Err(on_move.unwrap_err());
+        auto saved_focus = cx::node();
+        if (saved_focus.is_err()) return Err(saved_focus.unwrap_err());
+        auto result_focus = saved_focus.unwrap();
+        auto focused = cx::effect(cx::EffectKeys{cx::Key{Serial(model.result_visible)}},
+            [owner, visible = model.result_visible](cx::CommittedContext &context) -> cx::ComposeResult<cx::EffectLease> {
+                if (visible) return Ok(cx::EffectLease{});
+                auto target = context.resolve(owner->input_);
+                if (target.is_err()) return Err(target.unwrap_err());
+                auto binding = context.session().document().bindings().make();
+                auto requested = context.session().input().focus_when_ready(target.unwrap(), None<ScopeId>(), binding.guard());
+                if (requested.is_err()) {
+                    cx::ComposeError error(cx::ComposeStage::Input); error.input = Some(requested.unwrap_err());
+                    return Err(rstd::move(error));
+                }
+                return Ok(cx::EffectLease([binding = rstd::move(binding)]() mutable { binding.disconnect(); }));
+            });
+        if (focused.is_err()) return Err(focused.unwrap_err());
         Vec<cx::Element> cells;
-        for (unsigned i{}; i < 16; ++i)
-            cells.push(cx::native(LayoutKind::Leaf).style(NodeStyleBuilder{
-                examples::block(cell, cell, {.82, .87, .92, 1}, 10)}.transform(position(i)).hit_test_visible(false).build()));
         for (const auto &value : model.tiles) cells.push(tile(value).key(cx::Key{value.id}));
         auto score = rstd::format("{}", model.score);
         auto message = model.over ? "没有可移动的方块了，再来一局吧。"_str
@@ -197,20 +223,39 @@ class View {
                 return Ok(cx::EffectLease{});
             });
         if (effect.is_err()) return Err(effect.unwrap_err());
-        return Ok(cx::stack({
+        Vec<cx::Element> overlays;
+        if (model.result_visible) {
+            auto restart = button("重新开始"_str, 0, [owner] { owner->restart(); })
+                .style(NodeStyleBuilder{}.width(176).height(48).build());
+            Vec<cx::Element> actions;
+            if (model.won) {
+                actions.push(rstd::move(restart));
+                actions.push(button("继续挑战"_str, 0, [owner] { owner->continue_game(); })
+                    .style(NodeStyleBuilder{}.width(176).height(48).build()).reference(result_focus));
+            } else actions.push(rstd::move(restart).reference(result_focus));
+            auto prompt = cx::column({label(model.won ? "合成了 2048！"_str : "游戏结束"_str, 28, {}, true),
+                label(message, 16), cx::row(rstd::move(actions)).gap(12)})
+                .style(examples::block(420, 224, background, 16)).padding(24).gap(14);
+            cx::PopupOptions options;
+            options.initial_focus = Some(cx::NodeRef(result_focus));
+            overlays.push(cx::dialog(rstd::move(prompt), [owner](PopupCloseReason) { owner->dismiss_result(); }, rstd::move(options)));
+        }
+        auto body = cx::stack({
             label("2048"_str, 54, {0, 0}, true),
             label("得分"_str, 14, {330, 8}), label(score.as_str(), 28, {330, 28}, true),
             cx::stack(rstd::move(cells)).style(NodeStyleBuilder{
-                examples::block(board_size, board_size, {.729, .788, .851, 1}, 16)}
-                .transform({1, 0, 0, 1, 0, 86}).build()),
+                examples::block(board_size, board_size, {0, 0, 0, 0})}
+                .transform({1, 0, 0, 1, 0, 86}).build()).behavior(cx::Key{1}, BoardDecorationDescriptor{}),
             label(message, 16, {0, 538}),
             button("重新开始"_str, 0, [owner] { owner->restart(); }),
             button("继续挑战"_str, 234, [owner] {
-                owner->continued_ = true; owner->update_status();
+                owner->continue_game();
                 owner->session_.input().focus_when_ready(owner->input_.id().unwrap(), None<ScopeId>(), owner->lifetime_.guard()).unwrap();
             }, model.won),
             label("方向键移动 · Tab 切换按钮 · Esc 退出"_str, 14, {0, 628}),
-        }).style(NodeStyleBuilder{examples::block(board_size, 650, {0, 0, 0, 0})}.focusable(true).build())
+        }).style(NodeStyleBuilder{examples::block(board_size, 650, {0, 0, 0, 0})}.hit_self(false).build());
+        return Ok(cx::popup_host(rstd::move(body), rstd::move(overlays))
+            .style(NodeStyleBuilder{examples::block(board_size, 650, {0, 0, 0, 0})}.focusable(true).build())
             .reference(owner->input_).behavior(cx::Key{1}, GameInputDescriptor{enabled.unwrap(), on_move.unwrap(), owner->lifetime_.guard()}));
     }
     void reset_tiles() {
@@ -226,6 +271,7 @@ class View {
         next.won = game_.reached_2048() && !continued_;
         next.over = !game_.can_move();
         next.busy = busy_;
+        next.result_visible = !busy_ && !result_dismissed_ && (next.won || next.over);
         model_.set(rstd::rc::make_rc<Model>(rstd::move(next))).unwrap();
     }
     auto pop_group() -> AnimationGroup {
@@ -289,8 +335,10 @@ class View {
         }).unwrap();
         update_status();
     }
+    void dismiss_result() { result_dismissed_ = true; update_status(); }
+    void continue_game() { continued_ = true; result_dismissed_ = false; update_status(); }
     void restart() {
-        movement_.cancel().unwrap(); ready_ = None(); animation_error_ = None(); busy_ = continued_ = false;
+        movement_.cancel().unwrap(); ready_ = None(); animation_error_ = None(); busy_ = continued_ = result_dismissed_ = false;
         game_.restart(); reset_tiles(); update_status();
     }
   public:
