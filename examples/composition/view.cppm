@@ -39,13 +39,8 @@ struct PhaseDecorationDescriptor {
     void update(State &state, cx::BehaviorContext &) const { state.active = active; }
 };
 
-template <class F>
-auto Content([[vui::content]] F content) {
-    return content();
-}
-
 auto card(cx::Element value, cx::NodeRef target) -> cx::Element {
-    return rstd::move(value).style(NodeStyleBuilder{}.width(224).height(158)
+    return rstd::move(value).style(NodeStyleBuilder{}.width(234).height(158)
         .background(theme::surface).radius(12).build()).gap(9).padding(18).reference(rstd::move(target));
 }
 
@@ -69,6 +64,12 @@ auto Screen() -> cx::ComposeResult<cx::Element> {
     if (moving_saved.is_err()) return Err(moving_saved.unwrap_err());
     auto moving = moving_saved.unwrap().get();
     if (moving.is_err()) return Err(moving.unwrap_err());
+    auto move_state = cx::state(false);
+    if (move_state.is_err()) return Err(move_state.unwrap_err());
+    auto moved = move_state.unwrap();
+    auto move_value = cx::read(moved.value());
+    if (move_value.is_err()) return Err(move_value.unwrap_err());
+    bool is_moved = move_value.unwrap().value();
     auto saved_order = cx::state(false);
     if (saved_order.is_err()) return Err(saved_order.unwrap_err());
     auto order = saved_order.unwrap();
@@ -106,87 +107,55 @@ auto Screen() -> cx::ComposeResult<cx::Element> {
         if (item.is_err()) return Err(item.unwrap_err());
         keyed.push(card(item.unwrap().key(cx::Key{Serial(id)}), target));
     }
-    auto reverse_button = cx::button(theme::button_label("反转顺序"_str, theme::surface), [order] {
+    auto reverse_button = cx::button(theme::button_label("Reverse"_str, theme::surface), [order] {
         return order.update([](bool current) { return !current; });
-    }, theme::button_style(true)).style(NodeStyleBuilder{}.width(144).height(40).build());
-    auto toggle_button = cx::button(theme::button_label(is_visible ? "移除计数器 05"_str : "恢复计数器 05"_str), [shown] {
+    }, theme::button_style(true)).style(NodeStyleBuilder{}.width(112).height(36).build());
+    auto toggle_button = cx::button(theme::button_label(is_visible ? "Hide 05"_str : "Show 05"_str), [shown] {
         return shown.update([](bool current) { return !current; });
-    }, theme::button_style()).style(NodeStyleBuilder{}.width(176).height(40).build());
-    auto phase_button = cx::button(theme::button_label("切换位置与强调色"_str), [phase] {
+    }, theme::button_style()).style(NodeStyleBuilder{}.width(112).height(36).build());
+    auto phase_button = cx::button(theme::button_label("Shift"_str), [phase] {
         return phase.update([](bool current) { return !current; });
-    }, theme::button_style()).style(NodeStyleBuilder{}.width(176).height(40).build());
-    auto theme_button = cx::button(theme::button_label("切换主题色"_str), [theme_choice] {
+    }, theme::button_style()).style(NodeStyleBuilder{}.width(80).height(34).build());
+    auto theme_button = cx::button(theme::button_label("Accent"_str), [theme_choice] {
         return theme_choice.update([](bool current) { return !current; });
-    }, theme::button_style()).style(NodeStyleBuilder{}.width(144).height(40).build());
-    auto extra = [] [[vui::compose]] { return Badge(6); };
-    auto saved_badge = cx::node();
-    if (saved_badge.is_err()) return Err(saved_badge.unwrap_err());
-    auto badge_target = saved_badge.unwrap();
-    auto badge = Badge(1).key(cx::Key{Serial(7)}).reference(badge_target);
-    if (!reversed) badge = rstd::move(badge).padding(2);
-    auto observed = cx::effect(cx::EffectKeys{cx::Key{Serial(reversed)}},
-        [badge_target, reversed](cx::CommittedContext &context) -> cx::ComposeResult<cx::EffectLease> {
-            auto resolved = context.resolve(badge_target);
-            if (resolved.is_err()) return Err(resolved.unwrap_err());
-            auto node = resolved.unwrap();
-            auto configured = context.session().document().base_style(node);
-            if (configured.is_err()) return Err(cx::ComposeError(cx::ComposeStage::Effect, Some(configured.unwrap_err())));
-            rstd::io::eprintln("composition badge reversed={} slot={} generation={} padding={}",
-                reversed, node.slot, node.generation, configured.unwrap().layout.padding);
-            return Ok(cx::EffectLease{});
-        });
-    if (observed.is_err()) return Err(observed.unwrap_err());
-    auto stored_content = MakeContent(9);
-    auto stored = stored_content();
-    if (stored.is_err()) return Err(stored.unwrap_err());
-    auto remembered = cx::remember<String>(cx::EffectKeys{cx::Key{Serial(reversed)}}, [reversed] {
-        rstd::io::eprintln("composition remembered reversed={}", reversed);
-        return String::make(reversed ? "顺序已反转。移除再恢复的卡片会从 0 开始。"_str
-            : "点击 + / - 改变计数，试试重排与移除卡片。"_str);
-    });
-    if (remembered.is_err()) return Err(remembered.unwrap_err());
-    auto caption = remembered.unwrap().get();
-    if (caption.is_err()) return Err(caption.unwrap_err());
-    auto title = rstd::format("vui {}", "composition"_str);
-    auto owned = rstd::format("{}", "ok"_str);
-    int samples[]{1, 2, 3};
+    }, theme::button_style()).style(NodeStyleBuilder{}.width(80).height(34).build());
+    auto appearance = cx::column({label("Appearance"_str, 12, theme::muted),
+        cx::native(LayoutKind::Leaf).style(examples::block(172, 40, accent, 8)),
+        cx::row({rstd::move(phase_button), rstd::move(theme_button)}).gap(12)})
+        .style(examples::block(234, 158, theme::surface, 12)).gap(9).padding(18);
     auto mobile = moving.unwrap()->operator()();
     auto destinations = cx::row({
-        cx::stack({reversed ? cx::fragment() : mobile})
-            .style(NodeStyleBuilder{}.width(92).height(28).build()).key(cx::Key{1}),
-        cx::column({reversed ? mobile : cx::fragment()})
-            .style(NodeStyleBuilder{}.width(92).height(28).build()).key(cx::Key{2}),
-    }).gap(8);
-    auto help = cx::button(theme::button_label("使用说明"_str), [dialog_shown] { return dialog_shown.set(true); },
-        theme::button_style()).style(NodeStyleBuilder{}.width(112).height(36).vertical(Alignment::Center).build());
+        cx::stack({is_moved ? cx::fragment() : mobile})
+            .style(examples::block(144, 52, theme::canvas, 8)).padding(8).key(cx::Key{1}),
+        cx::column({is_moved ? mobile : cx::fragment()})
+            .style(examples::block(144, 52, theme::canvas, 8)).padding(8).key(cx::Key{2}),
+    }).gap(16);
+    auto move_button = cx::button(theme::button_label("Move"_str), [moved] {
+        return moved.update([](bool current) { return !current; });
+    }, theme::button_style()).style(NodeStyleBuilder{}.width(112).height(36).build());
+    auto open = cx::button(theme::button_label("Open dialog"_str), [dialog_shown] { return dialog_shown.set(true); },
+        theme::button_style()).style(NodeStyleBuilder{}.width(124).height(36).vertical(Alignment::Center).build());
     Vec<cx::Element> overlays;
     if (dialog_value.unwrap().value()) {
-        auto close = cx::button(theme::button_label("知道了"_str, theme::surface),
+        auto close = cx::button(theme::button_label("Close"_str, theme::surface),
             [dialog_shown] { return dialog_shown.set(false); }, theme::button_style(true))
             .style(NodeStyleBuilder{}.width(112).height(36).build());
-        auto panel = cx::column({theme::label("试试组合交互"_str, 22, theme::ink, true),
-            theme::label("点击计数，再反转顺序。"_str, 14, theme::muted),
-            theme::label("底部的移动按钮会跨容器保留计数。"_str, 14, theme::muted),
-            theme::label("Esc 或点击遮罩也能关闭说明。"_str, 14, theme::muted), rstd::move(close)})
-            .style(NodeStyleBuilder{}.width(360).height(232).background(theme::surface).radius(14).build())
-            .padding(24).gap(12);
+        auto panel = cx::column({theme::label("Dialog"_str, 22, theme::ink, true), rstd::move(close)})
+            .style(examples::block(320, 152, theme::surface, 12)).padding(24).gap(24);
         overlays.push(cx::dialog(rstd::move(panel), [dialog_shown](PopupCloseReason) { return dialog_shown.set(false); }));
     }
+    auto section_style = NodeStyleBuilder{}.width(486).vertical(Alignment::Center).hit_test_visible(false).build();
     auto body = cx::column({
-        cx::row({cx::column({Title(title.as_str()),
-            label("每张卡片独立计数，移动位置也能保留。"_str, 14, theme::muted)}).gap(8), rstd::move(help)}).gap(24),
-        cx::column({theme::label("独立计数"_str, 18, theme::ink, true),
-            cx::row(rstd::move(repeated)).gap(16)}).gap(10),
-        cx::column({theme::label("试着改变顺序"_str, 18, theme::ink, true),
+        cx::row({Title("vui composition"_str).style(NodeStyleBuilder{}.width(598).build()), rstd::move(open)}).gap(12),
+        cx::row({cx::row(rstd::move(repeated)).gap(16), rstd::move(appearance)}).gap(16),
+        cx::column({cx::row({theme::label("Reorder"_str, 18, theme::ink, true).style(section_style),
+                rstd::move(reverse_button), rstd::move(toggle_button)}).gap(12),
             cx::row(rstd::move(keyed)).gap(16)}).gap(10),
-        cx::row({rstd::move(reverse_button), rstd::move(toggle_button), rstd::move(phase_button), rstd::move(theme_button)}).gap(12),
-        label(caption.unwrap()->as_str(), 13, theme::muted),
-        cx::row({label("内容样本"_str, 12, theme::muted)
-                .style(NodeStyleBuilder{}.vertical(Alignment::Center).hit_test_visible(false).build()),
-            rstd::move(badge), Badge(6).key(cx::Key{Serial(7)}),
-            Content([] { return Badge(2); }), extra(), stored.unwrap(),
-            OwnedBadge(owned), SampleBadge(slice<int>::from_raw_parts(samples, usize(3))), rstd::move(destinations)}).gap(8),
-    }).style(NodeStyleBuilder{}.width(800).height(720).build()).gap(18).padding(32);
+        cx::column({cx::row({theme::label("Movable content"_str, 18, theme::ink, true)
+                .style(NodeStyleBuilder{}.width(570).vertical(Alignment::Center).hit_test_visible(false).build()),
+                rstd::move(move_button)}).gap(12), rstd::move(destinations)})
+            .style(examples::block(734, 140, theme::surface, 12)).padding(20).gap(12),
+    }).style(NodeStyleBuilder{}.width(800).height(720).build()).gap(24).padding(32);
     return Ok(cx::provide({theme::local_accent.provides(accent)}, cx::popup_host(rstd::move(body), rstd::move(overlays))));
 }
 } // namespace composition_example

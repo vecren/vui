@@ -354,39 +354,34 @@ auto Panel::content(rstd::rc::Weak<Panel> weak) -> cx::ComposeResult<cx::Element
         });
     if (remapped.is_err()) return Err(remapped.unwrap_err());
     Vec<cx::Element> rows;
-    const ref<str> titles[]{"直接拖动"_str, "松手继续"_str, "再次抓取"_str, "滚动与交接"_str, "键盘操作"_str};
-    const ref<str> descriptions[]{"面板跟随手指或鼠标。"_str, "带着当前速度自然停下。"_str,
-        "运动中也能接着拖动。"_str, "滚动到边缘，继续拖动面板。"_str, "空格或 Enter 展开与收起。"_str};
-    for (unsigned i{}; i < 5; ++i)
-        rows.push(cx::stack({label(titles[i], {16, 8}, 14, theme::ink, true),
-            label(descriptions[i], {16, 34}, 12, theme::muted)})
-            .style(examples::block(rstd::cmp::max(Scalar(0), size.width - 60), 64, theme::canvas, 8)));
+    for (unsigned i{}; i < 8; ++i) {
+        auto title = rstd::format("Item {:02}", i + 1);
+        rows.push(cx::stack({label(title.as_str(), {16, 14}, 14)})
+            .style(examples::block(rstd::cmp::max(Scalar(0), size.width - 60), 48, theme::canvas, 8)));
+    }
     auto viewport = cx::native(LayoutKind::Viewport, cx::elements({cx::column(rstd::move(rows)).gap(10)}))
-        .style(NodeStyleBuilder{examples::block(rstd::cmp::max(Scalar(0), size.width - 60), height - 172, {0, 0, 0, 0})}
-            .transform({1, 0, 0, 1, 30, 116}).build()).reference(panel->content_ref_);
+        .style(NodeStyleBuilder{examples::block(rstd::cmp::max(Scalar(0), size.width - 60), height - 120, {0, 0, 0, 0})}
+            .transform({1, 0, 0, 1, 30, 76}).build()).reference(panel->content_ref_);
     auto handle = cx::native(LayoutKind::Leaf).style(NodeStyleBuilder{examples::block(64, 5, theme::accent)}
         .transform({1, 0, 0, 1, (size.width - 64) / 2, height - 22}).radius(2.5).build()).reference(panel->handle_ref_);
-    auto shade = cx::stack({label("交互面板"_str, {30, 27}, 22, theme::ink, true),
-        label("滚动内容，或拖动底部把手。"_str, {30, 73}, 13, theme::muted), viewport, handle})
+    auto close = cx::button(theme::button_label("Close"_str), [weak] {
+        auto panel = weak.upgrade();
+        if (panel.is_some()) panel->get()->settle(0, panel->get()->state_.velocity);
+    }, theme::button_style()).style(NodeStyleBuilder{examples::block(80, 32, {0, 0, 0, 0})}
+        .transform({1, 0, 0, 1, size.width - 110, 20}).build());
+    auto shade = cx::stack({label("Panel"_str, {30, 22}, 22, theme::ink, true),
+        rstd::move(close), viewport, handle})
         .style(NodeStyleBuilder{examples::block(size.width, height, theme::surface)}
             .transform({1, 0, 0, 1, 0, 40 - height}).radius(16).build())
         .key(cx::Key{"panel"_str}).reference(panel->shade_ref_);
     Vec<cx::Element> page;
     auto inset = size.width < 400 ? Scalar(24) : Scalar(32);
     page.push(label("vui interaction"_str, {inset, 88}, size.width < 400 ? 24 : 28, theme::ink, true));
-    page.push(label("向下拖动顶部把手，试试跟手交互。"_str, {inset, 136}, size.width < 400 ? 12 : 14, theme::muted));
-    if (size.height >= 430) {
-        page.push(cx::native(LayoutKind::Leaf).style(NodeStyleBuilder{
-            examples::block(size.width - inset * 2, 208, theme::surface, 12)}
-            .transform({1, 0, 0, 1, inset, 192}).build()));
-        page.push(label("从拖动开始"_str, {inset + 24, 216}, 18, theme::ink, true));
-        page.push(label("松手后，面板继续运动。\n运动中可以再次抓取。"_str,
-            {inset + 24, 258}, 14, theme::muted));
-        if (size.width >= 480)
-            page.push(label("↓"_str, {size.width - inset - 92, 242}, 48, theme::accent));
-    }
-    if (size.height >= 480)
-        page.push(label("空格或 Enter 展开与收起，Esc 退出。"_str, {inset, size.height - 64}, 12, theme::muted));
+    page.push(cx::button(theme::button_label("Open panel"_str, theme::surface), [weak] {
+        auto panel = weak.upgrade();
+        if (panel.is_some()) panel->get()->settle(1, panel->get()->state_.velocity);
+    }, theme::button_style(true)).style(NodeStyleBuilder{examples::block(144, 36, {0, 0, 0, 0})}
+        .transform({1, 0, 0, 1, inset, 152}).build()));
     page.push(cx::native(LayoutKind::Leaf).style(NodeStyleBuilder{examples::block(size.width, size.height, {0, 0, 0, 1})}
         .opacity(0).hit_test_visible(false).build()).key(cx::Key{"curtain"_str}).reference(panel->curtain_ref_));
     page.push(rstd::move(shade));

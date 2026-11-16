@@ -18,36 +18,6 @@ auto Title(ref<str> value) -> cx::Element {
     return theme::label(value, 28, theme::ink, true);
 }
 
-auto badge_label(ref<str> value, Scalar width) -> cx::Element {
-    return cx::stack({theme::button_label(value, theme::accent, 13)})
-        .style(examples::block(width, 28, theme::tint, 8));
-}
-
-[[vui::compose]]
-auto Badge(int value) -> cx::Element {
-    auto title = rstd::format("{:02}", value);
-    return badge_label(title.as_str(), 44);
-}
-
-[[vui::compose]]
-auto OwnedBadge(const String &value) -> cx::Element {
-    return badge_label(value.as_str(), 36);
-}
-
-[[vui::compose]]
-auto SampleBadge(slice<int> values) -> cx::Element {
-    int total{};
-    for (int value : values) total += value;
-    auto title = rstd::format("{}", total);
-    return badge_label(title.as_str(), 36);
-}
-
-auto MakeContent(int id) -> cx::Content {
-    return cx::Content([id] [[vui::compose]] () -> cx::ComposeResult<cx::Element> {
-        return Ok(Badge(id));
-    });
-}
-
 auto MakeMovingBadge() -> cx::MovableContent {
     return cx::MovableContent([] [[vui::compose]] () -> cx::ComposeResult<cx::Element> {
         auto saved = cx::state(0);
@@ -57,11 +27,11 @@ auto MakeMovingBadge() -> cx::MovableContent {
         if (value.is_err()) return Err(value.unwrap_err());
         auto accent = cx::read(theme::local_accent);
         if (accent.is_err()) return Err(accent.unwrap_err());
-        auto title = rstd::format("移动 {}", value.unwrap().value());
+        auto title = rstd::format("Count {}", value.unwrap().value());
         return Ok(cx::button(theme::button_label(title.as_str(), theme::surface, 12), [count] {
             return count.update([](int value) { return value + 1; });
         }, ButtonStyleBuilder{theme::button_style(true)}.normal(accent.unwrap().value()).build())
-            .style(NodeStyleBuilder{}.width(92).height(28).build()));
+            .style(NodeStyleBuilder{}.width(112).height(36).horizontal(Alignment::Center).build()));
     });
 }
 
@@ -95,7 +65,7 @@ auto Counter(int id, cx::NodeRef target) -> cx::ComposeResult<cx::Element> {
         }));
     });
     if (mounted.is_err()) return Err(mounted.unwrap_err());
-    auto title = rstd::format("计数器 {:02}", id);
+    auto title = rstd::format("Counter {:02}", id);
     auto number = rstd::format("{}", value.unwrap().value());
     auto minus = cx::button(theme::button_label("-"_str, theme::ink, 20), [count] {
         return count.update([](int current) { return current - 1; });

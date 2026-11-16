@@ -10,19 +10,10 @@ namespace cx = vui::compose;
 namespace theme = examples::theme;
 using examples::block;
 
-static void pulse(UiDocument &ui, UiId picture, Scalar target, BindingGuard guard) {
-    auto id = ui.animate_opacity(picture, target,
-        {1'200'000'000, AnimationEasing::EaseInOut, AnimationEndPolicy::CommitFinal}).unwrap();
-    ui.on_animation_end(id, guard, [picture, target, guard](UiDocument &ui, const AnimationEvent &event) {
-        auto mount = ui.mount_state(picture);
-        if (event.reason == AnimationEndReason::Finished && mount.is_ok() && mount->mounted && mount->generation == event.mount_generation)
-            pulse(ui, picture, target < 1 ? 1 : .3, guard);
-    }).unwrap();
-}
 struct TileController {
     cx::Borrowed<UiSession> session;
     cx::NodeRef canvas, node;
-    static constexpr Point origin{84, 232};
+    static constexpr Point origin{32, 64};
     Point position{origin}, grab;
     PresentationLease lease;
     TileController(cx::Borrowed<UiSession> owner, cx::NodeRef reference) : session(owner), canvas(rstd::move(reference)) {}
@@ -103,6 +94,7 @@ struct TileElement {
 struct Gallery {
     rstd::rc::Rc<TileController> tile;
     ImageData picture{examples::make_sample_image()}, frame{examples::make_button_frame()};
+    Scalar opacity{1};
     Gallery(cx::Borrowed<UiSession> session, cx::NodeRef canvas)
         : tile(rstd::rc::make_rc<TileController>(session, rstd::move(canvas))) {}
     static auto label(ref<str> value, Point position, Scalar size = 14, Color color = theme::ink, bool bold = false) -> cx::Element {
@@ -120,57 +112,89 @@ struct Gallery {
         if (model.is_err()) return Err(model.unwrap_err());
         auto gallery = model.unwrap()->clone();
         auto tile = gallery->tile.clone();
-        auto effect = cx::effect({}, [target = image](cx::CommittedContext &context) -> cx::ComposeResult<cx::EffectLease> {
-            auto id = context.resolve(target); if (id.is_err()) return Err(id.unwrap_err());
-            auto &ui = context.session().document(); auto binding = ui.bindings().make();
-            pulse(ui, id.unwrap(), .3, binding.guard());
-            return Ok(cx::EffectLease([binding = rstd::move(binding)]() mutable { binding.disconnect(); }));
-        });
-        if (effect.is_err()) return Err(effect.unwrap_err());
+        auto counter = cx::state(0);
+        if (counter.is_err()) return Err(counter.unwrap_err());
+        auto count = counter.unwrap();
+        auto count_value = cx::read(count.value());
+        if (count_value.is_err()) return Err(count_value.unwrap_err());
+        auto selection = cx::state(0u);
+        if (selection.is_err()) return Err(selection.unwrap_err());
+        auto selected = selection.unwrap();
+        auto selected_value = cx::read(selected.value());
+        if (selected_value.is_err()) return Err(selected_value.unwrap_err());
+        auto active_item = selected_value.unwrap().value();
+        auto visibility = cx::state(false);
+        if (visibility.is_err()) return Err(visibility.unwrap_err());
+        auto shown = visibility.unwrap();
+        auto shown_value = cx::read(shown.value());
+        if (shown_value.is_err()) return Err(shown_value.unwrap_err());
         Vec<cx::Element> items;
         for (unsigned i{}; i < 12; ++i) {
-            auto title = rstd::format("位置 {:02}", i + 1);
-            items.push(cx::button(theme::button_label(title.as_str()),
-                [controller = tile, i](cx::ActionContext &context, const ClickEvent &) mutable {
-                    controller.get()->move(context.document(), {TileController::origin.x + 20 * Scalar(i), TileController::origin.y});
-                }, theme::button_style())
-                .style(block(200, 36, {})).key(cx::Key{i + 1}));
+            auto title = rstd::format("Item {:02}", i + 1);
+            bool active = active_item == i;
+            items.push(cx::button(theme::button_label(title.as_str(), active ? theme::surface : theme::ink),
+                [selected, i] { return selected.set(i); }, theme::button_style(active))
+                .style(block(208, 36, {0, 0, 0, 0})).key(cx::Key{i + 1}));
         }
-        auto reset = examples::skinned_button(theme::button_label("重置位置"_str),
+        auto reset = examples::skinned_button(theme::button_label("Reset"_str),
             [controller = tile](cx::ActionContext &context, const ClickEvent &) mutable {
                 controller.get()->move(context.document(), TileController::origin);
             }, ImageRegion::whole(gallery->frame), {{1, 1, 1, 1}, Some(Insets{3, 3, 3, 3}), true})
-            .style(NodeStyleBuilder{block(112, 36, {0, 0, 0, 0})}.transform({1, 0, 0, 1, 364, 312})
-                .clip({true, {0, 0, 112, 36}, 8}).build());
+            .style(NodeStyleBuilder{block(80, 32, {0, 0, 0, 0})}.transform({1, 0, 0, 1, 396, 268})
+                .clip({true, {0, 0, 80, 32}, 8}).build());
+        auto fade = cx::button(theme::button_label("Fade"_str),
+            [gallery, image](cx::ActionContext &context, const ClickEvent &) mutable {
+                gallery.get()->opacity = gallery->opacity < 1 ? 1 : .25;
+                context.document().animate_opacity(image.id().unwrap(), gallery->opacity,
+                    {300'000'000, AnimationEasing::EaseInOut, AnimationEndPolicy::CommitFinal}).unwrap();
+            }, theme::button_style()).style(NodeStyleBuilder{block(72, 32, {0, 0, 0, 0})}
+                .transform({1, 0, 0, 1, 676, 400}).build());
         auto area = [](Rect bounds) {
             return cx::native(LayoutKind::Leaf).style(NodeStyleBuilder{block(bounds.width, bounds.height, theme::surface, 12)}
                 .transform({1, 0, 0, 1, bounds.x, bounds.y}).build());
         };
-        auto drag_label = theme::label("拖动我"_str, 16, theme::surface, true)
+        auto drag_label = theme::label("Drag"_str, 16, theme::surface, true)
             .style(NodeStyleBuilder{}.horizontal(Alignment::Center).vertical(Alignment::Center).hit_test_visible(false).build());
-        return Ok(cx::stack({
+        auto drag = cx::element(TileElement{tile}, cx::elements({rstd::move(drag_label)}))
+            .style(NodeStyleBuilder{block(112, 72, theme::accent, 12)}
+                .transform({1, 0, 0, 1, TileController::origin.x, TileController::origin.y}).focusable(true).build());
+        auto count_title = rstd::format("Count {}", count_value.unwrap().value());
+        auto buttons = cx::row({
+            cx::button(theme::button_label(count_title.as_str(), theme::surface),
+                [count] { return count.update([](int value) { return value + 1; }); }, theme::button_style(true))
+                .style(block(124, 36, {0, 0, 0, 0})),
+            cx::button(theme::button_label("Open dialog"_str), [shown] { return shown.set(true); }, theme::button_style())
+                .style(block(124, 36, {0, 0, 0, 0})),
+            cx::button(theme::button_label("Disabled"_str, theme::muted), [] {},
+                ButtonStyleBuilder{theme::button_style()}.normal(theme::canvas).build())
+                .style(NodeStyleBuilder{block(124, 36, {0, 0, 0, 0})}.enabled(false).build()),
+        }).style(NodeStyleBuilder{}.transform({1, 0, 0, 1, 52, 160}).build()).gap(16);
+        Vec<cx::Element> overlays;
+        if (shown_value.unwrap().value()) {
+            auto panel = cx::column({theme::label("Dialog"_str, 22, theme::ink, true),
+                cx::button(theme::button_label("Close"_str, theme::surface), [shown] { return shown.set(false); },
+                    theme::button_style(true)).style(block(112, 36, {0, 0, 0, 0}))})
+                .style(block(320, 152, theme::surface, 12)).padding(24).gap(24);
+            overlays.push(cx::dialog(rstd::move(panel), [shown](PopupCloseReason) { return shown.set(false); }));
+        }
+        auto body = cx::stack({
             label("vui gallery"_str, {32, 32}, 28, theme::ink, true),
-            label("试试拖动、滚动，以及文字与图片。"_str, {32, 78}, 14, theme::muted),
-            area({32, 120, 464, 244}), area({520, 120, 248, 244}),
-            label("自由拖动"_str, {52, 138}, 18, theme::ink, true),
-            label("拖动色块，或用方向键微调位置。"_str, {52, 172}, 14, theme::muted),
-            label("位置预设"_str, {540, 138}, 18, theme::ink, true),
-            area({32, 388, 464, 164}), area({520, 388, 248, 164}),
-            label("文字"_str, {52, 405}, 14, theme::muted),
-            label("Hello, 世界"_str, {52, 438}, 26, theme::ink, true),
-            label("سلام  /  café  /  é"_str, {52, 484}, 20, theme::muted),
-            label("图片与透明度"_str, {540, 405}, 14, theme::muted),
-            cx::image(gallery->picture).style(NodeStyleBuilder{block(200, 80, {0, 0, 0, 0})}.transform({1, 0, 0, 1, 544, 444})
+            area({32, 96, 464, 132}), area({520, 96, 248, 264}),
+            label("Buttons"_str, {52, 116}, 18, theme::ink, true),
+            label("Scroll view"_str, {540, 116}, 18, theme::ink, true),
+            area({32, 252, 464, 316}), area({520, 384, 248, 184}),
+            label("Drag"_str, {52, 272}, 18, theme::ink, true),
+            label("Image"_str, {540, 404}, 18, theme::ink, true),
+            cx::image(gallery->picture).style(NodeStyleBuilder{block(208, 96, {0, 0, 0, 0})}.transform({1, 0, 0, 1, 540, 448})
                 .hit_test_visible(false).build()).reference(image),
-            cx::element(TileElement{tile}, cx::elements({rstd::move(drag_label)}))
-                .style(NodeStyleBuilder{block(112, 72, theme::accent, 12)}
-                    .transform({1, 0, 0, 1, TileController::origin.x, TileController::origin.y}).focusable(true).build()),
-            reset,
+            cx::stack({rstd::move(drag)}).style(NodeStyleBuilder{block(424, 236, theme::canvas, 8)}
+                .transform({1, 0, 0, 1, 52, 312}).clip({true, {0, 0, 424, 236}, 8}).build()).reference(canvas),
+            rstd::move(buttons), rstd::move(reset), rstd::move(fade),
             cx::scroll_view(cx::column(rstd::move(items)).gap(6), ScrollStyleBuilder{}.line_step(42).wheel_mode(ScrollWheelMode::Direct).build())
-                .style(NodeStyleBuilder{block(200, 164, {0, 0, 0, 0})}.transform({1, 0, 0, 1, 544, 180})
-                    .clip({true, {0, 0, 200, 164}, 8}).build()),
-            label("Tab 切换焦点，Esc 退出。"_str, {32, 568}, 12, theme::muted),
-        }).style(NodeStyleBuilder{}.width(800).height(600).build()).reference(canvas));
+                .style(NodeStyleBuilder{block(208, 188, theme::surface)}.transform({1, 0, 0, 1, 540, 152})
+                    .clip({true, {0, 0, 208, 188}, 8}).build()),
+        }).style(NodeStyleBuilder{}.width(800).height(600).build());
+        return Ok(cx::popup_host(rstd::move(body), rstd::move(overlays)));
     }
 };
 int main(int argc, char **argv) {
@@ -187,7 +211,6 @@ int main(int argc, char **argv) {
     cx::NodeRef picture;
     auto composition = cx::Composition::create(session, root).unwrap();
     composition.set_content(Gallery::content(cx::borrow(session), picture)).unwrap();
-    rstd::io::println("Drag the tile; Tab selects controls; arrows move the tile. Wheel over the right list to scroll; its buttons move the tile. Escape closes.");
     Serial animation_samples{}, animation_completions{};
     Scalar opacity_min{1}, opacity_max{};
     gpu::TextCacheStats cache; gpu::ImageCacheStats images;
