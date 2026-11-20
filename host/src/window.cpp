@@ -224,7 +224,7 @@ auto Window::pixel_extent() const -> VkExtent2D {
 }
 }
 
-#else
+#elif RSTD_OS_LINUX
 import :ffi.linux;
 import :ffi.wayland;
 import :ffi.x11;

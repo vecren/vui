@@ -2,12 +2,16 @@
 name = "vui-host"
 version.workspace = true
 license.workspace = true
-target = { os = ["linux", "windows"] }
+target = { os = ["linux", "windows", "macos"] }
 
 [lib]
 name = "vui-host"
 module = "vui.host"
 archive = "vui-host"
+when = [{ condition = 'target.os == "macos"', source-groups = ["macos"] }]
+
+[source-groups.macos]
+sources = ["src/platform/macos/window.mm"]
 
 [[when]]
 condition = 'target.os == "windows"'

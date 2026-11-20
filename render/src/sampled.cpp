@@ -56,7 +56,9 @@ auto make_image_sampler(vk::TextureContext &textures,const ImageData &image,bool
     desc.sample.magFilter=desc.sample.minFilter=linear?vrento::TextureFilter::LINEAR:vrento::TextureFilter::NEAREST;
     desc.sample.mipFilter=options.mipmaps==ImageMipmapSampling::None?vrento::TextureMipmapFilter::None:
         options.mipmaps==ImageMipmapSampling::Nearest?vrento::TextureMipmapFilter::Nearest:vrento::TextureMipmapFilter::Linear;
-    desc.max_lod=options.mipmaps==ImageMipmapSampling::None?0:float(image.mip_count()-1);desc.lod_bias=float(options.mip_bias);desc.max_anisotropy=float(options.max_anisotropy);
+    desc.max_lod=options.mipmaps==ImageMipmapSampling::None?0:float(image.mip_count()-1);desc.lod_bias=float(options.mip_bias);
+    auto limit=textures.session().device().capabilities().max_sampler_anisotropy;
+    desc.max_anisotropy=rstd::min(float(options.max_anisotropy),limit);
     auto sampler=textures.CreateSampler(desc);
     if(sampler.is_err())return Err(Error::texture(Stage::Allocation,sampler.unwrap_err()));
     return Ok(rstd::move(sampler).unwrap());
