@@ -98,7 +98,7 @@ void X11Input::open(X11Connection &connection, ffi::Window window, ffi::Window r
     auto dispatch = connection.xi_dispatch();
     if (!dispatch) return;
     int event_base{}, error_base{};
-    if (!ffi::XQueryExtension(display, "XInputExtension", &opcode_, &event_base, &error_base)) return;
+    if (!connection.api().XQueryExtension(display, "XInputExtension", &opcode_, &event_base, &error_base)) return;
     int major = 2, minor = 2;
     if (dispatch->XIQueryVersion(display, &major, &minor) != ffi::Success || major < 2 || (major == 2 && minor < 2)) return;
     constexpr int mask_size = ffi::XIMaskLen(ffi::XI_TouchEnd);

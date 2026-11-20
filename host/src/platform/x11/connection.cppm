@@ -1,5 +1,6 @@
 module vui.host:platform.x11.connection;
 import :ffi.x11;
+import :ffi.xkb;
 import :platform.x11.dispatch;
 import rstd;
 
@@ -12,6 +13,8 @@ struct X11InternalConnection { int fd{}; rstd::uint64_t generation{}; };
 
 class X11Connection {
     friend struct X11ConnectionTest;
+    Option<ffi::XlibDispatch> api_;
+    Option<rstd::sync::Arc<ffi::XkbDispatch>> xkb_;
     ffi::Display *display_{};
     Option<XiDispatch> xi_dispatch_;
     Vec<X11InternalConnection> internal_;
@@ -29,6 +32,8 @@ class X11Connection {
     auto open(const char *name = nullptr) -> Result<empty, X11ConnectionError>;
     void close();
     auto display() const -> ffi::Display * { return display_; }
+    auto api() const -> const ffi::XlibDispatch & { return *api_; }
+    auto xkb_dispatch() const -> const rstd::sync::Arc<ffi::XkbDispatch> & { return *xkb_; }
     auto xi_dispatch() -> const XiDispatch *;
     void copy_internal(Vec<X11InternalConnection> &result) const {
         result.clear();
@@ -36,7 +41,7 @@ class X11Connection {
     }
     auto current(X11InternalConnection item) const -> bool;
     void process(X11InternalConnection item) {
-        if (display_ && current(item)) ffi::XProcessInternalConnection(display_, item.fd);
+        if (display_ && current(item)) api().XProcessInternalConnection(display_, item.fd);
     }
 };
 } // namespace vui::host::detail

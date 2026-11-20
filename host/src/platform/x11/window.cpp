@@ -42,25 +42,25 @@ auto X11Window::open(const char *title, rstd::uint32_t width, rstd::uint32_t hei
     if (connection_.open(display).is_err())
         return Err(X11WindowError::Connection);
     auto native = connection_.display();
-    auto screen = ffi::XDefaultScreen(native);
-    auto root = ffi::XRootWindow(native, screen);
-    window_ = ffi::XCreateSimpleWindow(native, root, 0, 0, width, height, 0, 0, 0);
+    auto screen = api().XDefaultScreen(native);
+    auto root = api().XRootWindow(native, screen);
+    window_ = api().XCreateSimpleWindow(native, root, 0, 0, width, height, 0, 0, 0);
     if (!window_)
         return fail(X11WindowError::Window);
     ffi::XSizeHints hints{};
     hints.flags = ffi::PWinGravity;
     hints.win_gravity = ffi::StaticGravity;
-    ffi::XSetWMNormalHints(native, window_, &hints);
-    protocols_ = ffi::XInternAtom(native, "WM_PROTOCOLS", 0);
-    delete_window_ = ffi::XInternAtom(native, "WM_DELETE_WINDOW", 0);
-    supported_atom_ = ffi::XInternAtom(native, "_NET_SUPPORTED", 0);
-    state_atom_ = ffi::XInternAtom(native, "_NET_WM_STATE", 0);
-    fullscreen_atom_ = ffi::XInternAtom(native, "_NET_WM_STATE_FULLSCREEN", 0);
-    auto wm_state = ffi::XInternAtom(native, "WM_STATE", 0);
-    auto desktop = ffi::XInternAtom(native, "_NET_CURRENT_DESKTOP", 0);
-    auto workarea = ffi::XInternAtom(native, "_NET_WORKAREA", 0);
+    api().XSetWMNormalHints(native, window_, &hints);
+    protocols_ = api().XInternAtom(native, "WM_PROTOCOLS", 0);
+    delete_window_ = api().XInternAtom(native, "WM_DELETE_WINDOW", 0);
+    supported_atom_ = api().XInternAtom(native, "_NET_SUPPORTED", 0);
+    state_atom_ = api().XInternAtom(native, "_NET_WM_STATE", 0);
+    fullscreen_atom_ = api().XInternAtom(native, "_NET_WM_STATE_FULLSCREEN", 0);
+    auto wm_state = api().XInternAtom(native, "WM_STATE", 0);
+    auto desktop = api().XInternAtom(native, "_NET_CURRENT_DESKTOP", 0);
+    auto workarea = api().XInternAtom(native, "_NET_WORKAREA", 0);
     if (!protocols_ || !delete_window_ ||
-        !ffi::XSetWMProtocols(native, window_, &delete_window_, 1))
+        !api().XSetWMProtocols(native, window_, &delete_window_, 1))
         return fail(X11WindowError::Protocol);
     width_ = width;
     height_ = height;
@@ -68,23 +68,24 @@ auto X11Window::open(const char *title, rstd::uint32_t width, rstd::uint32_t hei
     revision_ = 0;
     close_requested_ = false;
     int supported{};
-    detectable_repeat_ = ffi::XkbSetDetectableAutoRepeat(native, 1, &supported) && supported;
-    ffi::XStoreName(native, window_, title);
+    detectable_repeat_ = api().XkbSetDetectableAutoRepeat(native, 1, &supported) && supported;
+    api().XStoreName(native, window_, title);
     auto event_mask = ffi::StructureNotifyMask |
         ffi::PointerMotionMask | ffi::ButtonPressMask |
         ffi::ButtonReleaseMask | ffi::FocusChangeMask |
         ffi::EnterWindowMask | ffi::LeaveWindowMask |
         ffi::KeyPressMask | ffi::KeyReleaseMask;
-    ffi::XSelectInput(native, window_, event_mask);
-    ffi::XSync(native, 0);
-    (void)state_.open(ffi::XDisplayString(native), root, window_, supported_atom_, state_atom_, fullscreen_atom_, wm_state);
-    (void)displays_.open(ffi::XDisplayString(native), root, window_, desktop, workarea);
+    api().XSelectInput(native, window_, event_mask);
+    api().XSync(native, 0);
+    (void)state_.open(api().XDisplayString(native), root, window_, supported_atom_, state_atom_, fullscreen_atom_, wm_state);
+    (void)displays_.open(api().XDisplayString(native), root, window_, desktop, workarea);
     xi_.open(connection_, window_, root);
-    clipboard_.open(native, root);
-    (void)clipboard_owner_.open(ffi::XDisplayString(native));
-    text_.open(native, window_, event_mask);
-    ffi::XMapWindow(native, window_);
-    ffi::XFlush(native);
+    clipboard_.open(api(), native, root);
+    (void)clipboard_owner_.open(api().XDisplayString(native));
+    if (!text_.open(api(), connection_.xkb_dispatch(), native, window_, event_mask))
+        return fail(X11WindowError::Connection);
+    api().XMapWindow(native, window_);
+    api().XFlush(native);
     return Ok(empty{});
 }
 
@@ -93,8 +94,8 @@ auto X11Window::resize(rstd::uint32_t width, rstd::uint32_t height) -> Result<em
         return Err(X11WindowError::State);
     if (!width || !height || width > 32768 || height > 32768)
         return Err(X11WindowError::InvalidSize);
-    ffi::XResizeWindow(connection_.display(), window_, width, height);
-    ffi::XFlush(connection_.display());
+    api().XResizeWindow(connection_.display(), window_, width, height);
+    api().XFlush(connection_.display());
     return Ok(empty{});
 }
 
@@ -103,56 +104,56 @@ auto X11Window::set_minimum_size(rstd::uint32_t width, rstd::uint32_t height) ->
     if (width > 32768 || height > 32768) return Err(X11WindowError::InvalidSize);
     ffi::XSizeHints hints{};
     long supplied{};
-    (void)ffi::XGetWMNormalHints(connection_.display(), window_, &hints, &supplied);
+    (void)api().XGetWMNormalHints(connection_.display(), window_, &hints, &supplied);
     hints.flags &= ~ffi::PMinSize;
     if (width || height) {
         hints.flags |= ffi::PMinSize;
         hints.min_width = int(width); hints.min_height = int(height);
     }
-    ffi::XSetWMNormalHints(connection_.display(), window_, &hints);
-    ffi::XFlush(connection_.display());
+    api().XSetWMNormalHints(connection_.display(), window_, &hints);
+    api().XFlush(connection_.display());
     minimum_width_ = width; minimum_height_ = height;
     return Ok(empty{});
 }
 
 auto X11Window::position() const -> Option<Point> {
     if (!window_) return None();
-    auto display = connection_.display(); auto root = ffi::XRootWindow(display, ffi::XDefaultScreen(display));
+    auto display = connection_.display(); auto root = api().XRootWindow(display, api().XDefaultScreen(display));
     ffi::Window child{}; int x{}, y{};
-    if (!ffi::XTranslateCoordinates(display, window_, root, 0, 0, &x, &y, &child)) return None();
+    if (!api().XTranslateCoordinates(display, window_, root, 0, 0, &x, &y, &child)) return None();
     return Some(Point{Scalar(x), Scalar(y)});
 }
 
 auto X11Window::set_position(int x, int y) -> Result<empty, X11WindowError> {
     if (!window_) return Err(X11WindowError::State);
-    ffi::XMoveWindow(connection_.display(), window_, x, y);
-    ffi::XFlush(connection_.display()); return Ok(empty{});
+    api().XMoveWindow(connection_.display(), window_, x, y);
+    api().XFlush(connection_.display()); return Ok(empty{});
 }
 
 auto X11Window::minimize() -> bool {
     if (!window_) return false;
     auto display = connection_.display();
-    auto result = ffi::XIconifyWindow(display, window_, ffi::XDefaultScreen(display));
-    ffi::XFlush(display); return result != 0;
+    auto result = api().XIconifyWindow(display, window_, api().XDefaultScreen(display));
+    api().XFlush(display); return result != 0;
 }
 
 auto X11Window::restore() -> bool {
     if (!window_) return false;
-    auto display = connection_.display(); auto result = ffi::XMapWindow(display, window_);
-    ffi::XFlush(display); return result != 0;
+    auto display = connection_.display(); auto result = api().XMapWindow(display, window_);
+    api().XFlush(display); return result != 0;
 }
 
 auto X11Window::set_fullscreen(bool enabled) -> bool {
     if (!window_) return false;
-    auto display = connection_.display(); auto root = ffi::XRootWindow(display, ffi::XDefaultScreen(display));
+    auto display = connection_.display(); auto root = api().XRootWindow(display, api().XDefaultScreen(display));
     ffi::XEvent event{};
     event.xclient.type = ffi::ClientMessage; event.xclient.window = window_;
     event.xclient.message_type = state_atom_; event.xclient.format = 32;
     event.xclient.data.l[0] = enabled ? 1 : 0; event.xclient.data.l[1] = long(fullscreen_atom_);
     event.xclient.data.l[3] = 1;
-    auto result = ffi::XSendEvent(display, root, 0,
+    auto result = api().XSendEvent(display, root, 0,
         ffi::SubstructureNotifyMask | ffi::SubstructureRedirectMask, &event);
-    ffi::XFlush(display); return result != 0;
+    api().XFlush(display); return result != 0;
 }
 
 auto X11Window::capture(bool enabled) -> NativeCaptureResult {
@@ -161,7 +162,7 @@ auto X11Window::capture(bool enabled) -> NativeCaptureResult {
     auto display = connection_.display();
     if (enabled) {
         if (xi_.has_implicit_pointer_capture()) return NativeCaptureResult::Succeeded;
-        auto result = ffi::XGrabPointer(display, window_, 1,
+        auto result = api().XGrabPointer(display, window_, 1,
             ffi::ButtonPressMask | ffi::ButtonReleaseMask |
             ffi::PointerMotionMask | ffi::EnterWindowMask |
             ffi::LeaveWindowMask, ffi::GrabModeAsync,
@@ -169,8 +170,8 @@ auto X11Window::capture(bool enabled) -> NativeCaptureResult {
         if (result != ffi::GrabSuccess) return NativeCaptureResult::Failed;
         pointer_grabbed_ = true;
     } else {
-        ffi::XUngrabPointer(display, ffi::CurrentTime);
-        ffi::XFlush(display);
+        api().XUngrabPointer(display, ffi::CurrentTime);
+        api().XFlush(display);
         pointer_grabbed_ = false;
     }
     return NativeCaptureResult::Succeeded;
@@ -192,9 +193,9 @@ auto X11Window::dispatch(bool bounded) -> Result<empty, X11WindowError> {
         return Err(X11WindowError::State);
     auto display = connection_.display();
     unsigned clipboard_events{};
-    while (ffi::XPending(display) > 0) {
+    while (api().XPending(display) > 0) {
         ffi::XEvent event{};
-        ffi::XNextEvent(display, &event);
+        api().XNextEvent(display, &event);
         auto code = (event.type == ffi::KeyPress || event.type == ffi::KeyRelease)
                         ? event.xkey.keycode : 0;
         auto filtered = text_.filter(event);
@@ -202,9 +203,9 @@ auto X11Window::dispatch(bool bounded) -> Result<empty, X11WindowError> {
             event.xkey.keycode = code;
         if (event.type == ffi::GenericEvent) {
             auto &cookie = event.xcookie;
-            if (xi_.enabled() && cookie.extension == xi_.opcode() && ffi::XGetEventData(display, &cookie)) {
+            if (xi_.enabled() && cookie.extension == xi_.opcode() && api().XGetEventData(display, &cookie)) {
                 xi_.event(cookie.evtype, cookie.data);
-                ffi::XFreeEventData(display, &cookie);
+                api().XFreeEventData(display, &cookie);
             }
             continue;
         }
@@ -249,14 +250,14 @@ auto X11Window::dispatch(bool bounded) -> Result<empty, X11WindowError> {
             if (event.xfocus.mode == ffi::NotifyGrab ||
                 event.xfocus.mode == ffi::NotifyUngrab) continue;
             if (event.type == ffi::FocusOut && event.xfocus.detail == ffi::NotifyPointer) {
-                auto queued = ffi::XEventsQueued(display, ffi::QueuedAfterReading);
+                auto queued = api().XEventsQueued(display, ffi::QueuedAfterReading);
                 if (!queued) {
-                    ffi::XSync(display, 0);
-                    queued = ffi::XEventsQueued(display, ffi::QueuedAfterReading);
+                    api().XSync(display, 0);
+                    queued = api().XEventsQueued(display, ffi::QueuedAfterReading);
                 }
                 if (queued) {
                     ffi::XEvent next{};
-                    ffi::XPeekEvent(display, &next);
+                    api().XPeekEvent(display, &next);
                     if (next.type == ffi::FocusIn && next.xfocus.window == window_ &&
                         next.xfocus.detail == ffi::NotifyNonlinear &&
                         next.xfocus.mode == event.xfocus.mode && next.xfocus.serial == event.xfocus.serial)
@@ -278,15 +279,15 @@ auto X11Window::dispatch(bool bounded) -> Result<empty, X11WindowError> {
             auto code = event.xkey.keycode;
             if (code >= 256) continue;
             if (event.type == ffi::KeyRelease && !detectable_repeat_ &&
-                ffi::XEventsQueued(display, ffi::QueuedAfterReading)) {
+                api().XEventsQueued(display, ffi::QueuedAfterReading)) {
                 ffi::XEvent next{};
-                ffi::XPeekEvent(display, &next);
+                api().XPeekEvent(display, &next);
                 if (next.type == ffi::KeyPress && next.xkey.window == window_ &&
                     next.xkey.keycode == code && next.xkey.time - event.xkey.time < 20) continue;
             }
             unsigned consumed{};
             unsigned long symbol{};
-            ffi::XkbLookupKeySym(display, code, event.xkey.state, &consumed, &symbol);
+            api().XkbLookupKeySym(display, code, event.xkey.state, &consumed, &symbol);
             InputEvent input;
             input.type = event.type == ffi::KeyPress ? EventType::KeyDown : EventType::KeyUp;
             input.key = key_from_symbol(symbol);
@@ -356,7 +357,7 @@ auto X11Window::dispatch(bool bounded) -> Result<empty, X11WindowError> {
 auto X11Window::synchronize() -> Result<empty, X11WindowError> {
     if (!window_)
         return Err(X11WindowError::State);
-    ffi::XSync(connection_.display(), 0);
+    api().XSync(connection_.display(), 0);
     return dispatch();
 }
 
@@ -369,7 +370,7 @@ void X11Window::close() {
     state_.close();
     displays_.close();
     if (window_)
-        ffi::XDestroyWindow(connection_.display(), window_);
+        api().XDestroyWindow(connection_.display(), window_);
     window_ = 0;
     connection_.close();
     close_requested_ = false;

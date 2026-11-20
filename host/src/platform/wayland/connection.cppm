@@ -11,9 +11,10 @@ namespace vui::host::detail {
 using namespace rstd::prelude;
 using namespace rstd::literals;
 
-enum class WaylandConnectionError { State, Connect, Registry, MissingGlobals, Protocol };
+enum class WaylandConnectionError { State, Library, Connect, Registry, MissingGlobals, Protocol };
 
 class WaylandConnection {
+    Option<rstd::sync::Arc<ffi::WaylandDispatch>> api_;
     ffi::wl_display *display_{};
     ffi::wl_registry *registry_{};
     ffi::wl_compositor *compositor_{};
@@ -29,11 +30,9 @@ class WaylandConnection {
     WaylandInput input_;
     WaylandOutputs outputs_;
 
-    static void ping(void *, ffi::xdg_wm_base *shell, rstd::uint32_t serial) {
-        ffi::xdg_wm_base_pong(shell, serial);
-    }
-    static void global(void *data, ffi::wl_registry *registry, rstd::uint32_t name,
-                       const char *interface, rstd::uint32_t version);
+    static void ping(void *, ffi::xdg_wm_base *shell, rstd::uint32_t serial) { ffi::xdg_wm_base_pong(shell, serial); }
+    static void global(void *data, ffi::wl_registry *registry, rstd::uint32_t name, const char *interface,
+                       rstd::uint32_t version);
     static void removed(void *data, ffi::wl_registry *, rstd::uint32_t name);
     ffi::wl_registry_listener registry_listener_{global, removed};
     ffi::xdg_wm_base_listener shell_listener_{ping};
@@ -58,7 +57,10 @@ class WaylandConnection {
     auto input() -> WaylandInput & { return input_; }
     auto outputs() -> WaylandOutputs & { return outputs_; }
     auto outputs() const -> const WaylandOutputs & { return outputs_; }
-    void set_scaling_callback(void *sink, void (*callback)(void *)) { scaling_sink_ = sink; scaling_changed_ = callback; }
+    void set_scaling_callback(void *sink, void (*callback)(void *)) {
+        scaling_sink_ = sink;
+        scaling_changed_ = callback;
+    }
     auto fractional() const -> ffi::wp_fractional_scale_manager_v1 * { return fractional_; }
     auto viewporter() const -> ffi::wp_viewporter * { return viewporter_; }
     auto failed() const -> bool { return listener_failed_ || input_.failed() || outputs_.failed(); }

@@ -20,14 +20,16 @@ void X11Connection::watch(ffi::Display *, char *data, int fd, int opening, char 
 auto X11Connection::open(const char *name) -> Result<empty, X11ConnectionError> {
     if (display_)
         return Err(X11ConnectionError::State);
-    static const bool threaded = ffi::XInitThreads() != 0;
-    if (!threaded) return Err(X11ConnectionError::Connect);
-    display_ = ffi::XOpenDisplay(name);
-    if (!display_)
-        return Err(X11ConnectionError::Connect);
-    if (!ffi::XAddConnectionWatch(display_, watch, reinterpret_cast<char *>(this))) {
-        ffi::XCloseDisplay(display_); display_ = nullptr;
-        internal_.clear();
+    api_ = ffi::XlibDispatch::open();
+    if (api_.is_none()) return Err(X11ConnectionError::Connect);
+    auto keyboard = ffi::XkbDispatch::open();
+    if (keyboard.is_err()) { close(); return Err(X11ConnectionError::Connect); }
+    xkb_ = Some(rstd::move(keyboard).unwrap());
+    if (!api().XInitThreads()) { close(); return Err(X11ConnectionError::Connect); }
+    display_ = api().XOpenDisplay(name);
+    if (!display_) { close(); return Err(X11ConnectionError::Connect); }
+    if (!api().XAddConnectionWatch(display_, watch, reinterpret_cast<char *>(this))) {
+        close();
         return Err(X11ConnectionError::Watch);
     }
     watching_ = true;
@@ -35,13 +37,15 @@ auto X11Connection::open(const char *name) -> Result<empty, X11ConnectionError> 
 }
 
 void X11Connection::close() {
-    if (display_ && watching_) ffi::XRemoveConnectionWatch(display_, watch, reinterpret_cast<char *>(this));
+    if (display_ && watching_) api().XRemoveConnectionWatch(display_, watch, reinterpret_cast<char *>(this));
     watching_ = false;
     if (display_)
-        ffi::XCloseDisplay(display_);
+        api().XCloseDisplay(display_);
     display_ = nullptr;
     // libXi's display and event-cookie hooks must remain valid through XCloseDisplay.
     xi_dispatch_ = None();
+    api_ = None();
+    xkb_ = None();
     internal_.clear();
 }
 

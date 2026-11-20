@@ -14,6 +14,8 @@ class X11Text {
     void *sink_{};
     void (*emit_)(void *, InputEvent){};
     void (*drop_)(void *){};
+    const ffi::XlibDispatch *xlib_{};
+    Option<rstd::sync::Arc<ffi::XkbDispatch>> xkb_;
     ffi::Display *display_{};
     ffi::Window window_{};
     ffi::XIM im_{};
@@ -31,7 +33,7 @@ class X11Text {
 
     static auto spot(Rect area, ffi::XPoint &point) -> bool;
     void free_font() {
-        if (font_) ffi::XFreeFontSet(display_, font_);
+        if (font_) xlib_->XFreeFontSet(display_, font_);
         font_ = nullptr;
     }
 
@@ -65,7 +67,8 @@ class X11Text {
     X11Text(const X11Text &) = delete;
     auto operator=(const X11Text &) -> X11Text & = delete;
     ~X11Text() { close(); }
-    void open(ffi::Display *display, ffi::Window window, unsigned long event_mask);
+    auto open(const ffi::XlibDispatch &api, const rstd::sync::Arc<ffi::XkbDispatch> &keyboard,
+              ffi::Display *display, ffi::Window window, unsigned long event_mask) -> bool;
     void close();
     auto set_state(Option<TextInputState> state) -> NativeTextInputResult;
     void focus(bool focused) {
@@ -75,7 +78,7 @@ class X11Text {
     auto session() const -> Option<Serial> {
         return state_.is_some() ? Some(Serial(state_->request.session)) : None<Serial>();
     }
-    auto filter(ffi::XEvent &event) -> bool { return ffi::XFilterEvent(&event, 0) != 0; }
+    auto filter(ffi::XEvent &event) -> bool { return display_ && xlib_->XFilterEvent(&event, 0) != 0; }
     auto lookup(ffi::XKeyEvent &event, rstd::uint32_t symbol, bool shortcut, bool &invalid) -> TextInput;
 };
 }

@@ -24,11 +24,11 @@ vvk = { version = "0.1.2", pub = true }
 vui-render = { workspace = true, pub = true }
 
 [external-dependencies.pkg-config]
-wayland-client = { module = "wayland-client", condition = 'target.os == "linux"' }
-x11 = { module = "x11", condition = 'target.os == "linux"' }
-xcb = { module = "xcb", condition = 'target.os == "linux"' }
-xcb-randr = { module = "xcb-randr", condition = 'target.os == "linux"' }
-xkbcommon = { module = "xkbcommon", condition = 'target.os == "linux"' }
+wayland-client = { module = "wayland-client", usage = "compile", condition = 'target.os == "linux"' }
+x11 = { module = "x11", usage = "compile", condition = 'target.os == "linux"' }
+xcb = { module = "xcb", usage = "compile", condition = 'target.os == "linux"' }
+xcb-randr = { module = "xcb-randr", usage = "compile", condition = 'target.os == "linux"' }
+xkbcommon = { module = "xkbcommon", usage = "compile", condition = 'target.os == "linux"' }
 
 [build-tools.wayland-scanner]
 path = "wayland-scanner"

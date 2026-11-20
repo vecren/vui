@@ -32,52 +32,53 @@ void X11Clipboard::finish(usize index, Option<ClipboardError> error) {
         }
     }
     event.clipboard_error = error;
-    ffi::XDestroyWindow(display_, request->window);
+    xlib_->XDestroyWindow(display_, request->window);
     emit_(sink_, rstd::move(event));
 }
 
 void X11Clipboard::property(usize index, bool initial) {
     auto &request = *requests_[index];
     ffi::Atom type{}; int format{}; unsigned long count{}, after{}; unsigned char *data{};
-    auto result = ffi::XGetWindowProperty(display_, request.window, property_, 0,
+    auto result = xlib_->XGetWindowProperty(display_, request.window, property_, 0,
         long((limit + 3) / 4 + 1), 1, ffi::AnyPropertyType, &type, &format, &count, &after, &data);
-    if (result != ffi::Success) { if (data) ffi::XFree(data); finish(index, Some(ClipboardError::Failed)); return; }
+    if (result != ffi::Success) { if (data) xlib_->XFree(data); finish(index, Some(ClipboardError::Failed)); return; }
     if (initial && type == incr_) {
         bool valid = format == 32 && count <= 1 && !after && (!count || data);
-        if (data) ffi::XFree(data);
+        if (data) xlib_->XFree(data);
         if (!valid) { finish(index, Some(ClipboardError::Failed)); return; }
         request.incremental = true;
-        ffi::XFlush(display_);
+        xlib_->XFlush(display_);
         return;
     }
     if (type != request.target || format != 8 || (count && !data)) {
-        if (data) ffi::XFree(data);
+        if (data) xlib_->XFree(data);
         finish(index, Some(ClipboardError::InvalidText));
         return;
     }
     if (after || count > limit || request.bytes.len() > usize(limit - count)) {
-        if (data) ffi::XFree(data);
+        if (data) xlib_->XFree(data);
         if (!request.incremental) { finish(index, Some(ClipboardError::Limit)); return; }
         request.bytes.clear(); request.overflow = true;
-        if (after) ffi::XDeleteProperty(display_, request.window, property_);
+        if (after) xlib_->XDeleteProperty(display_, request.window, property_);
         return;
     }
     if (request.overflow) {
-        if (data) ffi::XFree(data);
+        if (data) xlib_->XFree(data);
         if (!count) finish(index, Some(ClipboardError::Limit));
         return;
     }
     for (unsigned long i{}; i < count; ++i) request.bytes.push(u8(data[i]));
-    if (data) ffi::XFree(data);
+    if (data) xlib_->XFree(data);
     if (!request.incremental || !count) finish(index);
 }
 
-void X11Clipboard::open(ffi::Display *display, ffi::Window root) {
+void X11Clipboard::open(const ffi::XlibDispatch &api, ffi::Display *display, ffi::Window root) {
+    xlib_ = &api;
     display_ = display; root_ = root;
-    clipboard_ = ffi::XInternAtom(display, "CLIPBOARD", 0);
-    utf8_ = ffi::XInternAtom(display, "UTF8_STRING", 0);
-    property_ = ffi::XInternAtom(display, "_VUI_CLIPBOARD", 0);
-    incr_ = ffi::XInternAtom(display, "INCR", 0);
+    clipboard_ = xlib_->XInternAtom(display, "CLIPBOARD", 0);
+    utf8_ = xlib_->XInternAtom(display, "UTF8_STRING", 0);
+    property_ = xlib_->XInternAtom(display, "_VUI_CLIPBOARD", 0);
+    incr_ = xlib_->XInternAtom(display, "INCR", 0);
 }
 
 auto X11Clipboard::request(Serial id) -> Result<empty, ClipboardError> {
@@ -86,9 +87,9 @@ auto X11Clipboard::request(Serial id) -> Result<empty, ClipboardError> {
     if (!clipboard_ || !utf8_ || !property_ || !incr_) return Err(ClipboardError::Unsupported);
     if (requests_.len() >= usize(32)) return Err(ClipboardError::Limit);
     for (const auto &pending : requests_) if (pending->id == id) return Err(ClipboardError::Failed);
-    auto window = ffi::XCreateSimpleWindow(display_, root_, 0, 0, 1, 1, 0, 0, 0);
+    auto window = xlib_->XCreateSimpleWindow(display_, root_, 0, 0, 1, 1, 0, 0, 0);
     if (!window) return Err(ClipboardError::Failed);
-    ffi::XSelectInput(display_, window, ffi::PropertyChangeMask);
+    xlib_->XSelectInput(display_, window, ffi::PropertyChangeMask);
     auto request = Box<Request>::make();
     request->id = id; request->window = window; request->target = utf8_;
     auto time = now(); request->deadline = time > ~Serial{} - timeout_ns ? ~Serial{} : time + timeout_ns;

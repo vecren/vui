@@ -16,6 +16,7 @@ class X11Clipboard {
         bool incremental{}, overflow{};
         Vec<u8> bytes;
     };
+    const ffi::XlibDispatch *xlib_{};
     ffi::Display *display_{};
     ffi::Window root_{};
     ffi::Atom clipboard_{}, utf8_{}, property_{}, incr_{};
@@ -29,23 +30,23 @@ class X11Clipboard {
     }
     void finish(usize index, Option<ClipboardError> error = None());
     void convert(Request &request) {
-        ffi::XConvertSelection(display_, clipboard_, request.target, property_, request.window, ffi::CurrentTime);
-        ffi::XFlush(display_);
+        xlib_->XConvertSelection(display_, clipboard_, request.target, property_, request.window, ffi::CurrentTime);
+        xlib_->XFlush(display_);
     }
     void property(usize index, bool initial);
   public:
     X11Clipboard(void *sink, void (*emit)(void *, InputEvent)) : sink_(sink), emit_(emit) {}
     X11Clipboard(const X11Clipboard &) = delete;
     auto operator=(const X11Clipboard &) -> X11Clipboard & = delete;
-    void open(ffi::Display *display, ffi::Window root);
+    void open(const ffi::XlibDispatch &api, ffi::Display *display, ffi::Window root);
     auto request(Serial id) -> Result<empty, ClipboardError>;
     auto event(const ffi::XEvent &event) -> bool;
     void expire();
     auto wait(Index milliseconds) const -> Index;
     auto pending() const -> usize { return requests_.len(); }
     void close() {
-        if (display_) for (const auto &request : requests_) ffi::XDestroyWindow(display_, request->window);
-        requests_.clear(); display_ = nullptr; root_ = 0;
+        if (display_) for (const auto &request : requests_) xlib_->XDestroyWindow(display_, request->window);
+        requests_.clear(); display_ = nullptr; root_ = 0; xlib_ = nullptr;
     }
 };
 }

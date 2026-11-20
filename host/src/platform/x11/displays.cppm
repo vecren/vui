@@ -17,6 +17,8 @@ class X11Displays {
         bool output_pending{}, crtc_pending{}, connected{};
     };
     struct Mode { rstd::uint32_t id{}, width{}, height{}, flags{}, dot_clock{}, htotal{}, vtotal{}; };
+    Option<ffi::XcbDispatch> xcb_;
+    Option<ffi::RandrDispatch> randr_api_;
     ffi::xcb_connection_t *connection_{};
     ffi::xcb_generic_event_t *deferred_{};
     ffi::xcb_window_t root_{}, window_{};
@@ -70,7 +72,7 @@ class X11Displays {
     auto open(const char *display, ffi::xcb_window_t root, ffi::xcb_window_t window, ffi::xcb_atom_t desktop, ffi::xcb_atom_t workarea) -> bool;
     void dispatch();
     void window_changed() { window_geometry_.dirty = true; }
-    auto fd() const -> int { return connection_ ? ffi::xcb_get_file_descriptor(connection_) : -1; }
+    auto fd() const -> int { return connection_ ? xcb_->xcb_get_file_descriptor(connection_) : -1; }
     auto pending() const -> bool { return deferred_ != nullptr; }
     auto failed() const -> bool { return failed_; }
     auto revision() const -> Serial { return revision_; }

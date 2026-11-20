@@ -3,6 +3,7 @@ if not scanner then return end
 
 local target = lito.target({ kind = "lib", name = "vui-host" })
 local protocols = {
+  { "wayland", "wayland" },
   { "xdg-shell", "xdg-shell" },
   { "text-input-unstable-v3", "text-input-v3" },
   { "fractional-scale-v1", "fractional-scale-v1" },

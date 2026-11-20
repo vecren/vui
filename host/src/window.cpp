@@ -590,7 +590,6 @@ auto Window::wait(Index milliseconds) -> Result<WindowEvents, gpu::Error> {
         }
     } else if (impl_->x11.is_some()) {
         auto native = impl_->x11->as_ptr().as_raw_ptr();
-        auto display = native->display();
         native->dispatch_displays();
         if (native->displays_failed()) { native->close_displays(); redraw = true; }
         redraw = redraw || native->displays_pending() || native->display_revision() != impl_->observed_display_revision;
@@ -599,13 +598,13 @@ auto Window::wait(Index milliseconds) -> Result<WindowEvents, gpu::Error> {
         redraw = redraw || native->state_pending();
         native->dispatch_clipboard_owner();
         redraw = redraw || native->clipboard_owner_pending();
-        redraw = redraw || ffi::XPending(display) > 0;
+        redraw = redraw || native->pending() > 0;
         if (native->dispatch(true).is_err()) return Err(gpu::Error{gpu::Stage::Surface});
         native->expire_clipboard();
         timeout_ms = native->clipboard_wait(timeout_ms);
         redraw = redraw || native->has_input();
-        fds[usize(0)] = {ffi::XConnectionNumber(display), ffi::POLLIN, 0};
-        ffi::XFlush(display);
+        fds[usize(0)] = {native->fd(), ffi::POLLIN, 0};
+        native->flush();
         native->copy_internal_connections(impl_->x11_internal);
         for (auto item : impl_->x11_internal)
             fds.push(ffi::pollfd{item.fd, ffi::POLLIN, 0});

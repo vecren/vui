@@ -15,6 +15,7 @@ class X11ClipboardOwner {
         usize offset{};
         Serial deadline{};
     };
+    Option<ffi::XcbDispatch> xcb_;
     ffi::xcb_connection_t *connection_{};
     ffi::xcb_generic_event_t *deferred_{};
     ffi::xcb_window_t window_{};
@@ -35,7 +36,7 @@ class X11ClipboardOwner {
     auto bytes(ffi::xcb_atom_t target) const -> Vec<u8>;
     void change(ffi::xcb_window_t window, ffi::xcb_atom_t property, ffi::xcb_atom_t type,
                 rstd::uint8_t format, rstd::uint32_t length, const void *data) {
-        ffi::xcb_change_property(connection_, ffi::XCB_PROP_MODE_REPLACE, window, property, type, format, length, data);
+        xcb_->xcb_change_property(connection_, ffi::XCB_PROP_MODE_REPLACE, window, property, type, format, length, data);
     }
     auto convert(ffi::xcb_window_t window, ffi::xcb_atom_t target, ffi::xcb_atom_t property) -> bool;
     auto convert_multiple(ffi::xcb_window_t window, ffi::xcb_atom_t property) -> bool;
@@ -54,9 +55,9 @@ class X11ClipboardOwner {
     void dispatch();
     void expire();
     auto wait(Index milliseconds) const -> Index;
-    auto fd() const -> int { return connection_ ? ffi::xcb_get_file_descriptor(connection_) : -1; }
+    auto fd() const -> int { return connection_ ? xcb_->xcb_get_file_descriptor(connection_) : -1; }
     auto pending() const -> bool { return deferred_ != nullptr; }
-    auto failed() const -> bool { return connection_ && ffi::xcb_connection_has_error(connection_); }
+    auto failed() const -> bool { return connection_ && xcb_->xcb_connection_has_error(connection_); }
     void close();
 };
 }

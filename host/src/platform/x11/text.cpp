@@ -93,8 +93,8 @@ void X11Text::ic_destroyed(ffi::XIM, char *data, char *) {
 void X11Text::update_focus() {
     bool active = ic_ && focused_ && state_.is_some();
     if (active == ic_focused_) return;
-    if (active) ffi::XSetICFocus(ic_);
-    else if (ic_) ffi::XUnsetICFocus(ic_);
+    if (active) xlib_->XSetICFocus(ic_);
+    else if (ic_) xlib_->XUnsetICFocus(ic_);
     ic_focused_ = active;
 }
 
@@ -103,19 +103,19 @@ void X11Text::reset() {
     clear_preedit(true);
     if (!ic_) return;
     suppress_ = true;
-    auto discarded = ffi::Xutf8ResetIC(ic_);
+    auto discarded = xlib_->Xutf8ResetIC(ic_);
     suppress_ = false;
-    if (discarded) ffi::XFree(discarded);
+    if (discarded) xlib_->XFree(discarded);
 }
 
 void X11Text::open_im() {
     if (im_ || !display_ || !window_) return;
     free_font();
-    im_ = ffi::XOpenIM(display_, nullptr, nullptr, nullptr);
+    im_ = xlib_->XOpenIM(display_, nullptr, nullptr, nullptr);
     if (!im_) return;
     ffi::XIMStyles *styles{};
     bool supported{}, callback_style{}, callback_none_style{}, position_style{}, position_none_style{};
-    if (!ffi::styles(im_, &styles) && styles) {
+    if (!xlib_->styles(im_, &styles) && styles) {
         for (unsigned i = 0; i < styles->count_styles; ++i)
             supported |= styles->supported_styles[i] == ffi::input_style;
         for (unsigned i = 0; i < styles->count_styles; ++i) {
@@ -125,70 +125,76 @@ void X11Text::open_im() {
             position_none_style |= styles->supported_styles[i] == ffi::position_none_style;
         }
     }
-    if (styles) ffi::XFree(styles);
+    if (styles) xlib_->XFree(styles);
     if (!supported && !callback_style && !callback_none_style && !position_style && !position_none_style) {
-        ffi::XCloseIM(im_); im_ = nullptr; return;
+        xlib_->XCloseIM(im_); im_ = nullptr; return;
     }
     ffi::XIMCallback im_callback{reinterpret_cast<char *>(this), im_destroyed};
-    if (ffi::destroy_callback(im_, &im_callback)) { ffi::XCloseIM(im_); im_ = nullptr; return; }
+    if (xlib_->destroy_callback(im_, &im_callback)) { xlib_->XCloseIM(im_); im_ = nullptr; return; }
     ffi::XIMCallback ic_callback{reinterpret_cast<char *>(this), ic_destroyed};
-    if ((callback_style || callback_none_style) && codec_.configure(ffi::XLocaleOfIM(im_))) {
+    if ((callback_style || callback_none_style) && codec_.configure(xlib_->XLocaleOfIM(im_))) {
         ffi::XIMCallback start{reinterpret_cast<char *>(this), reinterpret_cast<ffi::XIMProc>(preedit_start)};
         ffi::XIMCallback done{reinterpret_cast<char *>(this), preedit_done};
         ffi::XIMCallback draw{reinterpret_cast<char *>(this), preedit_draw};
         ffi::XIMCallback caret{reinterpret_cast<char *>(this), preedit_caret};
-        if (callback_style) ic_ = ffi::create_callback_context(im_, window_, ffi::callback_style,
+        if (callback_style) ic_ = xlib_->create_callback_context(im_, window_, ffi::callback_style,
                                                                 &ic_callback, &start, &done, &draw, &caret);
         if (!ic_ && callback_none_style)
-            ic_ = ffi::create_callback_context(im_, window_, ffi::callback_none_style,
+            ic_ = xlib_->create_callback_context(im_, window_, ffi::callback_none_style,
                                                 &ic_callback, &start, &done, &draw, &caret);
         callbacks_ = ic_ != nullptr;
     }
     if (!ic_ && (position_style || position_none_style)) {
         ffi::XPoint initial{};
         bool valid = state_.is_none() || spot(state_->request.area, initial);
-        if (valid) font_ = ffi::create_fontset(display_);
+        if (valid) font_ = xlib_->create_fontset(display_);
         if (font_) {
-            if (position_style) ic_ = ffi::create_position_context(im_, window_, ffi::position_style,
+            if (position_style) ic_ = xlib_->create_position_context(im_, window_, ffi::position_style,
                                                                     &ic_callback, font_, &initial);
             if (!ic_ && position_none_style)
-                ic_ = ffi::create_position_context(im_, window_, ffi::position_none_style,
+                ic_ = xlib_->create_position_context(im_, window_, ffi::position_none_style,
                                                     &ic_callback, font_, &initial);
             if (ic_) { positioned_ = true; spot_ = initial; }
             else free_font();
         }
     }
-    if (!ic_ && supported) ic_ = ffi::create_context(im_, window_, &ic_callback);
-    if (!ic_) { ffi::XCloseIM(im_); im_ = nullptr; return; }
+    if (!ic_ && supported) ic_ = xlib_->create_context(im_, window_, &ic_callback);
+    if (!ic_) { xlib_->XCloseIM(im_); im_ = nullptr; return; }
     compose_.reset();
     unsigned long filter{};
-    if (!ffi::filter_events(ic_, &filter)) ffi::XSelectInput(display_, window_, event_mask_ | filter);
+    if (!xlib_->filter_events(ic_, &filter)) xlib_->XSelectInput(display_, window_, event_mask_ | filter);
     update_focus();
 }
 
-void X11Text::open(ffi::Display *display, ffi::Window window, unsigned long event_mask) {
+auto X11Text::open(const ffi::XlibDispatch &api, const rstd::sync::Arc<ffi::XkbDispatch> &keyboard,
+                   ffi::Display *display, ffi::Window window, unsigned long event_mask) -> bool {
+    if (display_ || !display || !window) return false;
+    xlib_ = &api; xkb_ = Some(keyboard.clone());
     display_ = display; window_ = window; event_mask_ = event_mask;
-    key_context_ = ffi::xkb_context_new(ffi::XKB_CONTEXT_NO_FLAGS);
-    compose_.configure(key_context_);
-    if (!ffi::XSupportsLocale() || !ffi::XSetLocaleModifiers("")) return;
-    registered_ = ffi::XRegisterIMInstantiateCallback(display_, nullptr, nullptr, nullptr,
+    key_context_ = (*xkb_)->xkb_context_new(ffi::XKB_CONTEXT_NO_FLAGS);
+    if (!key_context_) { close(); return false; }
+    compose_.configure(*xkb_, key_context_);
+    if (!xlib_->XSupportsLocale() || !xlib_->XSetLocaleModifiers("")) return true;
+    registered_ = xlib_->XRegisterIMInstantiateCallback(display_, nullptr, nullptr, nullptr,
                                                         instantiate, reinterpret_cast<char *>(this));
     if (!registered_) open_im();
+    return true;
 }
 
 void X11Text::close() {
     reset();
     state_ = None(); update_focus();
-    if (registered_) ffi::XUnregisterIMInstantiateCallback(display_, nullptr, nullptr, nullptr,
+    if (registered_) xlib_->XUnregisterIMInstantiateCallback(display_, nullptr, nullptr, nullptr,
                                                            instantiate, reinterpret_cast<char *>(this));
     registered_ = false;
-    if (ic_) { auto ic = ic_; ic_ = nullptr; ffi::XDestroyIC(ic); }
-    if (im_) { auto im = im_; im_ = nullptr; ffi::XCloseIM(im); }
+    if (ic_) { auto ic = ic_; ic_ = nullptr; xlib_->XDestroyIC(ic); }
+    if (im_) { auto im = im_; im_ = nullptr; xlib_->XCloseIM(im); }
     free_font();
     compose_.clear();
     codec_.clear(); callbacks_ = positioned_ = false;
-    if (key_context_) ffi::xkb_context_unref(key_context_);
+    if (key_context_) (*xkb_)->xkb_context_unref(key_context_);
     key_context_ = nullptr;
+    xkb_ = None(); xlib_ = nullptr;
     display_ = nullptr; window_ = 0; focused_ = false; ic_focused_ = false;
 }
 
@@ -198,9 +204,9 @@ auto X11Text::set_state(Option<TextInputState> state) -> NativeTextInputResult {
         ffi::XPoint point{};
         if (!spot(state->request.area, point)) return NativeTextInputResult::Failed;
         if (point.x != spot_.x || point.y != spot_.y) {
-            if (!ffi::set_spot(ic_, &point)) return NativeTextInputResult::Failed;
+            if (!xlib_->set_spot(ic_, &point)) return NativeTextInputResult::Failed;
             spot_ = point;
-            ffi::XFlush(display_);
+            xlib_->XFlush(display_);
         }
     }
     auto old = session();
@@ -220,7 +226,7 @@ auto X11Text::lookup(ffi::XKeyEvent &event, rstd::uint32_t symbol, bool shortcut
         if (result == ComposeResult::Pending) return {};
         char bytes[4096]{};
         auto size = result == ComposeResult::Composed ? compose_.utf8(bytes, sizeof(bytes))
-                                                       : ffi::xkb_keysym_to_utf8(symbol, bytes, sizeof(bytes));
+                                                       : (*xkb_)->xkb_keysym_to_utf8(symbol, bytes, sizeof(bytes));
         // xkb_keysym_to_utf8 includes the terminating NUL in its return value.
         if (result == ComposeResult::Plain && size > 0) --size;
         if (size <= 0 || size >= int(sizeof(bytes))) return {};
@@ -229,13 +235,13 @@ auto X11Text::lookup(ffi::XKeyEvent &event, rstd::uint32_t symbol, bool shortcut
     if (!ic_focused_) return {};
     char local[128]{};
     int status{};
-    auto count = ffi::Xutf8LookupString(ic_, &event, local, sizeof(local), nullptr, &status);
+    auto count = xlib_->Xutf8LookupString(ic_, &event, local, sizeof(local), nullptr, &status);
     Vec<u8> large;
     const char *bytes = local;
     if (status == ffi::XBufferOverflow && count > 0) {
         large.resize(usize(count), u8(0));
         auto raw = reinterpret_cast<char *>(large.as_mut_slice().as_raw_ptr());
-        count = ffi::Xutf8LookupString(ic_, &event, raw, count, nullptr, &status);
+        count = xlib_->Xutf8LookupString(ic_, &event, raw, count, nullptr, &status);
         bytes = raw;
     }
     if ((status != ffi::XLookupChars && status != ffi::XLookupBoth) || count <= 0) return {};

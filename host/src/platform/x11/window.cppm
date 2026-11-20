@@ -81,6 +81,10 @@ class X11Window {
     auto synchronize() -> Result<empty, X11WindowError>;
     void close();
     auto display() const -> ffi::Display * { return connection_.display(); }
+    auto api() const -> const ffi::XlibDispatch & { return connection_.api(); }
+    auto pending() const -> bool { return display() && api().XPending(display()) > 0; }
+    auto fd() const -> int { return display() ? api().XConnectionNumber(display()) : -1; }
+    void flush() { if (display()) api().XFlush(display()); }
     auto request_clipboard(Serial id) -> Result<empty, ClipboardError> {
         if (!input_.can_reserve(clipboard_.pending())) return Err(ClipboardError::Limit);
         return clipboard_.request(id);

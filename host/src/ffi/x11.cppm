@@ -1,7 +1,7 @@
 module;
-#include <X11/Xlib.h>
 #include <X11/XKBlib.h>
 #include <X11/Xatom.h>
+#include <X11/Xlib.h>
 #include <X11/Xutil.h>
 
 inline constexpr auto alias_AnyPropertyType = AnyPropertyType;
@@ -64,6 +64,20 @@ inline constexpr auto alias_XIMReverse = XIMReverse;
 inline constexpr auto alias_XLookupBoth = XLookupBoth;
 inline constexpr auto alias_XLookupChars = XLookupChars;
 
+inline constexpr auto alias_XNQueryInputStyle = XNQueryInputStyle;
+inline constexpr auto alias_XNDestroyCallback = XNDestroyCallback;
+inline constexpr auto alias_XNInputStyle = XNInputStyle;
+inline constexpr auto alias_XNClientWindow = XNClientWindow;
+inline constexpr auto alias_XNFocusWindow = XNFocusWindow;
+inline constexpr auto alias_XNPreeditStartCallback = XNPreeditStartCallback;
+inline constexpr auto alias_XNPreeditDoneCallback = XNPreeditDoneCallback;
+inline constexpr auto alias_XNPreeditDrawCallback = XNPreeditDrawCallback;
+inline constexpr auto alias_XNPreeditCaretCallback = XNPreeditCaretCallback;
+inline constexpr auto alias_XNPreeditAttributes = XNPreeditAttributes;
+inline constexpr auto alias_XNSpotLocation = XNSpotLocation;
+inline constexpr auto alias_XNFontSet = XNFontSet;
+inline constexpr auto alias_XNFilterEvents = XNFilterEvents;
+
 #undef AnyPropertyType
 #undef ButtonPress
 #undef ButtonPressMask
@@ -124,92 +138,44 @@ inline constexpr auto alias_XLookupChars = XLookupChars;
 #undef XLookupBoth
 #undef XLookupChars
 
+#undef XNQueryInputStyle
+#undef XNDestroyCallback
+#undef XNInputStyle
+#undef XNClientWindow
+#undef XNFocusWindow
+#undef XNPreeditStartCallback
+#undef XNPreeditDoneCallback
+#undef XNPreeditDrawCallback
+#undef XNPreeditCaretCallback
+#undef XNPreeditAttributes
+#undef XNSpotLocation
+#undef XNFontSet
+#undef XNFilterEvents
+
 module vui.host:ffi.x11;
+import rstd.dlopn;
 namespace ffi {
 using ::Atom;
 using ::Display;
 using ::Window;
-using ::XCloseDisplay;
-using ::XSizeHints;
-using ::XSetWMNormalHints;
-using ::XGetWMNormalHints;
-using ::XTranslateCoordinates;
-using ::XConnectionNumber;
-using ::XAddConnectionWatch;
-using ::XRemoveConnectionWatch;
-using ::XProcessInternalConnection;
-using ::XInternalConnectionNumbers;
-using ::XCreateSimpleWindow;
-using ::XDefaultScreen;
-using ::XDestroyWindow;
 using ::XEvent;
-using ::XGetEventData;
-using ::XFreeEventData;
-using ::XQueryExtension;
-using ::XConvertSelection;
-using ::XGetSelectionOwner;
-using ::XSetSelectionOwner;
-using ::XGetWindowProperty;
-using ::XDeleteProperty;
-using ::XChangeProperty;
-using ::XIM;
+using ::XFontSet;
 using ::XIC;
+using ::XIM;
+using ::XIMAbsolutePosition;
+using ::XIMBackwardChar;
+using ::XIMCallback;
+using ::XIMDontChange;
+using ::XIMForwardChar;
+using ::XIMIsInvisible;
+using ::XIMPreeditCaretCallbackStruct;
+using ::XIMPreeditDrawCallbackStruct;
+using ::XIMProc;
 using ::XIMStyles;
 using ::XIMText;
-using ::XPoint;
-using ::XFontSet;
-using ::XFreeFontSet;
-using ::XIMProc;
-using ::XIMPreeditDrawCallbackStruct;
-using ::XIMPreeditCaretCallbackStruct;
-using ::XIMCallback;
 using ::XKeyEvent;
-using ::XOpenIM;
-using ::XLocaleOfIM;
-using ::XCloseIM;
-using ::XDestroyIC;
-using ::XFree;
-using ::XFilterEvent;
-using ::XSetICFocus;
-using ::XSetInputFocus;
-using ::XWarpPointer;
-using ::XUnsetICFocus;
-using ::Xutf8LookupString;
-using ::Xutf8ResetIC;
-using ::XSupportsLocale;
-using ::XSetLocaleModifiers;
-using ::XRegisterIMInstantiateCallback;
-using ::XUnregisterIMInstantiateCallback;
-using ::XEventsQueued;
-using ::XFlush;
-using ::XGrabPointer;
-using ::XUngrabPointer;
-using ::XInternAtom;
-using ::XMapWindow;
-using ::XIconifyWindow;
-using ::XMoveWindow;
-using ::XUnmapWindow;
-using ::XNextEvent;
-using ::XPeekEvent;
-using ::XInitThreads;
-using ::XOpenDisplay;
-using ::XDisplayString;
-using ::XPending;
-using ::XResizeWindow;
-using ::XRootWindow;
-using ::XSelectInput;
-using ::XSendEvent;
-using ::XSetWMProtocols;
-using ::XStoreName;
-using ::XSync;
-using ::XkbLookupKeySym;
-using ::XkbSetDetectableAutoRepeat;
-using ::XKeysymToKeycode;
-using ::XIMForwardChar;
-using ::XIMBackwardChar;
-using ::XIMAbsolutePosition;
-using ::XIMDontChange;
-using ::XIMIsInvisible;
+using ::XPoint;
+using ::XSizeHints;
 
 inline constexpr auto AnyPropertyType = alias_AnyPropertyType;
 inline constexpr auto ButtonPress = alias_ButtonPress;
@@ -277,52 +243,111 @@ inline constexpr auto callback_none_style = XIMPreeditCallbacks | XIMStatusNone;
 inline constexpr auto position_style = XIMPreeditPosition | XIMStatusNothing;
 inline constexpr auto position_none_style = XIMPreeditPosition | XIMStatusNone;
 
-inline auto styles(XIM im, XIMStyles **styles) { return XGetIMValues(im, XNQueryInputStyle, styles, nullptr); }
-inline auto destroy_callback(XIM im, XIMCallback *callback) { return XSetIMValues(im, XNDestroyCallback, callback, nullptr); }
-inline auto create_context(XIM im, Window window, XIMCallback *callback) {
-    return XCreateIC(im, XNInputStyle, input_style, XNClientWindow, window,
-                     XNFocusWindow, window, XNDestroyCallback, callback, nullptr);
-}
-inline auto create_callback_context(XIM im, Window window, unsigned long style, XIMCallback *destroy,
-                                    XIMCallback *start, XIMCallback *done, XIMCallback *draw, XIMCallback *caret) {
-    auto attrs = XVaCreateNestedList(0, XNPreeditStartCallback, start, XNPreeditDoneCallback, done,
-                                   XNPreeditDrawCallback, draw, XNPreeditCaretCallback, caret, nullptr);
-    if (!attrs) return static_cast<XIC>(nullptr);
-    auto context = XCreateIC(im, XNInputStyle, style, XNClientWindow, window, XNFocusWindow, window,
-                            XNDestroyCallback, destroy, XNPreeditAttributes, attrs, nullptr);
-    XFree(attrs);
-    return context;
-}
-inline auto create_fontset(Display *display) {
-    char **missing{}; int count{}; char *fallback{};
-    auto font = XCreateFontSet(display, "fixed,*", &missing, &count, &fallback);
-    if (missing) XFreeStringList(missing);
-    return font;
-}
-inline auto create_position_context(XIM im, Window window, unsigned long style, XIMCallback *destroy,
-                                    XFontSet font, XPoint *spot) {
-    auto attrs = XVaCreateNestedList(0, XNSpotLocation, spot, XNFontSet, font, nullptr);
-    if (!attrs) return static_cast<XIC>(nullptr);
-    auto context = XCreateIC(im, XNInputStyle, style, XNClientWindow, window, XNFocusWindow, window,
-                            XNDestroyCallback, destroy, XNPreeditAttributes, attrs, nullptr);
-    XFree(attrs);
-    return context;
-}
-inline auto set_spot(XIC context, XPoint *spot) -> bool {
-    auto attrs = XVaCreateNestedList(0, XNSpotLocation, spot, nullptr);
-    if (!attrs) return false;
-    auto error = XSetICValues(context, XNPreeditAttributes, attrs, nullptr);
-    XFree(attrs);
-    return !error;
-}
-inline auto get_spot(XIC context, XPoint *spot) -> bool {
-    XPoint *result{};
-    auto attrs = XVaCreateNestedList(0, XNSpotLocation, &result, nullptr);
-    if (!attrs) return false;
-    auto error = XGetICValues(context, XNPreeditAttributes, attrs, nullptr);
-    XFree(attrs);
-    if (error || !result) { if (result) XFree(result); return false; }
-    *spot = *result; XFree(result); return true;
-}
-inline auto filter_events(XIC ic, unsigned long *mask) { return XGetICValues(ic, XNFilterEvents, mask, nullptr); }
-}
+inline constexpr auto XNQueryInputStyle = alias_XNQueryInputStyle;
+inline constexpr auto XNDestroyCallback = alias_XNDestroyCallback;
+inline constexpr auto XNInputStyle = alias_XNInputStyle;
+inline constexpr auto XNClientWindow = alias_XNClientWindow;
+inline constexpr auto XNFocusWindow = alias_XNFocusWindow;
+inline constexpr auto XNPreeditStartCallback = alias_XNPreeditStartCallback;
+inline constexpr auto XNPreeditDoneCallback = alias_XNPreeditDoneCallback;
+inline constexpr auto XNPreeditDrawCallback = alias_XNPreeditDrawCallback;
+inline constexpr auto XNPreeditCaretCallback = alias_XNPreeditCaretCallback;
+inline constexpr auto XNPreeditAttributes = alias_XNPreeditAttributes;
+inline constexpr auto XNSpotLocation = alias_XNSpotLocation;
+inline constexpr auto XNFontSet = alias_XNFontSet;
+inline constexpr auto XNFilterEvents = alias_XNFilterEvents;
+
+class XlibDispatch {
+    rstd::dlopn::Library library_;
+    explicit XlibDispatch(rstd::dlopn::Library library) : library_(rstd::move(library)) {}
+
+  public:
+    XlibDispatch(const XlibDispatch &) = delete;
+    XlibDispatch(XlibDispatch &&) = default;
+    auto operator=(const XlibDispatch &) -> XlibDispatch & = delete;
+    auto operator=(XlibDispatch &&) -> XlibDispatch & = default;
+    static auto open() -> rstd::Option<XlibDispatch>;
+    decltype(&::XCloseDisplay) XCloseDisplay{};
+    decltype(&::XSetWMNormalHints) XSetWMNormalHints{};
+    decltype(&::XGetWMNormalHints) XGetWMNormalHints{};
+    decltype(&::XTranslateCoordinates) XTranslateCoordinates{};
+    decltype(&::XConnectionNumber) XConnectionNumber{};
+    decltype(&::XAddConnectionWatch) XAddConnectionWatch{};
+    decltype(&::XRemoveConnectionWatch) XRemoveConnectionWatch{};
+    decltype(&::XProcessInternalConnection) XProcessInternalConnection{};
+    decltype(&::XInternalConnectionNumbers) XInternalConnectionNumbers{};
+    decltype(&::XCreateSimpleWindow) XCreateSimpleWindow{};
+    decltype(&::XDefaultScreen) XDefaultScreen{};
+    decltype(&::XDestroyWindow) XDestroyWindow{};
+    decltype(&::XGetEventData) XGetEventData{};
+    decltype(&::XFreeEventData) XFreeEventData{};
+    decltype(&::XQueryExtension) XQueryExtension{};
+    decltype(&::XConvertSelection) XConvertSelection{};
+    decltype(&::XGetSelectionOwner) XGetSelectionOwner{};
+    decltype(&::XSetSelectionOwner) XSetSelectionOwner{};
+    decltype(&::XGetWindowProperty) XGetWindowProperty{};
+    decltype(&::XDeleteProperty) XDeleteProperty{};
+    decltype(&::XChangeProperty) XChangeProperty{};
+    decltype(&::XFreeFontSet) XFreeFontSet{};
+    decltype(&::XOpenIM) XOpenIM{};
+    decltype(&::XLocaleOfIM) XLocaleOfIM{};
+    decltype(&::XCloseIM) XCloseIM{};
+    decltype(&::XDestroyIC) XDestroyIC{};
+    decltype(&::XFree) XFree{};
+    decltype(&::XFilterEvent) XFilterEvent{};
+    decltype(&::XSetICFocus) XSetICFocus{};
+    decltype(&::XSetInputFocus) XSetInputFocus{};
+    decltype(&::XWarpPointer) XWarpPointer{};
+    decltype(&::XUnsetICFocus) XUnsetICFocus{};
+    decltype(&::Xutf8LookupString) Xutf8LookupString{};
+    decltype(&::Xutf8ResetIC) Xutf8ResetIC{};
+    decltype(&::XSupportsLocale) XSupportsLocale{};
+    decltype(&::XSetLocaleModifiers) XSetLocaleModifiers{};
+    decltype(&::XRegisterIMInstantiateCallback) XRegisterIMInstantiateCallback{};
+    decltype(&::XUnregisterIMInstantiateCallback) XUnregisterIMInstantiateCallback{};
+    decltype(&::XEventsQueued) XEventsQueued{};
+    decltype(&::XFlush) XFlush{};
+    decltype(&::XGrabPointer) XGrabPointer{};
+    decltype(&::XUngrabPointer) XUngrabPointer{};
+    decltype(&::XInternAtom) XInternAtom{};
+    decltype(&::XMapWindow) XMapWindow{};
+    decltype(&::XIconifyWindow) XIconifyWindow{};
+    decltype(&::XMoveWindow) XMoveWindow{};
+    decltype(&::XUnmapWindow) XUnmapWindow{};
+    decltype(&::XNextEvent) XNextEvent{};
+    decltype(&::XPeekEvent) XPeekEvent{};
+    decltype(&::XInitThreads) XInitThreads{};
+    decltype(&::XOpenDisplay) XOpenDisplay{};
+    decltype(&::XDisplayString) XDisplayString{};
+    decltype(&::XPending) XPending{};
+    decltype(&::XResizeWindow) XResizeWindow{};
+    decltype(&::XRootWindow) XRootWindow{};
+    decltype(&::XSelectInput) XSelectInput{};
+    decltype(&::XSendEvent) XSendEvent{};
+    decltype(&::XSetWMProtocols) XSetWMProtocols{};
+    decltype(&::XStoreName) XStoreName{};
+    decltype(&::XSync) XSync{};
+    decltype(&::XkbLookupKeySym) XkbLookupKeySym{};
+    decltype(&::XkbSetDetectableAutoRepeat) XkbSetDetectableAutoRepeat{};
+    decltype(&::XKeysymToKeycode) XKeysymToKeycode{};
+    decltype(&::XGetIMValues) XGetIMValues{};
+    decltype(&::XSetIMValues) XSetIMValues{};
+    decltype(&::XCreateIC) XCreateIC{};
+    decltype(&::XVaCreateNestedList) XVaCreateNestedList{};
+    decltype(&::XCreateFontSet) XCreateFontSet{};
+    decltype(&::XFreeStringList) XFreeStringList{};
+    decltype(&::XSetICValues) XSetICValues{};
+    decltype(&::XGetICValues) XGetICValues{};
+    auto styles(XIM im, XIMStyles **styles) const -> char *;
+    auto destroy_callback(XIM im, XIMCallback *callback) const -> char *;
+    auto create_context(XIM im, Window window, XIMCallback *callback) const -> XIC;
+    auto create_callback_context(XIM im, Window window, unsigned long style, XIMCallback *destroy, XIMCallback *start,
+                                 XIMCallback *done, XIMCallback *draw, XIMCallback *caret) const -> XIC;
+    auto create_fontset(Display *display) const -> XFontSet;
+    auto create_position_context(XIM im, Window window, unsigned long style, XIMCallback *destroy, XFontSet font,
+                                 XPoint *spot) const -> XIC;
+    auto set_spot(XIC context, XPoint *spot) const -> bool;
+    auto get_spot(XIC context, XPoint *spot) const -> bool;
+    auto filter_events(XIC ic, unsigned long *mask) const -> char *;
+};
+} // namespace ffi
