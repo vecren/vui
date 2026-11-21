@@ -1,5 +1,5 @@
 module vui.host:platform.xkb.keys;
-import :ffi.xkb;
+import :platform.xkb.ffi;
 import vui.render;
 
 namespace vui::host::detail {

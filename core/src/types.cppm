@@ -9,6 +9,9 @@ using Index = rstd::uint32_t;
 struct FrameTiming {
     Serial now_ns{};
     rstd::Option<Serial> expected_present_ns;
+    rstd::Option<Serial> sample_ns;
+
+    auto sample_time_ns() const -> Serial { return sample_ns.is_some() ? *sample_ns : now_ns; }
 };
 
 enum class UiError {

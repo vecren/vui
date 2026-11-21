@@ -1250,7 +1250,7 @@ auto Renderer::finish_initialize() -> Result<empty, Error> {
     auto &self = *impl_;
     auto textures = vk::TextureContext::create(*self.session);
     if (textures.is_err())
-        return Err(Error{Stage::Allocation, VkResult(textures.unwrap_err().native)});
+        return Err(Error::texture(Stage::Allocation, textures.unwrap_err()));
     self.textures = Some(rstd::move(textures).unwrap());
     auto features = self.device().gpu().GetFormatProperties(format).optimalTilingFeatures;
     if ((features &
@@ -2212,6 +2212,75 @@ auto Renderer::resize_impl(VkExtent2D extent, Serial timeout_nanoseconds, Option
     auto sync = self.presentation_sync();
     if (sync.is_err())
         return sync;
+    self.state = Impl::State::Ready;
+    return Ok(empty{});
+}
+auto Renderer::detach_surface(Serial timeout_nanoseconds) -> Result<empty, Error> {
+    return impl_->observe_result(detach_surface_impl(timeout_nanoseconds));
+}
+auto Renderer::detach_surface_impl(Serial timeout_nanoseconds) -> Result<empty, Error> {
+    auto &self = *impl_;
+    if (!self.windowed || !self.initialized || self.state == Impl::State::Closed)
+        return Err(Error{Stage::State});
+    auto retired = self.retire(timeout_nanoseconds);
+    if (retired.is_err())
+        return retired;
+    auto idle = self.session->wait_idle();
+    if (idle != VK_SUCCESS && idle != VK_ERROR_DEVICE_LOST)
+        return Err(Error{Stage::Device, idle});
+    self.frame = None();
+    self.presents.clear();
+    self.scopes = vk::GraphicsScopeCache{};
+    self.graph_shape = None();
+    self.session->detach_surface();
+    self.state = self.is_lost() ? Impl::State::Lost : Impl::State::Unavailable;
+    return Ok(empty{});
+}
+auto Renderer::attach_surface(SurfaceHost &host, Serial timeout_nanoseconds) -> Result<empty, Error> {
+    if (impl_->is_lost())
+        return Err(Error{Stage::Lost, VK_ERROR_DEVICE_LOST});
+    return impl_->observe_result(attach_surface_impl(host, timeout_nanoseconds));
+}
+auto Renderer::attach_surface_impl(SurfaceHost &host, Serial timeout_nanoseconds) -> Result<empty, Error> {
+    auto &self = *impl_;
+    if (!self.windowed || !self.initialized || self.state == Impl::State::Closed)
+        return Err(Error{Stage::State});
+    auto extent = host.pixel_extent();
+    if (!extent.width || !extent.height)
+        return Err(Error{Stage::State});
+    auto extensions = host.instance_extensions();
+    if (extensions.is_err())
+        return Err(extensions.unwrap_err());
+    for (const auto &extension : extensions.unwrap()) {
+        if (!extension.required)
+            continue;
+        bool enabled{};
+        for (const auto &name : self.session->instance_owner().enabled_extensions())
+            enabled |= name.as_ref().to_bytes() == extension.name->as_bytes();
+        if (!enabled)
+            return Err(Error{Stage::Unsupported});
+    }
+    auto detached = detach_surface_impl(timeout_nanoseconds);
+    if (detached.is_err())
+        return detached;
+    SurfaceAdapter adapter(host);
+    auto attached = self.session->attach_surface(dyn<vk::SessionSurfaceFactory>::from_ref(adapter).as_mut_ref(), extent,
+                                                 self.swapchain_options());
+    if (attached.is_err()) {
+        if (adapter.error.is_some())
+            return Err(adapter.error.unwrap());
+        return Err(Error::session(attached.unwrap_err()));
+    }
+    auto features = self.device().gpu().GetFormatProperties(self.device().swapchain().format()).optimalTilingFeatures;
+    if (!(features & VK_FORMAT_FEATURE_BLIT_DST_BIT)) {
+        self.session->detach_surface();
+        return Err(Error{Stage::Unsupported});
+    }
+    auto sync = self.presentation_sync();
+    if (sync.is_err()) {
+        self.session->detach_surface();
+        return sync;
+    }
     self.state = Impl::State::Ready;
     return Ok(empty{});
 }

@@ -99,7 +99,8 @@ class UiSession {
     Option<UiUpdate> update_;
     Option<SurfaceInfo> surface_;
     Vec<MutationResult> mutations_;
-    Serial last_time_{}, published_ui_{}, frame_id_{}, revealed_focus_{};
+    FrameTiming last_timing_;
+    Serial published_ui_{}, frame_id_{}, revealed_focus_{};
     bool advancing_{}, planning_{}, closing_{}, closed_{};
     AdvanceTimings *active_timings_{};
     Option<AdvanceTimings> last_timings_;
@@ -131,9 +132,9 @@ class UiSession {
         revealed_focus_ = input_.focus_revision();
         return Ok(document_.revision() != snapshot.revision());
     }
-    auto settle_input(Size size, Serial sample_time, UpdateStats &stats)
+    auto settle_input(Size size, const FrameTiming &timing, UpdateStats &stats)
         -> Result<empty, SessionError>;
-    auto settle(Size size, Serial sample_time, UpdateStats &stats) -> Result<empty, SessionError>;
+    auto settle(Size size, const FrameTiming &timing, UpdateStats &stats) -> Result<empty, SessionError>;
     auto resume_subcomposition(UiError) -> Result<bool, SessionError>;
 
   public:

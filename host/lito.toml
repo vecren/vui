@@ -2,7 +2,7 @@
 name = "vui-host"
 version.workspace = true
 license.workspace = true
-target = { os = ["linux", "windows", "macos"] }
+target = { os = ["linux", "windows", "macos", "android"] }
 
 [lib]
 name = "vui-host"
@@ -17,6 +17,11 @@ sources = ["src/platform/macos/window.mm"]
 condition = 'target.os == "windows"'
 [when.usage]
 system-libraries = ["user32", "gdi32", "imm32"]
+
+[[when]]
+condition = 'target.os == "android"'
+[when.usage]
+system-libraries = ["android", "log"]
 
 [dependencies]
 rstd-dlopn = { version = "0.1.11", condition = 'target.os == "linux"' }

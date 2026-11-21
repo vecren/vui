@@ -1,7 +1,6 @@
 module vui.host;
 import :platform.wayland.text;
-import :ffi.wayland;
-import :platform.wayland.protocol.text_input;
+import :platform.wayland.ffi;
 import vui.render;
 
 namespace vui::host::detail {

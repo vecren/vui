@@ -1,6 +1,6 @@
 module vui.host;
 import :platform.win32.text;
-import :ffi.win32;
+import :platform.win32.ffi;
 import vui;
 import rstd;
 

@@ -1,6 +1,6 @@
 module vui.host:platform.x11.displays;
-import :ffi.xcb;
-import :ffi.xcb_randr;
+import :platform.x11.ffi.xcb;
+import :platform.x11.ffi.xcb_randr;
 import :display;
 import rstd;
 

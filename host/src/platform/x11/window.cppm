@@ -1,4 +1,5 @@
 module vui.host:platform.x11.window;
+import :platform.linux.ffi;
 import :platform.input;
 import :platform.x11.connection;
 import :platform.x11.input;
@@ -6,9 +7,10 @@ import :platform.x11.clipboard;
 import :platform.x11.clipboard_owner;
 import :platform.x11.state;
 import :platform.x11.displays;
-import :ffi.x11;
+import :platform.x11.ffi.xlib;
 import :platform.xkb;
 import :platform.x11.text;
+import vvk;
 import vui.render;
 
 namespace vui::host::detail {
@@ -33,6 +35,8 @@ class X11Window {
     X11ClipboardOwner clipboard_owner_;
     X11State state_;
     X11Displays displays_;
+    Vec<ffi::pollfd> pollfds_;
+    Vec<X11InternalConnection> poll_connections_;
     ffi::Window window_{};
     ffi::Atom protocols_{}, delete_window_{}, supported_atom_{}, state_atom_{}, fullscreen_atom_{};
     rstd::uint32_t width_{}, height_{};
@@ -47,6 +51,7 @@ class X11Window {
 
     void emit(InputEvent input);
     auto native_time(rstd::uint32_t value) -> SampleTime;
+    void expire_clipboard() { clipboard_.expire(); clipboard_owner_.expire(); }
     static auto modifiers(unsigned state) -> Modifiers {
         return {bool(state & ffi::ShiftMask), bool(state & ffi::ControlMask),
                 bool(state & ffi::Mod1Mask), bool(state & ffi::Mod4Mask)};
@@ -79,6 +84,12 @@ class X11Window {
     auto set_text_input(Option<TextInputState> state) -> NativeTextInputResult;
     auto dispatch(bool bounded = false) -> Result<empty, X11WindowError>;
     auto synchronize() -> Result<empty, X11WindowError>;
+    auto wait_for_events(Index milliseconds, int wake_fd, Serial observed_display_revision,
+                         bool &redraw) -> Result<empty, gpu::Error>;
+    static auto surface_extension() -> const char *;
+    static auto create_surface(const vvk::Instance &instance, const rstd::sync::Arc<X11Window> &native)
+        -> Result<gpu::NativeSurface, gpu::Error>;
+    void deactivate();
     void close();
     auto display() const -> ffi::Display * { return connection_.display(); }
     auto api() const -> const ffi::XlibDispatch & { return connection_.api(); }
@@ -90,29 +101,10 @@ class X11Window {
         return clipboard_.request(id);
     }
     auto write_clipboard(ref<str> text) -> Result<empty, ClipboardError> { return clipboard_owner_.write(text); }
-    auto clipboard_wait(Index milliseconds) const -> Index { return clipboard_owner_.wait(clipboard_.wait(milliseconds)); }
-    void expire_clipboard() { clipboard_.expire(); clipboard_owner_.expire(); }
-    void dispatch_clipboard_owner() { clipboard_owner_.dispatch(); }
-    auto clipboard_owner_fd() const -> int { return clipboard_owner_.fd(); }
-    auto clipboard_owner_pending() const -> bool { return clipboard_owner_.pending(); }
-    auto clipboard_owner_failed() const -> bool { return clipboard_owner_.failed(); }
-    void disable_clipboard_owner() { clipboard_owner_.close(); }
-    void close_clipboard() { clipboard_.close(); clipboard_owner_.close(); }
     auto dispatch_state() -> bool { state_.dispatch(); return state_.take_changed(); }
-    auto state_fd() const -> int { return state_.fd(); }
-    auto state_pending() const -> bool { return state_.pending(); }
-    auto state_failed() const -> bool { return state_.failed(); }
-    void close_state() { state_.close(); }
     void dispatch_displays() { displays_.dispatch(); }
     auto displays() const -> DisplaySnapshot { return displays_.snapshot(); }
     auto display_revision() const -> Serial { return displays_.revision(); }
-    auto displays_fd() const -> int { return displays_.fd(); }
-    auto displays_pending() const -> bool { return displays_.pending(); }
-    auto displays_failed() const -> bool { return displays_.failed(); }
-    void close_displays() { displays_.close(); }
-    void copy_internal_connections(Vec<X11InternalConnection> &result) const { connection_.copy_internal(result); }
-    auto internal_connection_current(X11InternalConnection item) const -> bool { return connection_.current(item); }
-    void process_internal_connection(X11InternalConnection item) { connection_.process(item); }
     auto window() const -> ffi::Window { return window_; }
     auto close_requested() const -> bool { return close_requested_; }
     auto width() const -> rstd::uint32_t { return width_; }

@@ -141,8 +141,7 @@ class MotionRuntime {
             bool &value;
             ~Guard() { value = false; }
         } guard{busy_};
-        auto time =
-            timing.expected_present_ns.is_some() ? *timing.expected_present_ns : timing.now_ns;
+        auto time = timing.sample_time_ns();
         Option<MotionError> error;
         for (auto &entry : entries_) {
             if (!entry.guard.alive()) {

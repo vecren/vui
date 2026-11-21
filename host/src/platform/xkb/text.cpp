@@ -1,6 +1,6 @@
 module vui.host;
 import :platform.xkb.text;
-import :ffi.xkb;
+import :platform.xkb.ffi;
 import vui.render;
 
 namespace vui::host::detail {

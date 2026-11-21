@@ -168,6 +168,8 @@ class Renderer {
     auto discard_prepared_impl(Serial timeout_nanoseconds) -> Result<empty, Error>;
     auto resize_impl(VkExtent2D extent, Serial timeout_nanoseconds, Option<PresentMode> mode = {})
         -> Result<empty, Error>;
+    auto detach_surface_impl(Serial timeout_nanoseconds) -> Result<empty, Error>;
+    auto attach_surface_impl(SurfaceHost &, Serial timeout_nanoseconds) -> Result<empty, Error>;
     auto shutdown_impl(Serial timeout_nanoseconds) -> Result<empty, Error>;
     auto release_completed_frame_impl() -> Result<empty, Error>;
 
@@ -207,6 +209,10 @@ class Renderer {
     // Swapchain recreation may wait for device idle beyond the frame timeout.
     auto resize(VkExtent2D, Serial timeout_nanoseconds = 1'000'000'000) -> Result<empty, Error>;
     auto resize(VkExtent2D, PresentMode, Serial timeout_nanoseconds = 1'000'000'000)
+        -> Result<empty, Error>;
+    // Surface changes retire presentation work and may wait for device idle.
+    auto detach_surface(Serial timeout_nanoseconds = 1'000'000'000) -> Result<empty, Error>;
+    auto attach_surface(SurfaceHost &, Serial timeout_nanoseconds = 1'000'000'000)
         -> Result<empty, Error>;
     auto present_mode() const -> Option<PresentMode>;
     auto presentation_capabilities() const -> Option<PresentationCapabilities>;

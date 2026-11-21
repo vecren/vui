@@ -130,13 +130,36 @@ struct TextSurroundingRevision {
     Index anchor{}, cursor{};
     auto operator==(const TextSurroundingRevision &) const -> bool = default;
 };
+struct TextInputEditing {
+    TextInput text;
+    Index anchor{}, cursor{};
+    Option<TextInputSelection> composition;
+    auto present() const -> bool { return text.present(); }
+    auto valid() const -> bool {
+        if (!text.present()) return anchor == 0 && cursor == 0 && composition.is_none();
+        auto value = text.text();
+        if (usize(anchor) > value->len() || usize(cursor) > value->len() ||
+            !value->is_char_boundary(usize(anchor)) || !value->is_char_boundary(usize(cursor))) return false;
+        if (composition.is_some()) {
+            auto range = *composition;
+            if (range.end.is_none() || *range.end < range.start || usize(*range.end) > value->len() ||
+                !value->is_char_boundary(usize(range.start)) || !value->is_char_boundary(usize(*range.end))) return false;
+        }
+        return true;
+    }
+};
 struct TextInputTransaction {
     TextInput commit;
     TextInput preedit;
     Option<TextPreeditCursor> preedit_cursor;
     Index delete_before{}, delete_after{};
     Option<TextSurroundingRevision> expected_surrounding;
+    TextInputEditing editing;
     auto valid() const -> bool {
+        if (!editing.valid()) return false;
+        if (editing.present()) return !commit.present() && !preedit.present() &&
+            !delete_before && !delete_after && preedit_cursor.is_none() &&
+            (expected_surrounding.is_none() || expected_surrounding->text != 0);
         if ((expected_surrounding.is_some() && expected_surrounding->text == 0) ||
             (commit.present() && commit.selection().is_some()) ||
             (preedit.present() && preedit.selection().is_some()) ||

@@ -124,10 +124,12 @@ auto TextFieldState::arrange(LayoutArrangeContext &context, Size size) -> Result
     offset_=rstd::cmp::max(lower,rstd::cmp::min(offset_,upper));
     auto y = rstd::cmp::max(Scalar(0), (size.height - desired.height) / 2);
     auto padding = context.style().padding;
+    content_clip_ = {padding, padding, size.width, size.height};
     origin_ = {padding - offset_ + placement_->origin.x, padding + y + placement_->origin.y};
     caret_ = {origin_.x + caret->bounds.x, origin_.y + caret->bounds.y, caret_width_, caret->bounds.height};
     selection_ = displayed_.composing ? Rect{} : range_rect(displayed_.selection.range());
     underline_ = displayed_.composing ? range_rect(displayed_.composition) : Rect{};
+    if (displayed_.display_selection.is_some()) selection_ = range_rect(displayed_.display_selection->range());
     if (displayed_.composing && displayed_.preedit_selection.is_some() && displayed_.preedit_selection->end.is_some())
         selection_ = range_rect({displayed_.composition.start + displayed_.preedit_selection->start,
             displayed_.composition.start + *displayed_.preedit_selection->end});
@@ -137,12 +139,11 @@ auto TextFieldState::arrange(LayoutArrangeContext &context, Size size) -> Result
             rstd::cmp::max(size.width, child.width), rstd::cmp::max(desired.height, child.height)});
         if (placed.is_err()) return placed;
     }
-    auto clipped = context.set_clip({true, {0, 0, size.width, size.height}});
-    if (clipped.is_err()) return clipped;
     auto area = caret_;
     area.x = rstd::cmp::max(padding, rstd::cmp::min(area.x, padding + available));
     area.y = rstd::cmp::max(padding, rstd::cmp::min(area.y, padding + size.height));
-    area.height = rstd::cmp::min(area.height, size.height);
+    area.width = rstd::min(area.width, padding + size.width - area.x);
+    area.height = rstd::min(area.height, padding + size.height - area.y);
     area.x -= padding; area.y -= padding;
     auto input = context.set_text_input_area(Some(area));
     if (input.is_err()) return input;
@@ -150,11 +151,14 @@ auto TextFieldState::arrange(LayoutArrangeContext &context, Size size) -> Result
 }
 
 auto TextFieldState::paint(PaintContext &context) -> Result<empty, UiError> {
+    context.save();
+    context.clip({true, content_clip_});
     if (focused_ && selection_.width > 0) context.rect(selection_, selection_color_);
     context.children();
     if (focused_ && underline_.width > 0)
         context.rect({underline_.x, underline_.y + underline_.height - 1, underline_.width, 1}, composition_color_);
     if (caret_visible()) context.rect(caret_, caret_color_);
+    context.restore();
     return Ok(empty{});
 }
 

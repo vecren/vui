@@ -1,11 +1,12 @@
 module vui.host;
 import :platform.wayland.window;
 import :platform.wayland.connection;
-import :ffi.wayland;
-import :platform.wayland.protocol.xdg_shell;
-import :platform.wayland.protocol.xdg_decoration;
-import :platform.wayland.protocol.fractional_scale;
+import :platform.linux.poll;
+import :platform.wayland.ffi;
+import :platform.linux.ffi;
 import :display;
+import vui.render;
+import vvk;
 import rstd;
 
 namespace vui::host::detail {
@@ -160,6 +161,72 @@ auto WaylandWindow::roundtrip() -> Result<empty, WaylandWindowError> {
     return Ok(empty{});
 }
 
+auto WaylandWindow::wait_for_events(Index milliseconds, int wake_fd, Serial observed_display_revision, bool &redraw)
+    -> Result<empty, gpu::Error> {
+    auto native_display = display();
+    auto &input = connection_.input();
+    redraw = redraw || input.has_input();
+    while (ffi::wl_display_prepare_read(native_display) != 0) {
+        auto dispatched = ffi::wl_display_dispatch_pending(native_display);
+        if (dispatched < 0) return Err(gpu::Error{gpu::Stage::Surface});
+        redraw = redraw || dispatched > 0;
+    }
+    input.pump_repeat();
+    input.clipboard().drain();
+    redraw = redraw || input.has_input() || display_revision() != observed_display_revision;
+    auto timeout = input.clipboard().wait(input.repeat_wait(milliseconds));
+    ffi::pollfd descriptors[]{{ffi::wl_display_get_fd(native_display), ffi::POLLIN, 0},
+                              {wake_fd, ffi::POLLIN, 0}};
+    if (ffi::wl_display_flush(native_display) < 0) {
+        if (ffi::error_number() != ffi::EAGAIN) {
+            ffi::wl_display_cancel_read(native_display);
+            return Err(gpu::Error{gpu::Stage::Surface});
+        }
+        descriptors[0].events |= ffi::POLLOUT;
+    }
+    auto fds = mut_ref<ffi::pollfd[]>::from_raw_parts(descriptors, usize(2));
+    if (!poll_window(fds, timeout, redraw)) {
+        ffi::wl_display_cancel_read(native_display);
+        return Err(gpu::Error{gpu::Stage::Surface});
+    }
+    if (descriptors[0].revents & ffi::POLLIN) {
+        if (ffi::wl_display_read_events(native_display) < 0)
+            return Err(gpu::Error{gpu::Stage::Surface});
+        auto dispatched = ffi::wl_display_dispatch_pending(native_display);
+        if (dispatched < 0)
+            return Err(gpu::Error{gpu::Stage::Surface});
+        redraw = redraw || dispatched > 0;
+    } else {
+        ffi::wl_display_cancel_read(native_display);
+    }
+    input.clipboard().drain();
+    return Ok(empty{});
+}
+
+auto WaylandWindow::take_input() -> Vec<InputEvent> {
+    auto &input = connection_.input();
+    input.pump_repeat();
+    return input.take_input();
+}
+
+auto WaylandWindow::surface_extension() -> const char * { return VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME; }
+
+auto WaylandWindow::create_surface(const vvk::Instance &instance, const rstd::sync::Arc<WaylandWindow> &native)
+    -> Result<gpu::NativeSurface, gpu::Error> {
+    if (!instance) return Err(gpu::Error{gpu::Stage::State});
+    auto create = instance.Dispatch().vkCreateWaylandSurfaceKHR;
+    if (!create) return Err(gpu::Error{gpu::Stage::Surface});
+    VkWaylandSurfaceCreateInfoKHR info{};
+    info.sType = VK_STRUCTURE_TYPE_WAYLAND_SURFACE_CREATE_INFO_KHR;
+    info.display = native->display();
+    info.surface = native->surface();
+    VkSurfaceKHR surface{};
+    auto result = create(*instance, &info, nullptr, &surface);
+    if (result != VK_SUCCESS)
+        return Err(gpu::Error{gpu::Stage::Surface, result});
+    return Ok(gpu::NativeSurface{surface, Box<dyn<gpu::SurfaceLifetime>>::make(native.clone())});
+}
+
 auto WaylandWindow::request_frame_signal() -> Result<Serial,WaylandWindowError> {
     if (!surface_ || frame_signal_) return Err(WaylandWindowError::State);
     auto callback=ffi::wl_surface_frame(surface_);
@@ -210,6 +277,12 @@ auto WaylandWindow::set_minimum_size(rstd::uint32_t width, rstd::uint32_t height
     ffi::wl_surface_commit(surface_);
     minimum_width_ = width; minimum_height_ = height;
     return Ok(empty{});
+}
+
+void WaylandWindow::deactivate() {
+    clear_frame_signal();
+    (void)connection_.input().set_text_input(None());
+    connection_.input().clipboard().close();
 }
 
 void WaylandWindow::close() {

@@ -49,10 +49,46 @@ auto ScrollbarState::sample_repeat(UiId id,MotionContext &context) -> Result<Mot
     return Ok(MotionStatus::Running);
 }
 
-auto ScrollbarState::connect(UiId id) -> Result<empty,ControlError> {
-    if (!options_.repeat_track) return Ok(empty{});
-    repeat_=rstd::rc::make_rc<Repeat>(session_,id);auto motion=session_.motion().bind(repeat_.downgrade());if (motion.is_err()) return Err(ControlError{Some(UiError::Limit),{}});motion_=rstd::move(motion).unwrap();
-    auto availability=session_.input().on_pointer_availability_changed(id,[&session=session_,id](bool available){if (auto state=session.document().state<ScrollbarState>(id);state && !available) state->clear_press();});if (availability.is_err()) return Err(ControlError{{},Some(availability.unwrap_err())});availability_=rstd::move(availability).unwrap();return Ok(empty{});
+auto ScrollbarState::connect_repeat(UiId id, bool enabled) -> Result<empty, ControlError> {
+    if (!enabled || motion_.binding.alive()) return Ok(empty{});
+    auto repeat = rstd::rc::make_rc<Repeat>(session_, id);
+    auto motion = session_.motion().bind(repeat.downgrade());
+    if (motion.is_err()) return Err(ControlError{Some(UiError::Limit), {}});
+    auto availability = session_.input().on_pointer_availability_changed(id, [&session = session_, id](bool available) {
+        if (auto state = session.document().state<ScrollbarState>(id); state && !available) state->clear_press();
+    });
+    if (availability.is_err()) return Err(ControlError{{}, Some(availability.unwrap_err())});
+    repeat_ = rstd::move(repeat);
+    motion_ = motion.unwrap();
+    availability_ = availability.unwrap();
+    return Ok(empty{});
+}
+
+auto ScrollbarState::connect(UiId id) -> Result<empty, ControlError> {
+    auto layout = session_.document().install_layout(id, ScrollbarLayout{options_, value_});
+    if (layout.is_err()) return Err(ControlError{Some(layout.unwrap_err()), {}});
+    return connect_repeat(id, options_.repeat_track);
+}
+
+auto ScrollbarState::configure(UiId id, UiId handle, ScrollbarOptions options) -> Result<empty, ControlError> {
+    auto &ui = session_.document();
+    if (!options.valid() || !ui.valid(handle)) return Err(ControlError{Some(UiError::InvalidValue), {}});
+    handle_ = handle;
+    auto connected = connect_repeat(id, options.repeat_track);
+    if (connected.is_err() || options_ == options) return connected;
+    auto layout = ui.install_layout(id, ScrollbarLayout{options, value_});
+    if (layout.is_err()) return Err(ControlError{Some(layout.unwrap_err()), {}});
+    if (pointer_.is_some()) {
+        const auto pointer = *pointer_;
+        clear_press();
+        session_.input().release_input(slice<PointerKey>::from_raw_parts(&pointer, usize(1)));
+    }
+    options_ = options;
+    if (last_metrics_.is_some()) {
+        auto synced = sync(ui, id, *last_metrics_);
+        if (synced.is_err()) return Err(ControlError{Some(synced.unwrap_err()), {}});
+    }
+    return Ok(empty{});
 }
 
 auto ScrollbarState::set(UiDocument &ui,UiId id,ScrollbarValue value) -> Result<empty,UiError> {
@@ -65,7 +101,8 @@ auto ScrollbarState::set(UiDocument &ui,UiId id,ScrollbarValue value) -> Result<
     value_=value;return Ok(empty{});
 }
 
-auto ScrollbarState::sync(UiDocument &ui,UiId id,const ViewportMetrics &metrics) -> Result<empty,UiError> {
+auto ScrollbarState::sync(UiDocument &ui,UiId id,ViewportMetrics metrics) -> Result<empty,UiError> {
+    last_metrics_ = Some(metrics);
     auto offset=vertical() ? metrics.offset.y : metrics.offset.x;auto maximum=vertical() ? metrics.maximum.y : metrics.maximum.x;
     auto viewport=vertical() ? metrics.viewport.height : metrics.viewport.width;auto extent=vertical() ? metrics.extent.height : metrics.extent.width;
     auto excess=offset<0 ? -offset : offset>maximum ? offset-maximum : Scalar(0);
@@ -80,7 +117,7 @@ auto ScrollbarState::bind_scroll(UiDocument &ui,UiId id,UiId scroll) -> Result<e
         ui.defer(id,guard,[id,scroll,value,generation](UiDocument &ui)->Result<empty,UiError>{auto state=ui.state<ScrollbarState>(id);return state && ui.valid(scroll) && state->generation_==generation && state->scroll_==scroll ? state->sync(ui,id,value) : Result<empty,UiError>(Ok(empty{}));}).unwrap();
     });
     if (binding.is_err()) return Err(binding.unwrap_err());
-    metrics_=rstd::move(binding).unwrap();scroll_=scroll;generation_=generation;
+    metrics_=rstd::move(binding).unwrap();scroll_=scroll;generation_=generation;last_metrics_=None();
     auto metrics=ScrollView::metrics(ui,scroll);
     if (metrics.is_ok()) {
         auto queued=ui.defer(id,lifetime_.guard(),[id,scroll,generation,value=*metrics](UiDocument &ui)->Result<empty,UiError>{auto state=ui.state<ScrollbarState>(id);return state && ui.valid(scroll) && state->generation_==generation && state->scroll_==scroll ? state->sync(ui,id,value) : Result<empty,UiError>(Ok(empty{}));});
@@ -140,7 +177,6 @@ auto Scrollbar::create(UiSession &session,UiId handle,NodeStyle style,ScrollbarO
     auto fail=[&](UiError error)->Result<UiId,ControlError>{ui.destroy(id);return Err(ControlError{Some(error),{}});};
     auto state=ui.attach_state(id,ScrollbarState(session,handle,options));if (state.is_err()) return fail(state.unwrap_err());
     auto behavior=session.input().attach_behavior<ScrollbarState>(id);if (behavior.is_err()) {ui.destroy(id);return Err(ControlError{{},Some(behavior.unwrap_err())});}
-    auto layout=ui.install_layout(id,ScrollbarLayout{options,{}});if (layout.is_err()) return fail(layout.unwrap_err());
     auto connected=ui.state<ScrollbarState>(id)->connect(id);if (connected.is_err()) {ui.destroy(id);return Err(connected.unwrap_err());}
     auto attached=ui.attach(id,handle);if (attached.is_err()) return fail(attached.unwrap_err());return Ok(id);
 }

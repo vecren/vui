@@ -10,6 +10,8 @@ using namespace rstd::prelude;
 using namespace rstd::literals;
 namespace cx = vui::compose;
 
+enum class InputHint { Keyboard, Swipe };
+
 class View {
     struct Tile {
         Serial id;
@@ -28,9 +30,11 @@ class View {
     state::Graph graph_;
     state::Cell<rstd::rc::Rc<Model>> model_{graph_.cell(rstd::rc::make_rc<Model>(),
         [](const auto &a, const auto &b) { return a.get() == b.get(); }).unwrap()};
-    Option<cx::Composition> composition_;
+    state::Cell<Insets> dialog_insets_{graph_.cell(Insets{}).unwrap()};
+    Option<cx::Composition> composition_, dialogs_;
     Game game_;
-    UiId root_;
+    InputHint input_hint_;
+    UiId background_, root_;
     Vec<Tile> tiles_;
     MoveResult move_;
     Option<rstd::rc::Rc<AnimationScope>> animations_;
@@ -44,12 +48,29 @@ class View {
     static constexpr Color ink{.019, .045, .095, 1};
     static constexpr Color background{.933, .953, .973, 1};
 
-    struct GameInput {
+    struct MoveAction {
         cx::Latest<bool> enabled;
         cx::Latest<cx::Action<void(Direction)>> on_move;
         BindingGuard lifetime;
+        auto active() const -> bool {
+            auto current = enabled.get();
+            return lifetime.alive() && current.is_ok() && current.unwrap().value();
+        }
+        void enqueue(EventContext &context, UiId target, Direction direction) const {
+            context.document().defer(target, lifetime,
+                [action = *this, direction](UiDocument &) -> Result<empty, UiError> {
+                    if (action.active()) {
+                        auto callback = action.on_move.get();
+                        if (callback.is_ok()) callback.unwrap().value()(direction);
+                    }
+                    return Ok(empty{});
+                }).unwrap();
+        }
+    };
+    struct GameInput {
+        MoveAction move;
         void handle(EventContext &context, const RoutedEvent &event) {
-            if (!lifetime.alive()) return;
+            if (!move.lifetime.alive()) return;
             if (event.input.type == EventType::PointerDown && event.target == event.current) {
                 context.focus().unwrap();
                 return;
@@ -64,31 +85,65 @@ class View {
             default: return;
             }
             context.prevent_default(); context.stop_propagation();
-            if (event.input.repeat) return;
-            context.document().defer(event.current, lifetime,
-                [enabled = enabled, callback = on_move, direction](UiDocument &) -> Result<empty, UiError> {
-                    auto active = enabled.get(); auto current = callback.get();
-                    if (active.is_ok() && active.unwrap().value() && current.is_ok()) current.unwrap().value()(direction);
-                    return Ok(empty{});
-                }).unwrap();
+            if (!event.input.repeat) move.enqueue(context, event.current, direction);
         }
     };
     struct GameInputDescriptor {
         using State = GameInput;
-        cx::Latest<bool> enabled;
-        cx::Latest<cx::Action<void(Direction)>> on_move;
-        BindingGuard lifetime;
-        auto create() const -> State { return {enabled, on_move, lifetime}; }
-        void update(State &state, cx::BehaviorContext &) const { state.enabled = enabled; state.on_move = on_move; }
+        MoveAction move;
+        auto create() const -> State { return {move}; }
+        void update(State &state, cx::BehaviorContext &) const { state.move = move; }
     };
-    struct BoardCanvas {
+    struct BoardSwipe {
+        struct Contact {
+            DeviceId device;
+            Index pointer;
+            Point start;
+        };
+        MoveAction move;
+        Option<Contact> contact;
+        void handle(EventContext &context, const RoutedEvent &event) {
+            const auto &input = event.input;
+            if (input.pointer_kind != PointerKind::Touch) return;
+            if (input.type == EventType::PointerDown) {
+                if (contact.is_none() && move.active() && context.capture_pointer().is_ok())
+                    contact = Some(Contact{input.device, input.pointer, input.position});
+                return;
+            }
+            if (contact.is_none() || contact->device != input.device || contact->pointer != input.pointer) return;
+            if (input.type == EventType::PointerCancel || input.type == EventType::CaptureLost) {
+                contact = None();
+                return;
+            }
+            if (input.type != EventType::PointerUp) return;
+            const auto x = input.position.x - contact->start.x;
+            const auto y = input.position.y - contact->start.y;
+            contact = None();
+            (void)context.release_pointer();
+            if (context.default_prevented()) return;
+            const auto horizontal = x < 0 ? -x : x;
+            const auto vertical = y < 0 ? -y : y;
+            if (rstd::cmp::max(horizontal, vertical) < 24) return;
+            const auto direction = horizontal >= vertical
+                ? (x < 0 ? Direction::Left : Direction::Right)
+                : (y < 0 ? Direction::Up : Direction::Down);
+            move.enqueue(context, event.current, direction);
+        }
+    };
+    struct BoardSwipeDescriptor {
+        using State = BoardSwipe;
+        MoveAction move;
+        auto create() const -> State { return {move}; }
+        void update(State &state, cx::BehaviorContext &) const { state.move = move; }
+    };
+    struct Canvas {
+        ReferenceCanvas layout;
         auto prepare(cx::PrepareContext &context, Option<UiId> previous, NodeStyle style) -> cx::ComposeResult<UiNodeRef> {
             auto node = previous.is_some() ? context.edit().existing(*previous)
                 : context.edit().create(LayoutKind::Custom, style);
             context.style(node, style);
             if (previous.is_none()) {
-                context.edit().state(node, ReferenceCanvas{{500, 700}, CanvasFit::Contain,
-                    {.5, .5}, true, Some(Scalar(1.2))});
+                context.edit().state(node, layout);
                 auto target = context.target();
                 context.on_mount([target](cx::CommittedContext &committed) -> cx::ComposeResult<cx::EffectLease> {
                     auto resolved = committed.resolve(target);
@@ -191,9 +246,7 @@ class View {
         if (enabled.is_err()) return Err(enabled.unwrap_err());
         auto on_move = cx::latest(cx::Action<void(Direction)>([owner](Direction direction) { owner->move(direction); }));
         if (on_move.is_err()) return Err(on_move.unwrap_err());
-        auto saved_focus = cx::node();
-        if (saved_focus.is_err()) return Err(saved_focus.unwrap_err());
-        auto result_focus = saved_focus.unwrap();
+        MoveAction move{enabled.unwrap(), on_move.unwrap(), owner->lifetime_.guard()};
         auto focused = cx::effect(cx::EffectKeys{cx::Key{Serial(model.result_visible)}},
             [owner, visible = model.result_visible](cx::CommittedContext &context) -> cx::ComposeResult<cx::EffectLease> {
                 if (visible) return Ok(cx::EffectLease{});
@@ -223,40 +276,58 @@ class View {
                 return Ok(cx::EffectLease{});
             });
         if (effect.is_err()) return Err(effect.unwrap_err());
-        Vec<cx::Element> overlays;
-        if (model.result_visible) {
-            auto restart = button("重新开始"_str, 0, [owner] { owner->restart(); })
-                .style(NodeStyleBuilder{}.width(176).height(48).build());
-            Vec<cx::Element> actions;
-            if (model.won) {
-                actions.push(rstd::move(restart));
-                actions.push(button("继续挑战"_str, 0, [owner] { owner->continue_game(); })
-                    .style(NodeStyleBuilder{}.width(176).height(48).build()).reference(result_focus));
-            } else actions.push(rstd::move(restart).reference(result_focus));
-            auto prompt = cx::column({label(model.won ? "合成了 2048！"_str : "游戏结束"_str, 28, {}, true),
-                label(message, 16), cx::row(rstd::move(actions)).gap(12)})
-                .style(examples::block(420, 224, background, 16)).padding(24).gap(14);
-            cx::PopupOptions options;
-            options.initial_focus = Some(cx::NodeRef(result_focus));
-            overlays.push(cx::dialog(rstd::move(prompt), [owner](PopupCloseReason) { owner->dismiss_result(); }, rstd::move(options)));
-        }
-        auto body = cx::stack({
+        const auto hint = owner->input_hint_ == InputHint::Swipe ? "在棋盘上滑动以移动方块"_str
+            : "方向键移动 · Tab 切换按钮 · Esc 退出"_str;
+        return Ok(cx::stack({
             label("2048"_str, 54, {0, 0}, true),
             label("得分"_str, 14, {330, 8}), label(score.as_str(), 28, {330, 28}, true),
             cx::stack(rstd::move(cells)).style(NodeStyleBuilder{
                 examples::block(board_size, board_size, {0, 0, 0, 0})}
-                .transform({1, 0, 0, 1, 0, 86}).build()).behavior(cx::Key{1}, BoardDecorationDescriptor{}),
+                .transform({1, 0, 0, 1, 0, 86}).build())
+                .behavior(cx::Key{1}, BoardDecorationDescriptor{}).behavior(cx::Key{2}, BoardSwipeDescriptor{move}),
             label(message, 16, {0, 538}),
             button("重新开始"_str, 0, [owner] { owner->restart(); }),
             button("继续挑战"_str, 234, [owner] {
                 owner->continue_game();
                 owner->session_.input().focus_when_ready(owner->input_.id().unwrap(), None<ScopeId>(), owner->lifetime_.guard()).unwrap();
             }, model.won),
-            label("方向键移动 · Tab 切换按钮 · Esc 退出"_str, 14, {0, 628}),
-        }).style(NodeStyleBuilder{examples::block(board_size, 650, {0, 0, 0, 0})}.hit_self(false).build());
-        return Ok(cx::popup_host(rstd::move(body), rstd::move(overlays))
-            .style(NodeStyleBuilder{examples::block(board_size, 650, {0, 0, 0, 0})}.focusable(true).build())
-            .reference(owner->input_).behavior(cx::Key{1}, GameInputDescriptor{enabled.unwrap(), on_move.unwrap(), owner->lifetime_.guard()}));
+            label(hint, 14, {0, 628}),
+        }).style(NodeStyleBuilder{examples::block(board_size, 650, {0, 0, 0, 0})}.focusable(true).build())
+            .reference(owner->input_).behavior(cx::Key{1}, GameInputDescriptor{move}));
+    }
+    [[vui::compose]]
+    static auto result_dialog(cx::Borrowed<View> owner, state::Value<rstd::rc::Rc<Model>> source,
+                              state::Value<Insets> insets) -> cx::ComposeResult<cx::Element> {
+        auto observed = cx::read(source);
+        if (observed.is_err()) return Err(observed.unwrap_err());
+        const auto &model = *observed->value();
+        if (!model.result_visible) return Ok(cx::stack({}).style(NodeStyleBuilder{}.hit_self(false).build()));
+        auto area = cx::read(insets);
+        if (area.is_err()) return Err(area.unwrap_err());
+        auto saved_focus = cx::node();
+        if (saved_focus.is_err()) return Err(saved_focus.unwrap_err());
+        auto result_focus = saved_focus.unwrap();
+        auto restart = button("重新开始"_str, 0, [owner] { owner->restart(); })
+            .style(NodeStyleBuilder{}.width(176).height(48).build());
+        Vec<cx::Element> actions;
+        if (model.won) {
+            actions.push(rstd::move(restart));
+            actions.push(button("继续挑战"_str, 0, [owner] { owner->continue_game(); })
+                .style(NodeStyleBuilder{}.width(176).height(48).build()).reference(result_focus));
+        } else actions.push(rstd::move(restart).reference(result_focus));
+        auto message = model.over ? "没有可移动的方块了，再来一局吧。"_str
+            : "合成了 2048！还想挑战更大的数字吗？"_str;
+        constexpr Size panel_size{420, 224};
+        auto prompt = cx::column({label(model.won ? "合成了 2048！"_str : "游戏结束"_str, 28, {}, true),
+            label(message, 16), cx::row(rstd::move(actions)).gap(12)})
+            .style(examples::block(panel_size.width, panel_size.height, background, 16)).padding(24).gap(14);
+        auto panel = cx::element(Canvas{ReferenceCanvas{panel_size, CanvasFit::Contain, {.5, .5}, true, Some(Scalar(1))}},
+            cx::elements({rstd::move(prompt)}))
+            .style(NodeStyleBuilder{}.width(panel_size.width).height(panel_size.height).hit_self(false).build());
+        cx::PopupOptions options;
+        options.initial_focus = Some(cx::NodeRef(result_focus));
+        options.content_insets = area->value();
+        return Ok(cx::dialog(rstd::move(panel), [owner](PopupCloseReason) { owner->dismiss_result(); }, rstd::move(options)));
     }
     void reset_tiles() {
         tiles_.clear();
@@ -342,11 +413,13 @@ class View {
         game_.restart(); reset_tiles(); update_status();
     }
   public:
-    View(UiSession &session, Game game) : session_(session), game_(game) {
+    View(UiSession &session, Game game, InputHint hint = InputHint::Keyboard)
+        : session_(session), game_(game), input_hint_(hint) {
         auto service = Box<vectext::SystemTextService>::make();
         ui().set_text_service(Box<TextService>::from_raw(rstd::move(service).into_raw().template cast<TextService>())).unwrap();
-        root_ = ui().create<Stack>(examples::block(520, 720, background)).unwrap();
-        ui().mount(root_).unwrap(); reset_tiles(); update_status();
+        background_ = ui().create<Stack>(NodeStyleBuilder{examples::block(520, 720, background)}.hit_self(false).build()).unwrap();
+        root_ = ui().append<Stack>(background_, NodeStyleBuilder{}.width(520).height(720).build()).unwrap();
+        ui().mount(background_).unwrap(); reset_tiles(); update_status();
         composition_ = Some(cx::Composition::create(session_, root_).unwrap());
         composition_->set_content(cx::with_constraints(cx::Key{1},
             [owner = cx::borrow(*this), source = model_.value()](cx::CompositionContext &, LayoutConstraints constraints)
@@ -355,10 +428,14 @@ class View {
                 auto height = constraints.max_height.unwrap_or(rstd::cmp::max(Scalar(700), constraints.min_height));
                 auto board = content(owner, source);
                 if (board.is_err()) return Err(board.unwrap_err());
-                return Ok(cx::element(BoardCanvas{}, cx::elements({board.unwrap()}))
+                return Ok(cx::element(Canvas{ReferenceCanvas{{500, 700}, CanvasFit::Contain, {.5, .5}, true, Some(Scalar(1.2))}},
+                    cx::elements({board.unwrap()}))
                     .style(NodeStyleBuilder{}.width(width).height(height).build()));
             })).unwrap();
-        resize({{520, 720}, 1, 1});
+        auto overlay = ui().append<Stack>(background_, NodeStyleBuilder{}.hit_self(false)
+            .horizontal(Alignment::Stretch).vertical(Alignment::Stretch).build()).unwrap();
+        dialogs_ = Some(cx::Composition::create(session_, overlay).unwrap());
+        dialogs_->set_content(result_dialog(cx::borrow(*this), model_.value(), dialog_insets_.value())).unwrap();
     }
     ~View() {
         lifetime_.disconnect();
@@ -371,12 +448,19 @@ class View {
     auto last_result() const -> Option<cx::ComposeResult<cx::CommitReport>> { return composition_->last_result(); }
     auto check() -> Result<empty, UiError> {
         if (animation_error_.is_some()) return Err(animation_error_->ui.unwrap_or(UiError::InvalidValue));
-        return examples::composition_status(*composition_);
+        auto body = examples::composition_status(*composition_);
+        return body.is_err() ? rstd::move(body) : examples::composition_status(*dialogs_);
     }
     void resize(const SurfaceInfo &surface) {
         auto size = surface.logical_size;
-        if (size.width > 0 && size.height > 0)
-            ui().set_layout(root_, LayoutStyleBuilder{}.width(size.width).height(size.height).build()).unwrap();
+        resize(size, {0, 0, size.width, size.height});
+    }
+    void resize(Size surface, Rect viewport) {
+        if (viewport.width <= 0 || viewport.height <= 0) return;
+        ui().set_layout(background_, LayoutStyleBuilder{}.width(surface.width).height(surface.height).build()).unwrap();
+        ui().set_layout(root_, LayoutStyleBuilder{}.width(viewport.width).height(viewport.height).build()).unwrap();
+        ui().set_transform(root_, {1, 0, 0, 1, viewport.x, viewport.y}).unwrap();
+        dialog_insets_.set(examples::content_insets(surface, viewport)).unwrap();
     }
 };
 } // namespace game2048

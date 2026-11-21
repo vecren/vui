@@ -1,6 +1,6 @@
 module vui.host:platform.x11.connection;
-import :ffi.x11;
-import :ffi.xkb;
+import :platform.x11.ffi.xlib;
+import :platform.xkb.ffi;
 import :platform.x11.dispatch;
 import rstd;
 

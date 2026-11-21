@@ -13,16 +13,17 @@ struct PopupOptions {
     EscapePolicy escape{EscapePolicy::RequestClose};
     OutsidePressPolicy outside_press{OutsidePressPolicy::RequestClose};
     Color backdrop{0, 0, 0, .28f};
+    Insets content_insets;
     PopupOptions() = default;
     PopupOptions(const PopupOptions &other)
         : modal(other.modal), initial_focus(other.initial_focus.is_some() ? Some(NodeRef(*other.initial_focus)) : None<NodeRef>()),
           parent_scope(other.parent_scope), restore_focus(other.restore_focus), escape(other.escape),
-          outside_press(other.outside_press), backdrop(other.backdrop) {}
+          outside_press(other.outside_press), backdrop(other.backdrop), content_insets(other.content_insets) {}
     PopupOptions(PopupOptions &&) = default;
     auto operator=(PopupOptions other) -> PopupOptions & {
         modal = other.modal; initial_focus = rstd::move(other.initial_focus); parent_scope = other.parent_scope;
         restore_focus = other.restore_focus; escape = other.escape; outside_press = other.outside_press;
-        backdrop = other.backdrop; return *this;
+        backdrop = other.backdrop; content_insets = other.content_insets; return *this;
     }
 };
 struct PopupFunction {

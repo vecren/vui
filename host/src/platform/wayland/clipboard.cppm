@@ -1,7 +1,6 @@
 module vui.host:platform.wayland.clipboard;
-import :ffi.wayland;
-import :ffi.wayland_data;
-import :ffi.linux;
+import :platform.wayland.ffi;
+import :platform.linux.ffi;
 import vui.render;
 
 namespace vui::host::detail {

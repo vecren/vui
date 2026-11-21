@@ -1,5 +1,7 @@
 module vui.host;
+import :platform.linux.ffi;
 import :platform.input;
+import :platform.linux.poll;
 import :platform.x11.window;
 import :platform.x11.connection;
 import :platform.x11.input;
@@ -7,9 +9,10 @@ import :platform.x11.clipboard;
 import :platform.x11.clipboard_owner;
 import :platform.x11.state;
 import :platform.x11.displays;
-import :ffi.x11;
+import :platform.x11.ffi.xlib;
 import :platform.xkb;
 import :platform.x11.text;
+import vvk;
 import vui.render;
 
 namespace vui::host::detail {
@@ -359,6 +362,114 @@ auto X11Window::synchronize() -> Result<empty, X11WindowError> {
         return Err(X11WindowError::State);
     api().XSync(connection_.display(), 0);
     return dispatch();
+}
+
+auto X11Window::wait_for_events(Index milliseconds, int wake_fd, Serial observed_display_revision,
+                                bool &redraw) -> Result<empty, gpu::Error> {
+    dispatch_displays();
+    if (displays_.failed()) {
+        displays_.close();
+        redraw = true;
+    }
+    redraw = redraw || displays_.pending() || display_revision() != observed_display_revision;
+    redraw = dispatch_state() || redraw;
+    if (state_.failed()) {
+        state_.close();
+        redraw = true;
+    }
+    redraw = redraw || state_.pending();
+    clipboard_owner_.dispatch();
+    redraw = redraw || clipboard_owner_.pending() || pending();
+    if (dispatch(true).is_err()) return Err(gpu::Error{gpu::Stage::Surface});
+    expire_clipboard();
+    auto timeout_ms = clipboard_owner_.wait(clipboard_.wait(milliseconds));
+    redraw = redraw || has_input();
+
+    auto &fds = pollfds_;
+    fds.clear();
+    fds.push({fd(), ffi::POLLIN, 0});
+    fds.push({wake_fd, ffi::POLLIN, 0});
+    flush();
+    connection_.copy_internal(poll_connections_);
+    auto first_internal_fd = fds.len();
+    for (auto item : poll_connections_)
+        fds.push({item.fd, ffi::POLLIN, 0});
+
+    auto append_fd = [&fds](int fd) -> Option<usize> {
+        if (fd < 0) return None();
+        auto index = fds.len();
+        fds.push({fd, ffi::POLLIN, 0});
+        return Some(index);
+    };
+    auto clipboard_fd = append_fd(clipboard_owner_.fd());
+    auto state_fd = append_fd(state_.fd());
+    auto displays_fd = append_fd(displays_.fd());
+
+    if (!poll_window(fds.as_mut_slice().as_mut_ref(), timeout_ms, redraw))
+        return Err(gpu::Error{gpu::Stage::Surface});
+
+    if (displays_fd.is_some() && fds[*displays_fd].revents) {
+        dispatch_displays();
+        if ((fds[*displays_fd].revents & ffi::error) || displays_.failed()) {
+            displays_.close();
+            redraw = true;
+        }
+    }
+    if (state_fd.is_some() && fds[*state_fd].revents) {
+        redraw = dispatch_state() || redraw;
+        if ((fds[*state_fd].revents & ffi::error) || state_.failed()) {
+            state_.close();
+            redraw = true;
+        }
+    }
+    if (clipboard_fd.is_some() && fds[*clipboard_fd].revents) {
+        clipboard_owner_.dispatch();
+        if ((fds[*clipboard_fd].revents & ffi::error) || clipboard_owner_.failed())
+            clipboard_owner_.close();
+    }
+    for (usize i{}; i < poll_connections_.len(); i += usize(1)) {
+        auto entry = poll_connections_[i];
+        auto ready = fds[first_internal_fd + i].revents;
+        if (!ready || !connection_.current(entry)) continue;
+        if (ready & ffi::POLLNVAL) return Err(gpu::Error{gpu::Stage::Surface});
+        if (ready & (ffi::POLLIN | ffi::disconnected)) {
+            connection_.process(entry);
+            redraw = true;
+            if ((ready & ffi::disconnected) && connection_.current(entry))
+                return Err(gpu::Error{gpu::Stage::Surface});
+        }
+    }
+    if (dispatch(true).is_err()) return Err(gpu::Error{gpu::Stage::Surface});
+    expire_clipboard();
+    return Ok(empty{});
+}
+
+auto X11Window::surface_extension() -> const char * {
+    return VK_KHR_XLIB_SURFACE_EXTENSION_NAME;
+}
+
+auto X11Window::create_surface(const vvk::Instance &instance, const rstd::sync::Arc<X11Window> &native)
+    -> Result<gpu::NativeSurface, gpu::Error> {
+    if (!instance) return Err(gpu::Error{gpu::Stage::State});
+    auto create = instance.Dispatch().vkCreateXlibSurfaceKHR;
+    if (!create) return Err(gpu::Error{gpu::Stage::Surface});
+    VkXlibSurfaceCreateInfoKHR info{};
+    info.sType = VK_STRUCTURE_TYPE_XLIB_SURFACE_CREATE_INFO_KHR;
+    info.dpy = native->display();
+    info.window = native->window();
+    VkSurfaceKHR surface{};
+    auto result = create(*instance, &info, nullptr, &surface);
+    if (result != VK_SUCCESS) return Err(gpu::Error{gpu::Stage::Surface, result});
+    return Ok(gpu::NativeSurface{surface, Box<dyn<gpu::SurfaceLifetime>>::make(native.clone())});
+}
+
+void X11Window::deactivate() {
+    (void)capture(false);
+    (void)set_text_input(None());
+    clipboard_.close();
+    clipboard_owner_.close();
+    state_.close();
+    displays_.close();
 }
 
 void X11Window::close() {

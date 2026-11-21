@@ -1,10 +1,9 @@
 module vui.host:platform.wayland.window;
 import :platform.wayland.connection;
-import :ffi.wayland;
-import :platform.wayland.protocol.xdg_shell;
-import :platform.wayland.protocol.xdg_decoration;
-import :platform.wayland.protocol.fractional_scale;
+import :platform.wayland.ffi;
 import :display;
+import vui.render;
+import vvk;
 import rstd;
 
 namespace vui::host::detail {
@@ -93,6 +92,13 @@ class WaylandWindow {
     auto open(const char *title, rstd::uint32_t width, rstd::uint32_t height,
               const char *display = nullptr) -> Result<empty, WaylandWindowError>;
     auto roundtrip() -> Result<empty, WaylandWindowError>;
+    auto wait_for_events(Index milliseconds, int wake_fd, Serial observed_display_revision, bool &redraw)
+        -> Result<empty, gpu::Error>;
+    auto take_input() -> Vec<InputEvent>;
+    auto take_dropped_input() -> Serial { return connection_.input().take_dropped_input(); }
+    static auto surface_extension() -> const char *;
+    static auto create_surface(const vvk::Instance &instance, const rstd::sync::Arc<WaylandWindow> &native)
+        -> Result<gpu::NativeSurface, gpu::Error>;
     auto request_frame_signal() -> Result<Serial,WaylandWindowError>;
     auto frame_signal(Serial token) const -> Option<bool> {
         if (!token || token!=frame_signal_token_) return None();
@@ -117,6 +123,7 @@ class WaylandWindow {
         ffi::xdg_toplevel_set_minimized(toplevel_); return true;
     }
     auto set_minimum_size(rstd::uint32_t width, rstd::uint32_t height) -> Result<empty, WaylandWindowError>;
+    void deactivate();
     void close();
     auto display() const -> ffi::wl_display * { return connection_.display(); }
     auto surface() const -> ffi::wl_surface * { return surface_; }

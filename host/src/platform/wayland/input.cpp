@@ -1,9 +1,9 @@
 module vui.host;
 import :platform.input;
 import :platform.wayland.input;
-import :ffi.wayland;
-import :ffi.linux;
-import :ffi.xkb;
+import :platform.wayland.ffi;
+import :platform.linux.ffi;
+import :platform.xkb.ffi;
 import :platform.xkb;
 import :platform.wayland.text;
 import :platform.wayland.clipboard;

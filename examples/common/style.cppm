@@ -11,6 +11,12 @@ auto block(Scalar width, Scalar height, Color color, Scalar radius = 0) -> NodeS
     return NodeStyleBuilder{}.width(width).height(height).background(color).radius(radius).build();
 }
 
+auto content_insets(Size surface, Rect content) -> Insets {
+    return {rstd::cmp::max(Scalar(0), content.x), rstd::cmp::max(Scalar(0), content.y),
+            rstd::cmp::max(Scalar(0), surface.width - content.x - content.width),
+            rstd::cmp::max(Scalar(0), surface.height - content.y - content.height)};
+}
+
 namespace theme {
 inline const auto canvas = Color::from_srgba8(242, 244, 245).unwrap();
 inline const auto surface = Color::from_srgba8(255, 255, 255).unwrap();

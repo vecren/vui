@@ -56,8 +56,7 @@ class PaintContext {
         recorder_.external(rstd::move(source), destination, fit, sampling, placeholder, blend);
     }
     void children() {
-        if (children_mapping_.is_some()) recorder_.children(*children_mapping_);
-        else recorder_.children();
+        recorder_.children(children_mapping_.unwrap_or(Transform{}));
     }
     void request_repaint() { repaint_ = true; }
     auto repaint_requested() const -> bool { return repaint_; }

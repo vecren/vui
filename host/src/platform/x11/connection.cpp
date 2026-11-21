@@ -1,6 +1,6 @@
 module vui.host;
 import :platform.x11.connection;
-import :ffi.x11;
+import :platform.x11.ffi.xlib;
 import rstd;
 
 namespace vui::host::detail {

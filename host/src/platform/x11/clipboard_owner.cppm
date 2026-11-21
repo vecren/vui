@@ -1,5 +1,5 @@
 module vui.host:platform.x11.clipboard_owner;
-import :ffi.xcb;
+import :platform.x11.ffi.xcb;
 import vui.render;
 
 namespace vui::host::detail {

@@ -1,6 +1,5 @@
-export module vui.examples.game2048;
-export import :game;
-export import :view;
+export module vui.examples.game2048.desktop;
+import vui.examples.game2048;
 import vui.examples;
 import rstd;
 

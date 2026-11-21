@@ -3,17 +3,32 @@ name = "vui-2048"
 version.workspace = true
 license.workspace = true
 
+[lib]
+module = "vui.examples.game2048"
+path = "lib.cppm"
+source-root = "."
+
 [[bin]]
 name = "vui-2048"
-module = "vui.examples.game2048"
+module = "vui.examples.game2048.desktop"
+target = { os = ["linux", "windows", "macos"] }
 path = "main.cppm"
 source-root = "."
 link-stdlib = false
+
+[[cdylib]]
+name = "vui-2048-android"
+artifact = "vui_android"
+module = "vui.examples.game2048.android"
+target = { os = "android" }
+path = "android.cppm"
+source-root = "."
 
 [usage]
 options = ["-Wall", "-Wextra", "-Wno-missing-field-initializers", "-Werror=return-type"]
 
 [dependencies]
+lito-apk = { version = "0.1.0", condition = 'target.os == "android"' }
 vui-compose-plugin = { path = "../../plugin" }
 vui = { workspace = true }
 rstd-std = { workspace = true }

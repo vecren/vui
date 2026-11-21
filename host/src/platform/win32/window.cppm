@@ -1,6 +1,6 @@
 module vui.host:platform.win32.window;
 import :platform.input;
-import :ffi.win32;
+import :platform.win32.ffi;
 import :platform.win32.text;
 import :display;
 import rstd;

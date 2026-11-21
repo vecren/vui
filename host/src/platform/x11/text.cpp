@@ -1,7 +1,7 @@
 module vui.host;
 import :platform.x11.text;
-import :ffi.x11;
-import :ffi.xkb;
+import :platform.x11.ffi.xlib;
+import :platform.xkb.ffi;
 import :platform.xkb.text;
 import :platform.x11.preedit;
 import vui.render;

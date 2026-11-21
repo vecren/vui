@@ -1,7 +1,7 @@
 module vui.host;
 import :platform.x11.preedit;
-import :ffi.x11;
-import :ffi.locale;
+import :platform.x11.ffi.xlib;
+import :platform.x11.ffi.locale;
 import vui.render;
 
 namespace vui::host::detail {

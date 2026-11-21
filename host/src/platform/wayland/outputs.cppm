@@ -1,6 +1,5 @@
 module vui.host:platform.wayland.outputs;
-import :ffi.wayland;
-import :platform.wayland.protocol.xdg_output;
+import :platform.wayland.ffi;
 import :display;
 import rstd;
 

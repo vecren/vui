@@ -20,7 +20,7 @@ for _, protocol in ipairs(protocols) do
       tool = scanner,
       cwd = ".",
       args = { output[1], "@INPUT:1@", "@OUTPUT:1@" },
-      inputs = { "protocol/" .. protocol[1] .. ".xml" },
+      inputs = { "src/platform/wayland/protocol/" .. protocol[1] .. ".xml" },
       outputs = { "include/" .. protocol[2] .. output[2] },
     })
   end

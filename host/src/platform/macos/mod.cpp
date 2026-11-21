@@ -102,10 +102,6 @@ auto Window::synchronize() -> Result<empty, gpu::Error> {
     return configured() && (*impl_->native)->synchronize() ? Result<empty, gpu::Error>(Ok(empty{}))
                                                            : Err(gpu::Error{gpu::Stage::State});
 }
-auto Window::timing() const -> FrameTiming {
-    auto now = rstd::time::Instant::now().duration_since_epoch().as_nanos().to_primitive();
-    return {now > ~Serial{} ? ~Serial{} : Serial(now), {}};
-}
 auto Window::frame_waker() const -> Option<FrameWaker> {
     if (impl_->wake.is_none())
         return None();

@@ -1,5 +1,5 @@
 module vui.host:platform.x11.dispatch;
-import :ffi.xi2;
+import :platform.x11.ffi.xi2;
 import rstd.dlopn;
 
 namespace vui::host::detail {

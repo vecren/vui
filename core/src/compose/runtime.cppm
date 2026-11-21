@@ -355,6 +355,7 @@ class PrepareContext {
   public:
     PrepareContext(ComposeBuild &build, ComposeDraft &draft) : build_(build), draft_(draft) {}
     PrepareContext(const PrepareContext &) = delete;
+    auto session() -> UiSession & { return build_.session; }
     auto document() -> UiDocument & { return build_.session.document(); }
     auto edit() -> UiEditBatch & { return build_.edit; }
     auto previous_style() const -> Option<NodeStyle> {

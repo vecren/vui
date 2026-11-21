@@ -62,6 +62,7 @@ struct RunError {
     Option<gpu::Error> gpu;
     Option<UiError> callback;
     Option<FrameError> frame;
+    Option<FrameRequestError> request;
 };
 struct RunStats {
     Serial gpu_completed{}, dropped_input{};
@@ -70,6 +71,7 @@ template <class Frames> class SessionRunner {
     UiSession &session_;
     Frames &frames_;
     bool request_close_{}, request_redraw_{}, running_{}, finished_{};
+    bool dirty_{true}, closing_{}, animating_{}, driving_{};
     RunStats stats_;
     auto fail(RunError error) -> Result<RunStats, RunError> {
         return Err(rstd::move(error));
@@ -88,110 +90,135 @@ template <class Frames> class SessionRunner {
         return configured;
     }
     auto stats() const -> RunStats { return stats_; }
-    template <class Driver, class Hooks>
-        requires rstd::Impled<Driver, HostDriver> && rstd::Impled<Hooks, RunHooks>
-    auto run(Driver &driver, Hooks &hooks) -> Result<RunStats, RunError> {
+    auto animating() const -> bool { return animating_; }
+    auto next_wait(FrameTiming timing) -> Index {
+        if ((dirty_ || request_close_ || request_redraw_) && !closing_)
+            return 0;
+        return frames_.wait_milliseconds(animating_, timing, session_.next_tick());
+    }
+    template <class Hooks>
+        requires rstd::Impled<Hooks, RunHooks>
+    auto pump(const HostEvents &events, FrameTiming timing, Hooks &hooks) -> Result<bool, RunError> {
+        return pump_with_clock(events, [timing] { return timing; }, hooks);
+    }
+    template <class Clock, class Hooks>
+        requires rstd::Impled<Hooks, RunHooks>
+    auto pump_with_clock(const HostEvents &events, Clock clock, Hooks &hooks) -> Result<bool, RunError> {
         if (running_ || finished_)
             return Err(RunError{RunStage::State});
         running_ = true;
         struct Guard {
-            bool &running, &finished;
-            ~Guard() {
-                running = false;
-                finished = true;
+            bool &running;
+            ~Guard() { running = false; }
+        } guard{running_};
+        decltype(auto) callbacks = rstd::as<RunHooks>(hooks);
+        auto dispatch_frames = [&]() -> Result<empty, RunError> {
+            for (const auto &event : frames_.poll_events()) {
+                if (event.type == FrameEventType::Failed)
+                    return Err(RunError{RunStage::Frame, {}, event.error.clone(), {}, event.plan_error});
+                if (event.present.is_some() && *event.present != gpu::PresentStatus::Queued)
+                    dirty_ = true;
+                if (event.type == FrameEventType::Skipped && event.plan_error == Some(FrameError::InvalidSurface))
+                    dirty_ = true;
+                if (event.type == FrameEventType::GpuComplete) {
+                    ++stats_.gpu_completed;
+                    auto view = event.completed_view();
+                    if (view && !closing_) {
+                        auto accepted = session_.complete_frame(rstd::move(*view));
+                        if (accepted.is_err())
+                            return Err(RunError{RunStage::Frame, {}, {}, {}, Some(accepted.unwrap_err())});
+                    }
+                }
+                auto observed = callbacks.on_frame_event(event);
+                if (observed.is_err())
+                    return Err(RunError{RunStage::Callback, {}, {}, Some(observed.unwrap_err())});
             }
-        } guard{running_, finished_};
-        auto execute = [&]() -> Result<RunStats, RunError> {
-            bool dirty{true}, closing{}, animating{};
-            decltype(auto) platform = rstd::as<HostDriver>(driver);
-            decltype(auto) callbacks = rstd::as<RunHooks>(hooks);
-            for (;;) {
-                auto timing = platform.timing();
-                auto timeout = dirty && !closing
-                                   ? 0
-                                   : frames_.wait_milliseconds(animating, timing, session_.next_tick());
-                if ((request_close_ || request_redraw_) && !closing)
-                    timeout = 0;
-                auto events = platform.wait(timeout);
-                if (events.error.is_some())
-                    return fail({RunStage::Host, {}, rstd::move(events.error)});
-                dirty = dirty || rstd::exchange(request_redraw_, false);
-                stats_.dropped_input +=
-                    rstd::min(events.dropped_input, ~Serial{} - stats_.dropped_input);
-                if ((events.close_requested || request_close_) && !closing) {
-                    request_close_ = false;
-                    if (callbacks.on_close_requested()) {
-                        closing = true;
-                        auto closed = session_.close();
-                        if (closed.is_err())
-                            return fail({RunStage::Session, Some(closed.unwrap_err())});
-                        frames_.close();
-                    }
-                }
-                if (!closing) {
-                    auto before = callbacks.before_advance(events);
-                    if (before.is_err())
-                        return fail({RunStage::Callback, {}, {}, Some(before.unwrap_err())});
-                    auto advanced =
-                        session_.advance(events.input.as_slice(), platform.timing(), events.surface);
-                    if (advanced.is_err())
-                        return fail({RunStage::Session, Some(advanced.unwrap_err())});
-                    auto result = advanced.unwrap();
-                    animating = result.animations_active;
-                    auto after = callbacks.after_advance(result);
-                    if (after.is_err())
-                        return fail({RunStage::Callback, {}, {}, Some(after.unwrap_err())});
-                    for (const auto &mutation : session_.poll_mutations())
-                        if (mutation.error.is_some())
-                            return fail({RunStage::Callback, {}, {}, mutation.error});
-                    frames_.set_suspended(events.suspended.unwrap_or(false));
-                    frames_.set_surface(events.extent, events.surface.generation);
-                    dirty = dirty || events.redraw || result.frame_needed;
-                    if (dirty) {
-                        auto requested = frames_.request();
-                        if (requested.is_ok())
-                            dirty = false;
-                        else if (requested.unwrap_err() != FrameRequestError::Busy)
-                            return fail({RunStage::Frame});
-                    }
-                }
-                auto pumped = frames_.pump_with_clock([&] { return platform.timing(); });
-                if (pumped.is_err())
-                    return fail({RunStage::Frame, {}, Some(pumped.unwrap_err())});
-                auto stopped = frames_.status().closed;
-                for (const auto &event : frames_.poll_events()) {
-                    if (event.type == FrameEventType::Failed)
-                        return fail({RunStage::Frame, {}, event.error.clone(), {}, event.plan_error});
-                    if (event.present.is_some() && *event.present != gpu::PresentStatus::Queued)
-                        dirty = true;
-                    if (event.type == FrameEventType::Skipped && event.plan_error == Some(FrameError::InvalidSurface)) dirty = true;
-                    if (event.type == FrameEventType::GpuComplete) {
-                        ++stats_.gpu_completed;
-                        auto view = event.completed_view();
-                        if (view && !closing) {
-                            auto accepted = session_.complete_frame(rstd::move(*view));
-                            if (accepted.is_err()) return fail({RunStage::Frame, {}, {}, {}, Some(accepted.unwrap_err())});
-                        }
-                    }
-                    auto observed = callbacks.on_frame_event(event);
-                    if (observed.is_err())
-                        return fail({RunStage::Callback, {}, {}, Some(observed.unwrap_err())});
-                }
-                if (stopped) break;
-            }
-            return Ok(stats_);
+            return Ok(empty{});
         };
-        auto result = execute();
-        if (result.is_err()) {
-            (void)session_.close();
-            frames_.close();
-            while (!frames_.status().closed) {
-                (void)frames_.pump_with_clock([&] { return rstd::as<HostDriver>(driver).timing(); });
-                (void)frames_.poll_events();
-                (void)rstd::as<HostDriver>(driver).wait(1);
+        if (events.error.is_some())
+            return Err(RunError{RunStage::Host, {}, events.error.clone()});
+        dirty_ |= rstd::exchange(request_redraw_, false);
+        stats_.dropped_input += rstd::min(events.dropped_input, ~Serial{} - stats_.dropped_input);
+        if ((events.close_requested || request_close_) && !closing_) {
+            request_close_ = false;
+            if (callbacks.on_close_requested()) {
+                closing_ = true;
+                auto closed = session_.close();
+                if (closed.is_err())
+                    return Err(RunError{RunStage::Session, Some(closed.unwrap_err())});
+                frames_.close();
             }
         }
-        return result;
+        if (!closing_) {
+            auto before = callbacks.before_advance(events);
+            if (before.is_err())
+                return Err(RunError{RunStage::Callback, {}, {}, Some(before.unwrap_err())});
+            auto advanced = session_.advance(events.input.as_slice(), clock(), events.surface);
+            if (advanced.is_err())
+                return Err(RunError{RunStage::Session, Some(advanced.unwrap_err())});
+            auto result = advanced.unwrap();
+            animating_ = result.animations_active;
+            auto after = callbacks.after_advance(result);
+            if (after.is_err())
+                return Err(RunError{RunStage::Callback, {}, {}, Some(after.unwrap_err())});
+            for (const auto &mutation : session_.poll_mutations())
+                if (mutation.error.is_some())
+                    return Err(RunError{RunStage::Callback, {}, {}, mutation.error});
+            frames_.set_suspended(events.suspended.is_some() && *events.suspended);
+            frames_.set_surface(events.extent, events.surface.generation);
+            dirty_ |= events.redraw || result.frame_needed;
+            if (dirty_) {
+                auto requested = frames_.request();
+                if (requested.is_ok())
+                    dirty_ = false;
+                else if (requested.unwrap_err() != FrameRequestError::Busy) {
+                    auto dispatched = dispatch_frames();
+                    if (dispatched.is_err())
+                        return Err(dispatched.unwrap_err());
+                    auto status = frames_.status();
+                    return Err(RunError{RunStage::Frame, {}, rstd::move(status.fault), {}, {},
+                                        Some(requested.unwrap_err())});
+                }
+            }
+        }
+        auto pumped = frames_.pump_with_clock(clock);
+        if (pumped.is_err())
+            return Err(RunError{RunStage::Frame, {}, Some(pumped.unwrap_err())});
+        auto stopped = frames_.status().closed;
+        auto dispatched = dispatch_frames();
+        if (dispatched.is_err())
+            return Err(dispatched.unwrap_err());
+        finished_ = stopped;
+        return Ok(!stopped);
+    }
+    template <class Driver, class Hooks>
+        requires rstd::Impled<Driver, HostDriver> && rstd::Impled<Hooks, RunHooks>
+    auto run(Driver &driver, Hooks &hooks) -> Result<RunStats, RunError> {
+        if (running_ || finished_ || driving_)
+            return Err(RunError{RunStage::State});
+        driving_ = true;
+        struct Guard {
+            bool &driving;
+            ~Guard() { driving = false; }
+        } guard{driving_};
+        decltype(auto) platform = rstd::as<HostDriver>(driver);
+        for (;;) {
+            auto events = platform.wait(next_wait(platform.timing()));
+            auto result = pump_with_clock(events, [&] { return platform.timing(); }, hooks);
+            if (result.is_err()) {
+                (void)session_.close();
+                frames_.close();
+                while (!frames_.status().closed) {
+                    (void)frames_.pump_with_clock([&] { return platform.timing(); });
+                    (void)frames_.poll_events();
+                    (void)platform.wait(1);
+                }
+                finished_ = true;
+                return fail(result.unwrap_err());
+            }
+            if (!result.unwrap())
+                return Ok(stats_);
+        }
     }
 };
 class Runner {

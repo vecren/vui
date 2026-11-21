@@ -80,4 +80,51 @@ auto scroll_view(Element content, ScrollStyle scroll, rstd::source_location sour
     Vec<Element> nodes; nodes.push(rstd::move(viewport));
     return element(ScrollElement{scroll}, rstd::move(nodes), source);
 }
+
+auto ScrollbarElement::prepare(PrepareContext &context, Option<UiId> previous, NodeStyle style) -> ComposeResult<UiNodeRef> {
+    if (!options.valid()) return Err(ComposeError(ComposeStage::Prepare, Some(UiError::InvalidValue)));
+    style.focusable = true;
+    const auto created = previous.is_none();
+    auto node = created ? context.edit().create(LayoutKind::Stack, style) : context.edit().existing(*previous);
+    if (auto before = context.previous_style(); before.is_some()) {
+        before->focusable = true;
+        context.edit().style(node, NodeStylePatch::difference(*before, style));
+    } else context.edit().style(node, style);
+    auto thumb = rstd::rc::make_rc<UiId>();
+    context.on_prepared([node, thumb, created, options = options, &session = context.session()]
+        (UiDocument::PreparedEdit &edit) mutable -> ComposeResult<empty> {
+        auto children = edit.children(node);
+        if (children.len() != usize(1)) return Err(ComposeError(ComposeStage::Prepare, Some(UiError::MissingChild)));
+        *thumb.get() = children[usize()];
+        if (created) {
+            auto stored = edit.state(node, ScrollbarState(session, *thumb, options));
+            if (stored.is_err()) return Err(ComposeError(ComposeStage::Prepare, Some(stored.unwrap_err())));
+        }
+        return Ok(empty{});
+    });
+    context.behavior<ScrollbarState>(node);
+    auto target = context.target();
+    context.on_commit([target, thumb, created, options = options](CommittedContext &committed) -> ComposeResult<empty> {
+        auto id = committed.resolve(target);
+        if (id.is_err()) return Err(id.unwrap_err());
+        auto &ui = committed.session().document();
+        auto state = ui.state<ScrollbarState>(*id);
+        if (!state) return Err(ComposeError(ComposeStage::Effect, Some(UiError::InvalidId)));
+        auto configured = created ? state->connect(*id) : state->configure(*id, *thumb, options);
+        if (configured.is_err()) {
+            auto failure = configured.unwrap_err();
+            ComposeError error(ComposeStage::Effect, failure.ui);
+            error.input = failure.input;
+            return Err(error);
+        }
+        return Ok(empty{});
+    });
+    return Ok(node);
+}
+
+auto scrollbar(Element thumb, ScrollbarOptions options, rstd::source_location source) -> Element {
+    Vec<Element> children;
+    children.push(rstd::move(thumb));
+    return element(ScrollbarElement{options}, rstd::move(children), source);
+}
 } // namespace vui::compose

@@ -5,17 +5,31 @@ using namespace rstd::prelude;
 namespace vui::compose {
 namespace {
 struct PopupLayout {
+    Insets insets;
+
     auto measure(LayoutMeasureContext &context, LayoutConstraints constraints) -> Result<Size, UiError> {
         if (context.child_count() != usize(1)) return Err(UiError::InvalidValue);
-        auto child = context.measure_child(usize(), {constraints.max_width, constraints.max_height});
+        auto available = [](Option<Scalar> extent, Scalar inset) -> Option<Scalar> {
+            if (extent.is_none()) return {};
+            return Some(rstd::cmp::max(Scalar(0), *extent - inset));
+        };
+        auto horizontal = insets.left + insets.right;
+        auto vertical = insets.top + insets.bottom;
+        auto child = context.measure_child(usize(), {available(constraints.max_width, horizontal),
+                                                      available(constraints.max_height, vertical)});
         if (child.is_err()) return Err(child.unwrap_err());
-        return Ok(Size{constraints.max_width.unwrap_or(child->width), constraints.max_height.unwrap_or(child->height)});
+        return Ok(Size{constraints.max_width.unwrap_or(child->width + horizontal),
+                       constraints.max_height.unwrap_or(child->height + vertical)});
     }
     auto arrange(LayoutArrangeContext &context, Size size) -> Result<empty, UiError> {
         auto child = context.desired_child(usize());
         if (child.is_err()) return Err(child.unwrap_err());
-        return context.arrange_child(usize(), {(size.width - child->width) / 2,
-            (size.height - child->height) / 2, child->width, child->height});
+        auto left = rstd::min(insets.left, size.width);
+        auto top = rstd::min(insets.top, size.height);
+        auto right = rstd::cmp::max(left, size.width - insets.right);
+        auto bottom = rstd::cmp::max(top, size.height - insets.bottom);
+        return context.arrange_child(usize(), {left + (right - left - child->width) / 2,
+            top + (bottom - top - child->height) / 2, child->width, child->height});
     }
 };
 struct PopupSlot {
@@ -24,6 +38,7 @@ struct PopupSlot {
     Option<vui::Popup> popup;
     Option<Binding> binding;
     vui::PopupOptions options;
+    Insets content_insets;
     UiId root, content;
     rstd::source_location source;
     Serial revision{};
@@ -48,6 +63,9 @@ auto options_for(const PopupOptions &options, UiId root, CommittedContext &conte
 
 auto PopupElement::prepare(PrepareContext &context, Option<UiId> previous, NodeStyle style)
     -> ComposeResult<UiNodeRef> {
+    if (!options.content_insets.valid() || !finite(options.content_insets.left + options.content_insets.right) ||
+        !finite(options.content_insets.top + options.content_insets.bottom))
+        return Err(ComposeError(ComposeStage::Prepare, Some(UiError::InvalidValue)));
     auto made = context.runtime<PopupSlot>([]() -> ComposeResult<rstd::rc::Rc<PopupSlot>> {
         return Ok(rstd::rc::make_rc<PopupSlot>());
     });
@@ -55,7 +73,6 @@ auto PopupElement::prepare(PrepareContext &context, Option<UiId> previous, NodeS
     auto slot = made.unwrap();
     auto node = previous.is_some() ? context.edit().existing(*previous) : context.edit().create(LayoutKind::Custom, style);
     context.style(node, style);
-    if (context.created()) context.edit().state(node, PopupLayout{});
     auto candidate = rstd::rc::make_rc<PopupCandidate>();
     context.on_prepared([candidate, node](UiDocument::PreparedEdit &edit) mutable -> ComposeResult<empty> {
         auto children = edit.children(node);
@@ -83,16 +100,21 @@ auto PopupElement::prepare(PrepareContext &context, Option<UiId> previous, NodeS
                 auto changed = slot.get()->popup->set_options(values);
                 if (changed.is_err()) return Err(popup_error(changed.unwrap_err()));
             }
+            if (slot->content_insets != options.content_insets) {
+                auto layout = committed.session().document().install_layout(candidate->root, PopupLayout{options.content_insets});
+                if (layout.is_err()) return Err(ComposeError(ComposeStage::Effect, Some(layout.unwrap_err())));
+            }
         }
         slot.get()->root = candidate->root; slot.get()->content = candidate->content;
         slot.get()->options = values;
+        slot.get()->content_insets = options.content_insets;
         return Ok(empty{});
     });
     auto target = context.target();
     context.on_mount([slot, target](CommittedContext &committed) mutable -> ComposeResult<EffectLease> {
         auto root = committed.resolve(target);
         if (root.is_err()) return Err(root.unwrap_err());
-        auto layout = committed.session().document().attach_layout<PopupLayout>(root.unwrap());
+        auto layout = committed.session().document().install_layout(root.unwrap(), PopupLayout{slot->content_insets});
         if (layout.is_err()) return Err(ComposeError(ComposeStage::Effect, Some(layout.unwrap_err())));
         auto bound = vui::Popup::bind(committed.session(), root.unwrap(), slot->content, slot->options);
         if (bound.is_err()) return Err(popup_error(bound.unwrap_err()));

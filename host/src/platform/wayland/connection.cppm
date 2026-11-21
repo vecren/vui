@@ -1,8 +1,5 @@
 module vui.host:platform.wayland.connection;
-import :ffi.wayland;
-import :platform.wayland.protocol.xdg_shell;
-import :platform.wayland.protocol.xdg_decoration;
-import :platform.wayland.protocol.fractional_scale;
+import :platform.wayland.ffi;
 import :platform.wayland.input;
 import :platform.wayland.outputs;
 import rstd;

@@ -46,7 +46,7 @@ class TextFieldState {
     TextEditState displayed_;
     Option<TextPlacement> placement_;
     Point origin_;
-    Rect caret_, selection_, underline_;
+    Rect content_clip_, caret_, selection_, underline_;
     Scalar offset_{};
     bool focused_{}, native_commit_{}, reset_requested_{};
     bool caret_visible_{true};

@@ -119,8 +119,9 @@ auto UiSession::resume_subcomposition(UiError error) -> Result<bool, SessionErro
     return Ok(dispatched.unwrap() != usize() || updates_.pending());
 }
 
-auto UiSession::settle_input(Size size, Serial sample_time, UpdateStats &stats)
+auto UiSession::settle_input(Size size, const FrameTiming &timing, UpdateStats &stats)
     -> Result<empty, SessionError> {
+    auto sample_time = timing.sample_time_ns();
     SubcompositionProgress progress;
     for (unsigned iteration{}; iteration < 16;) {
         ++iteration;
@@ -137,7 +138,7 @@ auto UiSession::settle_input(Size size, Serial sample_time, UpdateStats &stats)
             e.animation = Some(sampled.unwrap_err());
             return Err(rstd::move(e));
         }
-        auto driven = motion_.sample({sample_time, {}});
+        auto driven = motion_.sample(timing);
         if (driven.is_err())
             return Err(SessionError{SessionStage::Animation});
         auto callbacks = document_.dispatch_animation_callbacks();
@@ -201,7 +202,8 @@ auto UiSession::settle_input(Size size, Serial sample_time, UpdateStats &stats)
     return Err(SessionError{SessionStage::Limit});
 }
 
-auto UiSession::settle(Size size, Serial sample_time, UpdateStats &stats) -> Result<empty, SessionError> {
+auto UiSession::settle(Size size, const FrameTiming &timing, UpdateStats &stats) -> Result<empty, SessionError> {
+    auto sample_time = timing.sample_time_ns();
     SubcompositionProgress progress;
     for (unsigned iteration{}; iteration < 16;) {
         ++iteration;
@@ -218,7 +220,7 @@ auto UiSession::settle(Size size, Serial sample_time, UpdateStats &stats) -> Res
             error.animation = Some(sampled.unwrap_err());
             return Err(rstd::move(error));
         }
-        auto driven = motion_.sample({sample_time, {}});
+        auto driven = motion_.sample(timing);
         if (driven.is_err())
             return Err(SessionError{SessionStage::Animation});
         auto callbacks = document_.dispatch_animation_callbacks();
@@ -369,8 +371,7 @@ auto UiSession::advance_impl(slice<InputEvent> events, FrameTiming timing, Surfa
     };
     if (!surface.valid())
         return failure(SessionError{SessionStage::Surface});
-    if (timing.now_ns < last_time_ ||
-        (timing.expected_present_ns.is_some() && *timing.expected_present_ns < timing.now_ns))
+    if (timing.now_ns < last_timing_.now_ns)
         return failure(SessionError{SessionStage::Timing});
     if (!surface_ || *surface_ != surface) input_.completed_frame_ = None();
     advancing_ = true;
@@ -378,13 +379,13 @@ auto UiSession::advance_impl(slice<InputEvent> events, FrameTiming timing, Surfa
         bool &flag;
         ~Guard() { flag = false; }
     } guard{advancing_};
-    last_time_ = timing.now_ns;
+    auto sample_time = timing.sample_time_ns();
+    timing.sample_ns = Some(rstd::cmp::max(sample_time, document_.animation_sample_time().unwrap_or(0)));
+    last_timing_ = timing;
     UpdateStats stats;
     input_.begin_input_batch();
-    auto sample_time =
-        timing.expected_present_ns.is_some() ? *timing.expected_present_ns : timing.now_ns;
-    auto settled = events.is_empty() ? settle(surface.logical_size, sample_time, stats)
-                                     : settle_input(surface.logical_size, sample_time, stats);
+    auto settled = events.is_empty() ? settle(surface.logical_size, timing, stats)
+                                     : settle_input(surface.logical_size, timing, stats);
     if (settled.is_err())
         return failure(settled.unwrap_err());
     for (usize event_index{}; event_index < events.len();) {
@@ -444,12 +445,12 @@ auto UiSession::advance_impl(slice<InputEvent> events, FrameTiming timing, Surfa
         if (dispatched.is_err())
             return failure(
                 SessionError{SessionStage::Input, {}, Some(dispatched.unwrap_err())});
-        settled = settle_input(surface.logical_size, sample_time, stats);
+        settled = settle_input(surface.logical_size, timing, stats);
         if (settled.is_err())
             return failure(settled.unwrap_err());
     }
     if (!events.is_empty()) {
-        settled = settle(surface.logical_size, sample_time, stats);
+        settled = settle(surface.logical_size, timing, stats);
         if (settled.is_err())
             return failure(settled.unwrap_err());
     }
@@ -513,12 +514,13 @@ auto UiSession::plan_frame() -> Result<FramePlan, FrameError> {
         return Err(FrameError::Limit);
     planning_ = true;
     struct Guard {bool &value; ~Guard() {value = false;}} guard{planning_};
-    auto time = update_->animation_sample_time();
-    if (!time) return Err(FrameError::InvalidContent);
+    auto timing = last_timing_;
+    timing.sample_ns = update_->animation_sample_time();
+    if (timing.sample_ns.is_none()) return Err(FrameError::InvalidContent);
     auto refresh = [&]() -> Result<const UiUpdate *, FrameError> {
         if (document_.revision() != update_->revision() || document_.pending_mutations() != usize()) {
             UpdateStats stats;
-            auto settled = settle(surface_->logical_size, *time, stats);
+            auto settled = settle(surface_->logical_size, timing, stats);
             if (settled.is_err()) return Err(FrameError::InvalidContent);
         }
         return Ok(&*update_);

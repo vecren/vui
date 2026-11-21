@@ -6,7 +6,6 @@ module vui.host:platform;
 import :platform.win32;
 #elif RSTD_OS_MACOS
 import :platform.macos;
-#else
-import :platform.wayland;
-import :platform.x11;
+#elif RSTD_OS_LINUX
+import :platform.linux;
 #endif

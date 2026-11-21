@@ -25,7 +25,7 @@ auto frame_limit(int argc, char **argv, unsigned &limit) -> bool {
     return false;
 }
 class Application {
-    host::ThreadedApplication application_;
+    host::Application application_;
     Option<rstd::path::PathBuf> capture_path_;
 
     auto report(gpu::Error error) -> int {

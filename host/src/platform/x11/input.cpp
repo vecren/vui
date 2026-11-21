@@ -1,7 +1,7 @@
 module vui.host;
 import :platform.x11.input;
-import :ffi.x11;
-import :ffi.xi2;
+import :platform.x11.ffi.xlib;
+import :platform.x11.ffi.xi2;
 import :platform.input.clock;
 import vui.render;
 

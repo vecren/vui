@@ -33,7 +33,7 @@ auto analyze(ref<str> text, TextEditOptions options, bool limit = true) -> Resul
     return Ok(rstd::move(result).unwrap());
 }
 void clear_composition(TextEditState &state) {
-    state.display = state.text; state.composing = false; state.composition = {}; state.preedit_selection = None(); state.preedit_cursor = None(); state.caret = state.selection.cursor;
+    state.display = state.text; state.composing = false; state.composition = {}; state.preedit_selection = None(); state.preedit_cursor = None(); state.display_selection = None(); state.caret = state.selection.cursor;
 }
 }
 struct TextEdit::Impl {
@@ -192,8 +192,54 @@ auto TextEdit::apply_input_transaction(const TextInputTransaction &transaction) 
          transaction.expected_surrounding->anchor != next.selection.anchor ||
          transaction.expected_surrounding->cursor != next.selection.cursor))
         return Err(edit_error(TextError::InvalidValue));
+    if (transaction.editing.present()) {
+        const auto &editing = transaction.editing;
+        auto clean = normalized(editing.text.text(), data_->options);
+        if (clean.is_err()) return Err(clean.unwrap_err());
+        if (clean->as_str() != editing.text.text()) return Err(edit_error(TextError::InvalidValue));
+        auto display = clean->as_str() == next.display.text()
+            ? Result<TextBoundaries, TextEditError>(Ok(TextBoundaries(next.display)))
+            : analyze(clean->as_str(), data_->options, editing.composition.is_none());
+        if (display.is_err()) return Err(display.unwrap_err());
+        auto previous = next.text.text();
+        if (editing.composition.is_none()) {
+            bool changed = clean->as_str() != previous;
+            if (changed) next.text = rstd::move(display).unwrap();
+            next.selection = {editing.anchor, editing.cursor};
+            clear_composition(next);
+            next.caret = next.display.snap(editing.cursor, TextBoundaryBias::After).unwrap();
+            return data_->publish(rstd::move(next), changed ? Impl::History::Insert : Impl::History::None);
+        }
+        auto region = *editing.composition;
+        auto end = *region.end;
+        auto prefix = clean->as_str()->get(usize(), usize(region.start)).unwrap();
+        auto suffix = clean->as_str()->get(usize(end), clean->len()).unwrap();
+        ref<str> replacement = ""_str;
+        if (next.composing) {
+            auto selected = next.selection.range();
+            replacement = previous->get(usize(selected.start), usize(selected.end)).unwrap();
+        } else if (previous->len() >= prefix->len() + suffix->len() && previous->starts_with(prefix) && previous->ends_with(suffix)) {
+            replacement = previous->get(prefix->len(), previous->len() - suffix->len()).unwrap();
+        }
+        String committed = String::make(prefix);
+        committed.push_str(replacement); committed.push_str(suffix);
+        bool changed = committed.as_str() != previous;
+        if (changed) {
+            auto value = analyze(committed.as_str(), data_->options);
+            if (value.is_err()) return Err(value.unwrap_err());
+            next.text = rstd::move(value).unwrap();
+        }
+        next.selection = {region.start, region.start + Index(replacement->len().to_primitive())};
+        next.display = rstd::move(display).unwrap();
+        next.composing = true;
+        next.composition = {region.start, end};
+        next.preedit_cursor = None(); next.preedit_selection = None();
+        next.display_selection = Some(TextSelection{editing.anchor, editing.cursor});
+        next.caret = next.display.snap(editing.cursor, TextBoundaryBias::After).unwrap();
+        return data_->publish(rstd::move(next), changed ? Impl::History::Insert : Impl::History::None);
+    }
     if (!transaction.commit.present() && !transaction.delete_before && !transaction.delete_after &&
-        transaction.preedit.present() && next.composing &&
+        transaction.preedit.present() && next.composing && next.display_selection.is_none() &&
         next.preedit_cursor == transaction.preedit_cursor &&
         next.display.text()->get(usize(next.composition.start), usize(next.composition.end)).unwrap() == transaction.preedit.text())
         return Ok(false);

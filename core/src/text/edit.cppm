@@ -24,6 +24,7 @@ struct TextEditState {
     Index caret{};
     bool composing{}, can_undo{}, can_redo{};
     Option<TextPreeditCursor> preedit_cursor;
+    Option<TextSelection> display_selection;
     auto operator==(const TextEditState &) const -> bool = default;
     auto selected_text() const -> ref<str> {
         auto range = selection.range(); return text.text()->get(usize(range.start), usize(range.end)).unwrap();

@@ -66,4 +66,9 @@ struct ScrollElement {
     auto prepare(PrepareContext &context, Option<UiId> previous, NodeStyle style) -> ComposeResult<UiNodeRef>;
 };
 auto scroll_view(Element content, ScrollStyle scroll = {}, rstd::source_location source = rstd::source_location::current()) -> Element;
+struct ScrollbarElement {
+    ScrollbarOptions options;
+    auto prepare(PrepareContext &context, Option<UiId> previous, NodeStyle style) -> ComposeResult<UiNodeRef>;
+};
+auto scrollbar(Element thumb, ScrollbarOptions options = {}, rstd::source_location source = rstd::source_location::current()) -> Element;
 } // namespace vui::compose

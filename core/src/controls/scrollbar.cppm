@@ -15,6 +15,7 @@ struct ScrollbarOptions {
     Scalar track_quantum{};
     bool reverse_scroll{};
     auto valid() const -> bool;
+    auto operator==(const ScrollbarOptions &) const -> bool = default;
 };
 struct ScrollbarValue {
     Scalar position{}, size{1};
@@ -54,6 +55,7 @@ class ScrollbarState {
     MotionRegistration motion_;
     Signal<void(Scalar)> changed_;
     Binding lifetime_,metrics_,availability_;
+    Option<ViewportMetrics> last_metrics_;
     Serial generation_{};
     static auto bounded(Scalar value) -> Scalar {return value<0 ? 0 : value>1 ? 1 : value;}
     auto vertical() const -> bool {return options_.axis==ScrollbarAxis::Vertical;}
@@ -63,9 +65,11 @@ class ScrollbarState {
     void write(UiDocument &ui,UiId id,Scalar value);
     void page_at(UiId id,Point local,Size size);
     auto sample_repeat(UiId id,MotionContext &context) -> Result<MotionStatus,MotionError>;
+    auto connect_repeat(UiId id, bool enabled) -> Result<empty, ControlError>;
   public:
     ScrollbarState(UiSession &session,UiId handle,ScrollbarOptions options):session_(session),handle_(handle),options_(options),lifetime_(session.document().bindings().make()) {}
     auto connect(UiId id) -> Result<empty,ControlError>;
+    auto configure(UiId id, UiId handle, ScrollbarOptions options) -> Result<empty, ControlError>;
     auto thumb() const -> UiId {return handle_;}
     auto status() const -> ScrollbarStatus {return {value_,pointer_.is_some() && !repeating_,repeating_};}
     auto set_value(UiDocument &ui,UiId id,ScrollbarValue value) -> Result<empty,UiError> {return scroll_.valid() ? Result<empty,UiError>(Err(UiError::InvalidValue)) : set(ui,id,value);}
@@ -73,9 +77,9 @@ class ScrollbarState {
     auto on_changed(UiDocument &ui,auto callback) -> Result<Binding,ControlError> {
         auto binding=changed_.connect(ui.bindings(),rstd::move(callback));if (binding.is_err()) return Err(ControlError{Some(UiError::Limit),{}});return Ok(rstd::move(binding).unwrap());
     }
-    auto sync(UiDocument &ui,UiId id,const ViewportMetrics &metrics) -> Result<empty,UiError>;
+    auto sync(UiDocument &ui,UiId id,ViewportMetrics metrics) -> Result<empty,UiError>;
     auto bind_scroll(UiDocument &ui,UiId id,UiId scroll) -> Result<empty,UiError>;
-    void unbind_scroll() {metrics_.disconnect();scroll_={};++generation_;}
+    void unbind_scroll() {metrics_.disconnect();scroll_={};last_metrics_=None();++generation_;}
     void handle(EventContext &context,const RoutedEvent &event);
 };
 class Scrollbar {
