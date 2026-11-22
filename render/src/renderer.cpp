@@ -9,6 +9,7 @@ import :images;
 import :frame_resources;
 import :timestamps;
 import :visibility;
+import :effects.backdrop_blur;
 import :shaders;
 
 using namespace rstd::prelude;
@@ -59,17 +60,27 @@ auto Error::resource(Stage stage, vrento::resource::ResourceError cause) -> Erro
 }
 namespace {
 using CpuSample = vui::CpuTimer;
-enum class DrawKind { Rectangle, Composite, Glyph, Image, External };
+enum class DrawKind { Rectangle, Composite, Glyph, Image, External, BackdropFilter, BackdropComposite };
 auto pipeline_kind(DrawKind kind) -> DrawKind {
     return kind == DrawKind::External ? DrawKind::Image : kind;
 }
 struct PaintItem {
     DrawData data{};
     DrawKind kind{DrawKind::Rectangle};
-    Index clip{no_clip}, source_pass{}, resource_index{};
+    Index clip{no_clip}, source_target{}, resource_index{};
+    Index source_version{}, original_target{};
+    Scalar sigma{};
     ImageSampling sampling{ImageSampling::Linear};
     ImageBlend blend{ImageBlend::SourceOver};
     VkSampler sampler{};
+};
+struct DrawSegment {
+    Index target{}, version{};
+    rg::AttachmentLoad load{rg::AttachmentLoad::Clear};
+    bool effects{};
+};
+struct DrawSources {
+    vrento::fg::ResourceVersion primary{}, original{};
 };
 struct SampleBinding {
     DrawKind kind;
@@ -96,6 +107,7 @@ struct RecordContext {
     const vvk::DeviceDispatch &dispatch;
     VkPipelineLayout layout;
     VkPipeline rectangle, composite, glyph, image, additive, additive_rgb, plus;
+    VkPipeline backdrop_filter{}, backdrop_composite{};
 };
 struct PreparedDraw {
     VkDescriptorSet descriptor{};
@@ -130,7 +142,7 @@ struct FrameGpu {
 struct UiFrameData {
     rstd::sync::Arc<FrameGpu> gpu;
     Vec<PaintItem> items;
-    Vec<rg::ResourceId> sources;
+    Vec<DrawSources> sources;
     Index first{};
     DrawOptions options;
     rstd::sync::Arc<DrawStats> stats;
@@ -166,6 +178,7 @@ struct OwnedFrame {
         Option<vk::PreparedGraphProgram> program;
     } execution;
     Vec<Vec<PaintItem>> items;
+    Vec<DrawSegment> segments;
     Vec<Index> item_offsets;
     DrawOptions options;
     rstd::sync::Arc<DrawStats> stats{rstd::sync::Arc<DrawStats>::make()};
@@ -244,31 +257,47 @@ auto UiExecutor::prepare(const rg::PassExecutionInfo &pass, const vk::GraphBindi
     const auto &d = context.device.handle().Dispatch();
     draws.clear();
     VkImageView previous_view{};
+    VkImageView previous_original{};
     VkSampler previous_sampler{};
     Index instance = frame.first;
     usize paint_index{};
+    auto sampled_view = [&](vrento::fg::ResourceVersion source)
+        -> Result<VkImageView, vk::GraphExecutionError> {
+        bool declared{};
+        for (const auto &use : pass.uses)
+            declared |= use.resource == source.resource && use.version == source.version &&
+                        use.access == rg::GraphAccess::Read && use.usage == rg::PassUsage::Sampled;
+        auto bound = bindings.resolve(source.resource, source.version);
+        if (!declared || bound.is_none() || (*bound)->Texture().is_none())
+            return Err(vk::GraphExecutionError{vk::GraphExecutionStage::Prepare});
+        auto native = vk::native_view(*(*bound)->Texture());
+        if (native.is_err())
+            return Err(vk::GraphExecutionError{
+                vk::GraphExecutionStage::Prepare,
+                {},
+                source.resource,
+                vrento::vulkan::GraphExecutionCause::Texture(native.unwrap_err())});
+        return Ok(native.unwrap());
+    };
     for (const auto &paint : frame.items) {
         PreparedDraw item{{}, paint.kind, instance++, 1, paint.blend};
-        VkImageView source_view{};
-        auto source = frame.sources[paint_index++];
+        VkImageView source_view{}, original_view{};
+        auto sources = frame.sources[paint_index++];
         if (item.kind != DrawKind::Rectangle) {
-            bool declared{};
-            for (const auto &use : pass.uses)
-                declared |= use.resource == source && use.access == rg::GraphAccess::Read;
-            auto bound = bindings.resolve(source);
-            if (!declared || bound.is_none() || (*bound)->Texture().is_none())
-                return Err(vk::GraphExecutionError{vk::GraphExecutionStage::Prepare});
-            auto native = vk::native_view(*(*bound)->Texture());
-            if (native.is_err())
-                return Err(vk::GraphExecutionError{
-                    vk::GraphExecutionStage::Prepare,
-                    {},
-                    source,
-                    vrento::vulkan::GraphExecutionCause::Texture(native.unwrap_err())});
-            source_view = native.unwrap();
+            auto view = sampled_view(sources.primary);
+            if (view.is_err())
+                return Err(view.unwrap_err());
+            source_view = view.unwrap();
+        }
+        if (item.kind == DrawKind::BackdropComposite) {
+            auto view = sampled_view(sources.original);
+            if (view.is_err())
+                return Err(view.unwrap_err());
+            original_view = view.unwrap();
         }
         auto sampler =
-            paint.kind == DrawKind::Glyph ||
+            paint.kind == DrawKind::Glyph || paint.kind == DrawKind::BackdropFilter ||
+                    paint.kind == DrawKind::BackdropComposite ||
                     ((paint.kind == DrawKind::Image || paint.kind == DrawKind::External) &&
                      paint.sampling == ImageSampling::Linear)
                 ? context.glyph_sampler
@@ -283,7 +312,7 @@ auto UiExecutor::prepare(const rg::PassExecutionInfo &pass, const vk::GraphBindi
             else if (pipeline_kind(previous.kind) != pipeline_kind(item.kind) ||
                      previous.blend != item.blend)
                 ++frame.stats->pipeline_breaks;
-            else if (previous_view != source_view)
+            else if (previous_view != source_view || previous_original != original_view)
                 ++frame.stats->texture_breaks;
             else if (previous_sampler != sampler)
                 ++frame.stats->sampler_breaks;
@@ -294,6 +323,7 @@ auto UiExecutor::prepare(const rg::PassExecutionInfo &pass, const vk::GraphBindi
             }
         }
         previous_view = source_view;
+        previous_original = original_view;
         previous_sampler = sampler;
         ++frame.stats->batches;
         VkDescriptorSetAllocateInfo allocate{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
@@ -310,7 +340,7 @@ auto UiExecutor::prepare(const rg::PassExecutionInfo &pass, const vk::GraphBindi
                 vrento::vulkan::GraphExecutionCause::Native(allocation_result)});
         VkDescriptorBufferInfo buffer{frame.gpu->clips.handle(), 0, VK_WHOLE_SIZE};
         VkDescriptorBufferInfo instances{frame.gpu->instances.handle(), 0, VK_WHOLE_SIZE};
-        VkWriteDescriptorSet writes[3]{};
+        VkWriteDescriptorSet writes[4]{};
         writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         writes[0].dstSet = item.descriptor;
         writes[0].dstBinding = 1;
@@ -321,6 +351,8 @@ auto UiExecutor::prepare(const rg::PassExecutionInfo &pass, const vk::GraphBindi
         writes[1].dstBinding = 2;
         writes[1].pBufferInfo = &instances;
         VkDescriptorImageInfo image{sampler, source_view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+        VkDescriptorImageInfo original{context.sampler, original_view,
+                                       VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
         if (item.kind != DrawKind::Rectangle) {
             writes[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             writes[2].dstSet = item.descriptor;
@@ -329,8 +361,13 @@ auto UiExecutor::prepare(const rg::PassExecutionInfo &pass, const vk::GraphBindi
             writes[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
             writes[2].pImageInfo = &image;
         }
-        d.vkUpdateDescriptorSets(*context.device.handle(), item.kind != DrawKind::Rectangle ? 3 : 2,
-                                 writes, 0, nullptr);
+        if (original_view) {
+            writes[3] = writes[2];
+            writes[3].dstBinding = 3;
+            writes[3].pImageInfo = &original;
+        }
+        d.vkUpdateDescriptorSets(*context.device.handle(),
+                                 original_view ? 4 : source_view ? 3 : 2, writes, 0, nullptr);
         draws.push(rstd::move(item));
     }
     return Ok(empty{});
@@ -343,6 +380,8 @@ auto UiExecutor::record(RecordContext &context) const -> Result<empty, vk::Graph
                                 ? (draw.blend == ImageBlend::Plus ? context.plus : draw.blend == ImageBlend::AdditiveRgb ? context.additive_rgb : draw.blend == ImageBlend::Additive ? context.additive : context.image)
                             : draw.kind == DrawKind::Glyph     ? context.glyph
                             : draw.kind == DrawKind::Composite ? context.composite
+                            : draw.kind == DrawKind::BackdropFilter ? context.backdrop_filter
+                            : draw.kind == DrawKind::BackdropComposite ? context.backdrop_composite
                                                                : context.rectangle);
         d.vkCmdBindDescriptorSets(context.command, VK_PIPELINE_BIND_POINT_GRAPHICS, context.layout,
                                   0, 1, &draw.descriptor, 0, nullptr);
@@ -351,6 +390,8 @@ auto UiExecutor::record(RecordContext &context) const -> Result<empty, vk::Graph
     return Ok(empty{});
 }
 constexpr rg::GraphSerial ui_kind = 0x5655494452415701ull;
+constexpr rg::GraphSerial ui_effect_kind = 0x5655494452415702ull;
+constexpr usize ui_pipeline_count{7};
 struct UiAssets {
     vk::DeviceSession session;
     vrento::resource_registry::DescriptorLayoutRegistry &descriptors;
@@ -375,6 +416,10 @@ struct UiAssets {
         return *(**descriptors.Resolve(layout->physical->descriptor_layouts[usize()])).layout;
     }
     auto initialize(vk::PipelinePreparationMode) -> Result<empty, Error>;
+    auto register_backdrop() -> Result<empty, Error>;
+    template <class Shader>
+    auto register_pipeline(const Shader &, ImageBlend, bool replace)
+        -> Result<empty, Error>;
 };
 struct UiPrepared {
     rstd::sync::Arc<FrameGpu> gpu;
@@ -419,7 +464,9 @@ struct UiPassFactory {
         Vec<vrento::resource_registry::PipelineResourceResult> pipelines;
         vk::RenderPassResourceDesc signature;
         signature.color_format = desc.format;
-        for (const auto &recipe : assets->recipes) {
+        const auto count = description.kind == ui_effect_kind ? assets->recipes.len() : ui_pipeline_count;
+        for (usize i{}; i < count; ++i) {
+            const auto &recipe = assets->recipes[i];
             auto prepared = assets->preparation->prepare(recipe, signature);
             if (prepared.is_err())
                 return Err(vk::GraphExecutionError{
@@ -457,12 +504,14 @@ struct ScopeBackend {
 auto resolve_items(OwnedFrame &frame, GlyphCache &cache, ImageCache &images, Index max_extent,
                    const vk::DeviceSession &session) -> Result<empty, Error> {
     auto surface = frame.plan.surface();
-    auto raster_scale = rstd::cmp::max(Scalar(frame.extent.width) / surface.logical_size.width,
-                                 Scalar(frame.extent.height) / surface.logical_size.height);
+    const auto scale_x = frame.extent.width / surface.logical_size.width;
+    const auto scale_y = frame.extent.height / surface.logical_size.height;
+    auto raster_scale = rstd::cmp::max(scale_x, scale_y);
     if (!finite(raster_scale) || raster_scale <= 0)
         return Err(Error{Stage::State});
-    auto coverage_scale = rstd::cmp::min(Scalar(frame.extent.width) / surface.logical_size.width,
-                                   Scalar(frame.extent.height) / surface.logical_size.height);
+    auto coverage_scale = rstd::cmp::min(scale_x, scale_y);
+    const auto raster_x = frame.extent.width / static_cast<float>(surface.logical_size.width);
+    const auto raster_y = frame.extent.height / static_cast<float>(surface.logical_size.height);
     Serial total{};
     for (usize pass{}; pass < frame.plan.pass_count(); ++pass) {
         Vec<PaintItem> items;
@@ -471,6 +520,8 @@ auto resolve_items(OwnedFrame &frame, GlyphCache &cache, ImageCache &images, Ind
             item.data.surface[0] = static_cast<float>(surface.logical_size.width);
             item.data.surface[1] = static_cast<float>(surface.logical_size.height);
             item.data.surface[2] = static_cast<float>(coverage_scale);
+            item.data.row0[3] = raster_x;
+            item.data.row1[3] = raster_y;
             auto color = [&](Color c) {
                 item.data.color[0] = c.r;
                 item.data.color[1] = c.g;
@@ -484,10 +535,20 @@ auto resolve_items(OwnedFrame &frame, GlyphCache &cache, ImageCache &images, Ind
                 transform_values(item.data, value.transform);
                 item.data.params[0] = static_cast<float>(value.radius);
                 item.clip = value.clip;
+            } else if (draw.is_BackdropBlur()) {
+                const auto &value = draw.as_BackdropBlur();
+                if (value.transform.inverse().is_none())
+                    continue;
+                item.kind = DrawKind::BackdropComposite;
+                item.sigma = value.sigma;
+                rectangle_values(item.data.rect, value.mask.rect);
+                transform_values(item.data, value.transform);
+                item.data.params[0] = static_cast<float>(value.mask.radius);
+                item.clip = value.clip;
             } else if (draw.is_Composite()) {
                 const auto &value = draw.as_Composite();
                 item.kind = DrawKind::Composite;
-                item.source_pass = value.source_pass;
+                item.source_target = value.source_pass;
                 item.data.params[3] = 1;
                 item.data.params[1] = static_cast<float>(value.opacity);
                 rectangle_values(item.data.rect,
@@ -661,9 +722,7 @@ auto cull_items(OwnedFrame &frame, slice<GpuClip> clips) -> Result<empty, Error>
                 auto clip = item.clip;
                 while (clip != no_clip) {
                     const auto &value = clips[usize(clip)];
-                    if (visibility::clipped(pixels, value,
-                                            frame.extent.width / item.data.surface[0],
-                                            frame.extent.height / item.data.surface[1])) {
+                    if (visibility::clipped(pixels, value, item.data.row0[3], item.data.row1[3])) {
                         discard = true;
                         ++frame.stats->clip_culled;
                         break;
@@ -675,6 +734,120 @@ auto cull_items(OwnedFrame &frame, slice<GpuClip> clips) -> Result<empty, Error>
                 visible.push(rstd::move(item));
         }
         items = rstd::move(visible);
+    }
+    return Ok(empty{});
+}
+
+auto segment_draws(OwnedFrame &frame, vk::TextureContext &textures, slice<GpuClip> clips,
+                   rg::AttachmentLoad root_load) -> Result<empty, Error> {
+    auto logical_items = rstd::move(frame.items);
+    Vec<Index> final_versions;
+    for (usize i{}; i < logical_items.len(); ++i)
+        final_versions.push(0u);
+    auto emit = [&](DrawSegment segment, Vec<PaintItem> items) {
+        frame.segments.push(rstd::move(segment));
+        frame.items.push(rstd::move(items));
+    };
+    auto emit_filter = [&](DrawData data, Index target, Index source, Index version) {
+        PaintItem paint;
+        paint.data = data;
+        paint.kind = DrawKind::BackdropFilter;
+        paint.source_target = source;
+        paint.source_version = version;
+        Vec<PaintItem> items;
+        items.push(rstd::move(paint));
+        emit({target, 1, rg::AttachmentLoad::Clear, true}, rstd::move(items));
+    };
+    Serial remaining_samples = backdrop_sample_budget;
+    for (auto i = logical_items.len(); i > usize(); --i) {
+        auto index = i - usize(1);
+        auto target = static_cast<Index>(index.to_primitive());
+        const auto &attachment = frame.gpu->targets[index];
+        const auto desc = attachment.image.description();
+        const auto view = attachment.view.description();
+        const bool sampled = tex::has(desc.usage, tex::Usage::Sampled) &&
+                             view.dimension == tex::Dimension::D2 &&
+                             view.range.mip_count == 1 && view.range.layer_count == 1;
+        DrawSegment segment{target, 1, target ? rg::AttachmentLoad::Clear : root_load};
+        bool has_blur{};
+        for (auto &paint : logical_items[index]) {
+            if (paint.kind == DrawKind::Composite)
+                paint.source_version = final_versions[usize(paint.source_target)];
+            has_blur |= paint.kind == DrawKind::BackdropComposite;
+        }
+        if (!has_blur) {
+            final_versions[index] = segment.version;
+            emit(segment, rstd::move(logical_items[index]));
+            continue;
+        }
+        Vec<PaintItem> items;
+        for (auto &paint : logical_items[index]) {
+            if (paint.kind != DrawKind::BackdropComposite) {
+                items.push(rstd::move(paint));
+                continue;
+            }
+            if (!sampled) {
+                ++frame.stats->backdrop_unavailable;
+                continue;
+            }
+            auto blur = BackdropBlur::plan(paint.data, paint.sigma, frame.plan.surface().logical_size,
+                                          frame.extent, clips, paint.clip);
+            if (!blur)
+                continue;
+            if (blur->samples > remaining_samples) {
+                ++frame.stats->backdrop_budget_skips;
+                continue;
+            }
+            Vec<Target> allocated;
+            VkExtent2D extents[]{blur->capture, blur->filtered, blur->filtered};
+            for (auto extent : extents) {
+                auto scratch = frame.gpu->resources->target(textures, extent, desc.format);
+                if (scratch.is_err()) {
+                    auto error = scratch.unwrap_err();
+                    for (auto &entry : allocated)
+                        frame.gpu->resources->release(rstd::move(entry), true);
+                    allocated.clear();
+                    if (error.stage != Stage::FrameResourceLimit)
+                        return Err(error);
+                    ++frame.stats->backdrop_budget_skips;
+                    break;
+                }
+                allocated.push(scratch.unwrap());
+            }
+            if (allocated.is_empty())
+                continue;
+            auto original = static_cast<Index>(frame.gpu->targets.len().to_primitive());
+            for (auto &entry : allocated) {
+                frame.gpu->targets.push(rstd::move(entry));
+                frame.textures.push(rg::ResourceId{});
+            }
+            emit(segment, rstd::move(items));
+            items = {};
+            DrawData snapshot{}, horizontal{}, vertical{};
+            blur->snapshot(snapshot);
+            blur->filter(horizontal, false);
+            blur->filter(vertical, true);
+            emit_filter(snapshot, original, target, segment.version);
+            emit_filter(horizontal, original + 1, original, 1);
+            emit_filter(vertical, original + 2, original + 1, 1);
+            ++segment.version;
+            segment.load = rg::AttachmentLoad::Load;
+            segment.effects = true;
+            blur->composite(paint.data);
+            paint.original_target = original;
+            paint.source_target = original + 2;
+            paint.source_version = 1;
+            items.push(rstd::move(paint));
+            remaining_samples -= blur->samples;
+            ++frame.stats->backdrop_captures;
+            frame.stats->backdrop_capture_pixels += Serial(blur->capture.width) * blur->capture.height;
+            frame.stats->backdrop_filter_pixels += Serial(blur->filtered.width) * blur->filtered.height * 2;
+            frame.stats->backdrop_filter_passes += 2;
+            if (blur->filtered.width != blur->capture.width || blur->filtered.height != blur->capture.height)
+                ++frame.stats->backdrop_downsampled;
+        }
+        final_versions[index] = segment.version;
+        emit(segment, rstd::move(items));
     }
     return Ok(empty{});
 }
@@ -791,6 +964,10 @@ auto UiDrawPass::Instantiate(const vk::GraphPrepareContext &inputs,
                          *(*pipelines)[usize(4)].pipeline->pipeline.handle,
                          *(*pipelines)[usize(5)].pipeline->pipeline.handle,
                          *(*pipelines)[usize(6)].pipeline->pipeline.handle};
+    if (description.kind == ui_effect_kind) {
+        native.backdrop_filter = *(*pipelines)[usize(7)].pipeline->pipeline.handle;
+        native.backdrop_composite = *(*pipelines)[usize(8)].pipeline->pipeline.handle;
+    }
     return Ok(rstd::sync::Arc<dyn<vk::VulkanPass>>::make(
         UiPrepared{context.frame.gpu.clone(), assets.clone(), pipelines.clone(),
                    rstd::move(executor), native}));
@@ -819,6 +996,8 @@ auto UiAssets::initialize(vk::PipelinePreparationMode mode) -> Result<empty, Err
         {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});
     set.bindings.push({2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});
+    set.bindings.push(
+        {3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});
     request.descriptor_sets.push(rstd::move(set));
     auto created = layouts.Ensure(session.device(), request, descriptors);
     if (created.is_err())
@@ -836,51 +1015,8 @@ auto UiAssets::initialize(vk::PipelinePreparationMode mode) -> Result<empty, Err
     result = session.device().handle().CreateSampler(sample, glyph_sampler);
     if (result != VK_SUCCESS)
         return Err(Error{Stage::Pipeline, result});
-    auto add = [&](const auto &fragment, ImageBlend blend = ImageBlend::SourceOver) -> Result<empty, Error> {
-        vk::GraphicsPipeline defaults;
-        vk::PipelineResourceRequest description;
-        description.pipeline_layout = layout->handle;
-        description.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-        description.depth = defaults.depth;
-        description.raster = defaults.raster;
-        description.multisample = defaults.multisample;
-        description.color_format = format;
-        description.color_load_op = VK_ATTACHMENT_LOAD_OP_CLEAR;
-        description.color_initial_layout = description.color_final_layout =
-            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-        description.color_blend.blendEnable = VK_TRUE;
-        description.color_blend.srcColorBlendFactor = description.color_blend.srcAlphaBlendFactor =
-            VK_BLEND_FACTOR_ONE;
-        description.color_blend.dstColorBlendFactor = description.color_blend.dstAlphaBlendFactor =
-            VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-        if (blend == ImageBlend::Additive || blend == ImageBlend::AdditiveRgb || blend == ImageBlend::Plus) {
-            description.color_blend.dstColorBlendFactor = description.color_blend.dstAlphaBlendFactor =
-                VK_BLEND_FACTOR_ONE;
-            if (blend != ImageBlend::Plus) description.color_blend.srcAlphaBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
-        }
-        description.color_blend.colorBlendOp = description.color_blend.alphaBlendOp =
-            VK_BLEND_OP_ADD;
-        description.color_blend.colorWriteMask = 15;
-        if (blend == ImageBlend::AdditiveRgb) description.color_blend.colorWriteMask = 7;
-        description.shader_stages.push(ui_shader(shaders::quad.words, vrento::ShaderType::VERTEX));
-        description.shader_stages.push(ui_shader(fragment.words, vrento::ShaderType::FRAGMENT));
-        auto signature = vk::MakeRenderPassResourceDesc(description);
-        auto recipe = pipelines.RegisterRecipe(rstd::move(description), layouts);
-        if (recipe.is_none())
-            return Err(Error{Stage::Pipeline});
-        auto handle = recipe.unwrap();
-        recipes.push(vrento::resource::PipelineRecipeHandle(handle));
-        auto pipeline = preparation->prepare(handle, signature);
-        if (pipeline.is_err())
-            return Err(Error::resource(Stage::Pipeline, pipeline.unwrap_err()));
-        auto value = pipeline.unwrap();
-        if (value.error)
-            return Err(Error::resource(Stage::Pipeline, value.error.take().unwrap()));
-        if (value.status == vk::PipelineReadiness::Failed)
-            return Err(Error{Stage::Pipeline});
-        if (value.pipeline)
-            warmed.push(value.pipeline.take().unwrap());
-        return Ok(empty{});
+    auto add = [&](const auto &fragment, ImageBlend blend = ImageBlend::SourceOver) {
+        return register_pipeline(fragment, blend, false);
     };
     auto rectangle = add(shaders::rectangle);
     if (rectangle.is_err())
@@ -899,6 +1035,69 @@ auto UiAssets::initialize(vk::PipelinePreparationMode mode) -> Result<empty, Err
     auto rgb = add(shaders::image, ImageBlend::AdditiveRgb);
     if (rgb.is_err()) return rgb;
     return add(shaders::image, ImageBlend::Plus);
+}
+
+template <class Shader>
+auto UiAssets::register_pipeline(const Shader &fragment, ImageBlend blend, bool replace)
+    -> Result<empty, Error> {
+    vk::GraphicsPipeline defaults;
+    vk::PipelineResourceRequest description;
+    description.pipeline_layout = layout->handle;
+    description.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    description.depth = defaults.depth;
+    description.raster = defaults.raster;
+    description.multisample = defaults.multisample;
+    description.color_format = format;
+    description.color_load_op = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    description.color_initial_layout = description.color_final_layout =
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    description.color_blend.blendEnable = replace ? VK_FALSE : VK_TRUE;
+    description.color_blend.srcColorBlendFactor = description.color_blend.srcAlphaBlendFactor =
+        VK_BLEND_FACTOR_ONE;
+    description.color_blend.dstColorBlendFactor = description.color_blend.dstAlphaBlendFactor =
+        VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    if (blend == ImageBlend::Additive || blend == ImageBlend::AdditiveRgb || blend == ImageBlend::Plus) {
+        description.color_blend.dstColorBlendFactor = description.color_blend.dstAlphaBlendFactor =
+            VK_BLEND_FACTOR_ONE;
+        if (blend != ImageBlend::Plus) description.color_blend.srcAlphaBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+    }
+    description.color_blend.colorBlendOp = description.color_blend.alphaBlendOp =
+        VK_BLEND_OP_ADD;
+    description.color_blend.colorWriteMask = 15;
+    if (blend == ImageBlend::AdditiveRgb) description.color_blend.colorWriteMask = 7;
+    description.shader_stages.push(ui_shader(shaders::quad.words, vrento::ShaderType::VERTEX));
+    description.shader_stages.push(ui_shader(fragment.words, vrento::ShaderType::FRAGMENT));
+    const auto signature = vk::MakeRenderPassResourceDesc(description);
+    auto recipe = pipelines.RegisterRecipe(rstd::move(description), layouts);
+    if (recipe.is_none())
+        return Err(Error{Stage::Pipeline});
+    auto handle = recipe.unwrap();
+    recipes.push(vrento::resource::PipelineRecipeHandle(handle));
+    if (replace)
+        return Ok(empty{});
+    auto pipeline = preparation->prepare(handle, signature);
+    if (pipeline.is_err())
+        return Err(Error::resource(Stage::Pipeline, pipeline.unwrap_err()));
+    auto value = pipeline.unwrap();
+    if (value.error)
+        return Err(Error::resource(Stage::Pipeline, value.error.take().unwrap()));
+    if (value.status == vk::PipelineReadiness::Failed)
+        return Err(Error{Stage::Pipeline});
+    if (value.pipeline)
+        warmed.push(value.pipeline.take().unwrap());
+    return Ok(empty{});
+}
+
+auto UiAssets::register_backdrop() -> Result<empty, Error> {
+    if (recipes.len() != ui_pipeline_count)
+        return Ok(empty{});
+    auto filter = register_pipeline(shaders::backdrop_filter, ImageBlend::SourceOver, true);
+    if (filter.is_err())
+        return Err(filter.unwrap_err());
+    auto composite = register_pipeline(shaders::backdrop_composite, ImageBlend::SourceOver, true);
+    if (composite.is_err())
+        pipelines.ReleaseRecipe(recipes.pop().unwrap());
+    return composite;
 }
 } // namespace
 
@@ -944,6 +1143,7 @@ struct Renderer::Impl {
     }
     rstd::sync::Arc<FrameResources> frame_resources{rstd::sync::Arc<FrameResources>::make()};
     Option<rstd::sync::Arc<OwnedFrame>> frame;
+    Option<DrawStats> recorded_stats;
     struct PresentSync {
         vvk::Semaphore semaphore;
         vvk::Fence fence;
@@ -1124,6 +1324,7 @@ struct Renderer::Impl {
     void clear_resources() {
         textures = None();
         frame = None();
+        recorded_stats = None();
         scopes = vk::GraphicsScopeCache{};
         frame_resources->clear();
         presents.clear();
@@ -1316,6 +1517,7 @@ auto Renderer::record(tex::Submission &work, FramePlan plan, tex::TextureViewRef
         Result<empty, Error> failed = Err(result);
         return self.observe_result(rstd::move(failed));
     }
+    self.recorded_stats = Some(DrawStats(*frame->stats));
     return Ok(empty{});
 }
 auto Renderer::prepare_impl(FramePlan plan, DrawOptions options,
@@ -1459,6 +1661,15 @@ auto Renderer::prepare_impl(FramePlan plan, DrawOptions options,
         frame.gpu->targets.push(target.unwrap());
         frame.textures.push(rg::ResourceId{});
     }
+    auto segmented = segment_draws(frame, *self.textures, clip_data.as_slice(),
+                                   target_override ? load : rg::AttachmentLoad::Clear);
+    if (segmented.is_err())
+        return segmented;
+    if (frame.stats->backdrop_captures) {
+        auto registered = (*self.assets)->register_backdrop();
+        if (registered.is_err())
+            return registered;
+    }
     if (clip_data.is_empty())
         clip_data.push(GpuClip{});
     auto buffer_bytes = clip_data.len().to_primitive() * sizeof(GpuClip);
@@ -1519,12 +1730,12 @@ auto Renderer::prepare_impl(FramePlan plan, DrawOptions options,
         frame.gpu->readback = allocation.unwrap();
     }
     unsigned count{};
-    for (usize pass{}; pass < frame.plan.pass_count(); ++pass)
-        count += static_cast<unsigned>(frame.items[pass].len().to_primitive());
+    for (const auto &items : frame.items)
+        count += static_cast<unsigned>(items.len().to_primitive());
     if (!count)
         count = 1;
     VkDescriptorPoolSize pool_sizes[]{{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, count * 2},
-                                      {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, count}};
+                                      {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, count * 2}};
     VkDescriptorPoolCreateInfo pool_info{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     pool_info.maxSets = count;
     pool_info.poolSizeCount = 2;
@@ -1584,15 +1795,16 @@ auto Renderer::prepare_impl(FramePlan plan, DrawOptions options,
     auto instances = host_buffer(frame.gpu->instances);
     for (auto &page : frame.samples)
         page.texture = texture(page.gpu->view, true);
-    for (auto i = frame.plan.pass_count(); i > usize(); --i) {
-        auto index = static_cast<Index>((i - usize(1)).to_primitive());
+    for (usize index{}; index < frame.segments.len(); ++index) {
+        const auto &segment = frame.segments[index];
+        auto target = frame.textures[usize(segment.target)];
         rg::PassExecutionInfo pass;
-        pass.id = {rg::GraphSerial(index) + 2};
-        pass.kind = ui_kind;
-        if (!index && target_override && load == rg::AttachmentLoad::Load)
-            pass.uses.push({frame.textures[usize(index)], 0, rg::GraphAccess::Read,
+        pass.id = {index.to_primitive() + 2};
+        pass.kind = segment.effects ? ui_effect_kind : ui_kind;
+        if (segment.load == rg::AttachmentLoad::Load)
+            pass.uses.push({target, segment.version - 1, rg::GraphAccess::Read,
                             rg::PassUsage::ColorAttachment, rg::PassStages::Color});
-        pass.uses.push({frame.textures[usize(index)], 1, rg::GraphAccess::Write,
+        pass.uses.push({target, segment.version, rg::GraphAccess::Write,
                         rg::PassUsage::ColorAttachment, rg::PassStages::Color});
         pass.uses.push(buffer_read(clips, frame.gpu->clips.capacity, rg::PassUsage::Storage,
                                    rg::PassStages::Fragment));
@@ -1600,7 +1812,7 @@ auto Renderer::prepare_impl(FramePlan plan, DrawOptions options,
                                    rg::PassStages::Vertex | rg::PassStages::Fragment));
         auto sample = [&](rg::ResourceId id, rg::GraphIndex version) {
             for (const auto &use : pass.uses)
-                if (use.resource == id)
+                if (use.resource == id && use.version == version && use.usage == rg::PassUsage::Sampled)
                     return;
             rg::PassResourceUse use{id,version,rg::GraphAccess::Read,rg::PassUsage::Sampled,rg::PassStages::Fragment};
             for(const auto &resource:graph.resources)if(resource.id==id){
@@ -1626,13 +1838,15 @@ auto Renderer::prepare_impl(FramePlan plan, DrawOptions options,
                 sample(external.texture, 0);
                 break;
             }
-        for (const auto &item : frame.items[usize(index)])
-            if (item.kind == DrawKind::Composite)
-                sample(frame.textures[usize(item.source_pass)], 1);
+        for (const auto &item : frame.items[index]) {
+            if (item.kind == DrawKind::Composite || item.kind == DrawKind::BackdropFilter ||
+                item.kind == DrawKind::BackdropComposite)
+                sample(frame.textures[usize(item.source_target)], item.source_version);
+            if (item.kind == DrawKind::BackdropComposite)
+                sample(frame.textures[usize(item.original_target)], 1);
+        }
         rg::GraphicsDescription graphics;
-        graphics.color =
-            Some(rg::GraphAttachment{frame.textures[usize(index)], 1,
-                                     !index && target_override ? load : rg::AttachmentLoad::Clear});
+        graphics.color = Some(rg::GraphAttachment{target, segment.version, segment.load});
         pass.graphics = Some(graphics);
         graph.passes.push(rstd::move(pass));
     }
@@ -1666,7 +1880,7 @@ auto Renderer::prepare_impl(FramePlan plan, DrawOptions options,
                     bool inherits = pass.graphics && pass.graphics->color &&
                                     pass.graphics->color->load == rg::AttachmentLoad::Load;
                     auto output =
-                        builder.reserve_write(pass.id, {use.resource, 0}, inherits, inherits);
+                        builder.reserve_write(pass.id, {use.resource, use.version - 1}, inherits, inherits);
                     if (output.is_err())
                         return Err(Error::graph(output.unwrap_err()));
                 }
@@ -1678,7 +1892,7 @@ auto Renderer::prepare_impl(FramePlan plan, DrawOptions options,
             for (const auto &resource : graph.resources)
                 if (resource.id == target_id)
                     desc.format = resource.format;
-            desc.io.kind = ui_kind;
+            desc.io.kind = pass.kind;
             desc.io.graphics = pass.graphics;
             for (const auto &use : pass.uses) {
                 auto content = vrento::pass::ContentRef::bind(builder, {use.resource, use.version});
@@ -1691,8 +1905,9 @@ auto Renderer::prepare_impl(FramePlan plan, DrawOptions options,
                     desc.io.outputs.push(rstd::move(value));
             }
             if (pass.graphics->color->load == rg::AttachmentLoad::Load) {
-                auto previous = vrento::pass::ContentRef::bind(builder, {target_id, 0}).unwrap();
-                auto output = vrento::pass::ContentRef::bind(builder, {target_id, 1}).unwrap();
+                auto version = pass.graphics->color->version;
+                auto previous = vrento::pass::ContentRef::bind(builder, {target_id, version - 1}).unwrap();
+                auto output = vrento::pass::ContentRef::bind(builder, {target_id, version}).unwrap();
                 desc.io.storage.push({rstd::move(output), rstd::move(previous)});
             }
             auto published = vk::declare_input(builder, pass.id, rstd::move(desc));
@@ -1717,24 +1932,27 @@ auto Renderer::prepare_impl(FramePlan plan, DrawOptions options,
     }
     auto compiled = self.compiler->compiled().unwrap();
     Vec<vk::PassFrameBinding> inputs;
-    for (Index index{}; index < frame.plan.pass_count().to_primitive(); ++index) {
+    for (usize index{}; index < frame.segments.len(); ++index) {
         UiFrameData data{
-            frame.gpu.clone(),  {}, {}, frame.item_offsets[usize(index)], frame.options,
+            frame.gpu.clone(),  {}, {}, frame.item_offsets[index], frame.options,
             frame.stats.clone()};
-        data.items = rstd::move(frame.items[usize(index)]);
+        data.items = rstd::move(frame.items[index]);
         for (const auto &paint : data.items) {
-            rg::ResourceId source{};
-            if (paint.kind == DrawKind::Composite)
-                source = frame.textures[usize(paint.source_pass)];
+            DrawSources sources;
+            if (paint.kind == DrawKind::Composite || paint.kind == DrawKind::BackdropFilter ||
+                paint.kind == DrawKind::BackdropComposite)
+                sources.primary = {frame.textures[usize(paint.source_target)], paint.source_version};
             else if (paint.kind == DrawKind::External)
-                source = frame.externals[usize(paint.resource_index)].texture;
+                sources.primary.resource = frame.externals[usize(paint.resource_index)].texture;
             else if (paint.kind == DrawKind::Glyph || paint.kind == DrawKind::Image)
                 for (const auto &sample : frame.samples)
                     if (sample.kind == paint.kind && sample.cache_index == paint.resource_index)
-                        source = sample.texture;
-            data.sources.push(rg::ResourceId(source));
+                        sources.primary.resource = sample.texture;
+            if (paint.kind == DrawKind::BackdropComposite)
+                sources.original = {frame.textures[usize(paint.original_target)], 1};
+            data.sources.push(rstd::move(sources));
         }
-        auto input = compiled.frame<UiDrawPass>({Serial(index) + 2}, 1, rstd::move(data));
+        auto input = compiled.frame<UiDrawPass>({index.to_primitive() + 2}, 1, rstd::move(data));
         if (input.is_err())
             return Err(Error::graph(input.unwrap_err()));
         inputs.push(input.unwrap());
@@ -1790,6 +2008,7 @@ auto Renderer::prepare_impl(FramePlan plan, DrawOptions options,
         return fail(Stage::Pending, VK_NOT_READY);
     frame.execution.program = Some(program->take_ready());
     self.frame = Some(rstd::move(candidate));
+    self.recorded_stats = None();
     if (prepare_start.is_some())
         frame.timings.prepare = {1, elapsed_nanoseconds(*prepare_start)};
     self.state = Impl::State::Prepared;
@@ -2398,7 +2617,7 @@ auto Renderer::renderer_statistics() const -> vk::RendererStatistics {
 }
 auto Renderer::draw_stats() const -> Option<DrawStats> {
     if (impl_->frame.is_none())
-        return None();
+        return impl_->recorded_stats;
     return Some(DrawStats(*(**impl_->frame).stats));
 }
 auto Renderer::image_cache_stats() const -> ImageCacheStats {

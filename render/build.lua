@@ -14,6 +14,8 @@ for _, shader in ipairs({
   { name = "composite", source = "composite.frag", stage = "fragment" },
   { name = "glyph", source = "glyph.frag", stage = "fragment" },
   { name = "image", source = "image.frag", stage = "fragment" },
+  { name = "backdrop_filter", source = "backdrop_filter.frag", stage = "fragment" },
+  { name = "backdrop_composite", source = "backdrop_composite.frag", stage = "fragment" },
 }) do
   local result = spirv.compile({
     backend = "glslang", tool = compiler, language = "glsl",

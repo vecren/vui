@@ -17,6 +17,7 @@ inline auto valid(DrawColorSource source) -> bool {
 class DrawOp {
     RSTD_ENUM(DrawOp, (Save), (Restore), (Transform, (vui::Transform value;)),
               (Clip, (vui::Clip value;)), (Rect, (vui::Rect rect; Color color; Scalar radius; DrawColorSource color_source{DrawColorSource::Fixed};)),
+              (BackdropBlur, (vui::Clip mask; Scalar sigma;)),
               (Text, (TextLayout layout; Point origin; Color color; TextEffects effects{}; TextColors colors{};)),
               (Image, (ImageData data; Rect destination; Rect source; ImageSampling sampling;
                        Color tint; ImageEdges edges; bool clamp_source;
@@ -173,6 +174,18 @@ class DisplayListRecorder {
         }
         include(value);
         operations_.push(DrawOp::Rect(value, color, radius, color_source));
+    }
+    void backdrop_blur(Clip mask, Scalar sigma) {
+        if (!active())
+            return;
+        if (!mask.valid() || !finite(sigma) || sigma < 0) {
+            reject(RecordingError::InvalidValue);
+            return;
+        }
+        if (!mask.enabled || sigma == 0 || mask.rect.width == 0 || mask.rect.height == 0)
+            return;
+        include(mask.rect);
+        operations_.push(DrawOp::BackdropBlur(mask, sigma));
     }
     void text(TextLayout layout, Point origin, Color color, TextEffects effects = {}, TextColors colors = {}, TextDecorations decorations = {}, TextInlineImages inline_images = {}) {
         if (!active())

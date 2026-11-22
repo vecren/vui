@@ -32,6 +32,7 @@ class PaintContext {
     void rect(Rect value, Color color, Scalar radius = 0, DrawColorSource color_source = DrawColorSource::Fixed) {
         recorder_.rect(value, color, radius, color_source);
     }
+    void backdrop_blur(Clip mask, Scalar sigma) { recorder_.backdrop_blur(mask, sigma); }
     void text(TextLayout value, Point origin, Color color, TextEffects effects = {}, TextColors colors = {}, TextDecorations decorations = {}, TextInlineImages inline_images = {}) {
         recorder_.text(rstd::move(value), origin, color, effects, rstd::move(colors), rstd::move(decorations), rstd::move(inline_images));
     }

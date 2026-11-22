@@ -56,10 +56,12 @@ void FrameResources::release(FrameBuffer buffer, bool reusable) {
     }
 }
 
-auto FrameResources::target(vk::TextureContext &textures, VkExtent2D extent) -> Result<Target, Error> {
+auto FrameResources::target(vk::TextureContext &textures, VkExtent2D extent,
+                            vrento::TextureFormat format) -> Result<Target, Error> {
     for (usize i{}; i < targets.len(); ++i) {
         if (targets[i].extent.width != extent.width ||
-            targets[i].extent.height != extent.height)
+            targets[i].extent.height != extent.height ||
+            targets[i].image.description().format != format)
             continue;
         auto result = take(targets, i);
         stats.cached_target_bytes -= result.bytes();
@@ -76,7 +78,7 @@ auto FrameResources::target(vk::TextureContext &textures, VkExtent2D extent) -> 
     result.extent = extent;
     vrento::texture::TextureDesc image;
     image.extent = {extent.width, extent.height, 1};
-    image.format = vrento::TextureFormat::RGBA8_SRGB;
+    image.format = format;
     image.usage = vrento::texture::Usage::ColorAttachment | vrento::texture::Usage::Sampled |
                   vrento::texture::Usage::TransferSource;
     auto allocated = textures.CreateTexture(image);

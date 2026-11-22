@@ -9,7 +9,7 @@ float coverage(float distance) { return clamp(0.5-distance/max(fwidth(distance),
 float clip_coverage() {
     float result = 1;
     int index = int(pc.params.z);
-    vec3 screen = vec3(gl_FragCoord.xy / pc.surface.z, 1);
+    vec3 screen = vec3(gl_FragCoord.xy / vec2(pc.row0.w, pc.row1.w), 1);
     while (index >= 0) {
         ClipData c = clips[index];
         if (c.params.z == 0) return 0;

@@ -33,6 +33,7 @@ class FrameDraw {
     RSTD_ENUM(FrameDraw,
               (Rectangle, (Rect rect; Color color; Scalar radius; Transform transform; Index clip;
                            RenderId node;)),
+              (BackdropBlur, (Clip mask; Scalar sigma; Transform transform; Index clip; RenderId node;)),
               (Text, (TextLayout layout; Point origin; Color color; Transform transform; Index clip;
                       RenderId node; TextEffects effects{}; TextColors colors{}; Color tint{1, 1, 1, 1};)),
               (Image, (ImageData data; Rect destination; Rect source; ImageSampling sampling;
@@ -193,6 +194,10 @@ class FramePlanner {
                 const auto &value = op.as_Rect();
                 output_.passes[usize(target)].draws.push(FrameDraw::Rectangle(
                     value.rect, (value.color_source == DrawColorSource::Current ? node->properties.paint_color : value.color).modulate(node->properties.content_tint), value.radius, state.transform, state.clip, id));
+            } else if (op.is_BackdropBlur()) {
+                const auto &value = op.as_BackdropBlur();
+                output_.passes[usize(target)].draws.push(
+                    FrameDraw::BackdropBlur(value.mask, value.sigma, state.transform, state.clip, id));
             } else if (op.is_Text()) {
                 const auto &value = op.as_Text();
                 output_.passes[usize(target)].draws.push(

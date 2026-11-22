@@ -106,14 +106,16 @@ void glass_sheen(PaintContext &context, Rect bounds, Scalar radius) {
 
 struct GlassPaint {
     float opacity{1};
-    bool popup{};
+    Scalar blur{};
+    Color tint{0, 0, 0, 0};
 
     auto paint(PaintContext &context) -> Result<empty, UiError> {
         const auto size = context.size();
         const Rect bounds{0, 0, size.width, size.height};
         if (size.width > 0 && size.height > 0) {
             const auto radius = context.style().radius;
-            if (popup) context.rect(bounds, Color::from_srgba8(12, 12, 12, 254).unwrap(), radius);
+            if (blur > 0) context.backdrop_blur({true, bounds, radius}, blur);
+            if (tint.a > 0) context.rect(bounds, tint, radius);
             context.save();
             context.clip({true, bounds, radius});
             const auto &glow = panel_light();

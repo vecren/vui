@@ -117,6 +117,8 @@ struct DrawStats {
     Serial items{}, batches{}, merged_items{}, instance_bytes{};
     Serial resolved_items{}, surface_culled{}, clip_culled{}, used_external_frames{};
     Serial pass_starts{}, pipeline_breaks{}, texture_breaks{}, sampler_breaks{}, disabled_breaks{};
+    Serial backdrop_captures{}, backdrop_capture_pixels{}, backdrop_filter_pixels{};
+    Serial backdrop_filter_passes{}, backdrop_downsampled{}, backdrop_unavailable{}, backdrop_budget_skips{};
 };
 using CpuTiming = vui::CpuTiming;
 enum class GpuTimingStatus { Unsupported, Prepared, Pending, Available, Failed, Ambiguous };

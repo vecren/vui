@@ -170,10 +170,11 @@ auto dialog(cx::Borrowed<state::Cell<bool>> shown, state::Value<Insets> insets) 
     auto button = control_finish(cx::button(button_label("Close"_str), [shown] { shown->set(false).unwrap(); },
         button_style()).style(block(112, 44, {0, 0, 0, 0})).reference(*close));
     auto panel = glass(LayoutKind::Column, cx::elements({label("Dialog"_str, 20, foreground, true), rstd::move(button)}),
-        {.popup = true}).style(block(320, 146, white(0), panel_radius)).padding(20).gap(18);
+        {.blur = 12, .tint = Color::from_srgba8(16, 16, 16, 168).unwrap()})
+        .style(block(320, 146, white(0), panel_radius)).padding(20).gap(18);
     cx::PopupOptions options;
     options.initial_focus = Some(close.unwrap());
-    options.backdrop = {0, 0, 0, .76f};
+    options.backdrop = {0, 0, 0, .32f};
     options.content_insets = area->value();
     return Ok(cx::dialog(rstd::move(panel), [shown](PopupCloseReason) { shown->set(false).unwrap(); }, rstd::move(options)));
 }

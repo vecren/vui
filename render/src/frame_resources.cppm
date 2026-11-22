@@ -51,7 +51,9 @@ struct FrameResources {
         ++stats.allocation_failures;
         return Error{Stage::Allocation, result};
     }
-    auto target(vk::TextureContext &textures, VkExtent2D extent) -> Result<Target, Error>;
+    auto target(vk::TextureContext &textures, VkExtent2D extent,
+                vrento::TextureFormat format = vrento::TextureFormat::RGBA8_SRGB)
+        -> Result<Target, Error>;
     auto buffer(const vk::Device &device, Serial bytes, FrameBufferKind kind)
         -> Result<FrameBuffer, Error>;
 };

@@ -174,9 +174,14 @@ auto motion(cx::Borrowed<UiSession> session, cx::NodeRef image, Scalar width)
             .transform({1, 0, 0, 1, TileController::origin.x, TileController::origin.y}).focusable(true).build()));
     constexpr Scalar canvas_height = 176;
     auto canvas_width = rstd::cmp::max(Scalar(0), width - 2 * panel_padding);
+    auto lens = glass(LayoutKind::Stack, {}, {.blur = 8, .tint = {0, 0, 0, .16f}})
+        .style(NodeStyleBuilder{}.width(rstd::min(Scalar(136), canvas_width * .38)).height(96)
+            .horizontal(Alignment::End).vertical(Alignment::Center).radius(panel_radius)
+            .hit_test_visible(false).build());
+    auto lens_area = cx::stack({rstd::move(lens)}).style(fill().padding(12).hit_test_visible(false).build());
     auto drag_card = glass(LayoutKind::Column, cx::elements({
         cx::row({label("Drag"_str, 16, foreground, true), rstd::move(reset)}).gap(12),
-        cx::element(Arena{ImageRegion::whole(demo->frame)}, cx::elements({rstd::move(drag)}))
+        cx::element(Arena{ImageRegion::whole(demo->frame)}, cx::elements({rstd::move(drag), rstd::move(lens_area)}))
             .style(NodeStyleBuilder{}.horizontal(Alignment::Stretch).height(canvas_height)
                 .background({0, 0, 0, .52f}).radius(9).clip({true, {0, 0, canvas_width, canvas_height}, 9}).build())
             .reference(canvas),
