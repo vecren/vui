@@ -5,6 +5,7 @@ import :glass;
 import :controls;
 import :lists;
 import :motion;
+import :canvas_recording;
 import :canvas_workload;
 import vui.compose;
 import vui.examples;
@@ -242,6 +243,10 @@ class View {
 
   public:
     static constexpr Serial canvas_warmup_frames = detail::canvas_warmup;
+    struct CanvasLaunch {
+        Index particles{detail::canvas_loads[1]};
+        bool fourier{};
+    };
 
     static auto supports_canvas_load(Index count) -> bool {
         for (auto load : detail::canvas_loads)
@@ -249,9 +254,10 @@ class View {
         return false;
     }
 
-    explicit View(UiSession &session, Option<Index> canvas_load = {})
-        : session_(session), tabs_{session_, graph_.cell(canvas_load ? Page::Canvas : Page::Controls).unwrap()},
-          canvas_options_(graph_.cell(CanvasOptions{canvas_load.unwrap_or(CanvasOptions{}.particles)}).unwrap()) {}
+    explicit View(UiSession &session, Option<CanvasLaunch> canvas = {})
+        : session_(session), tabs_{session_, graph_.cell(canvas ? Page::Canvas : Page::Controls).unwrap()},
+          canvas_options_(graph_.cell(CanvasOptions{.particles = canvas ? canvas->particles : detail::canvas_loads[1],
+                                                    .fourier = canvas && canvas->fourier}).unwrap()) {}
 
     auto mount() -> Result<empty, UiError> {
         auto &ui = session_.document();

@@ -10,7 +10,7 @@ using namespace rstd::literals;
 namespace {
 using Gallery = examples::gallery::View;
 
-auto parse_args(int argc, char **argv, Option<Index> &canvas, unsigned &limit, bool &clip_elision) -> bool {
+auto parse_args(int argc, char **argv, Option<Gallery::CanvasLaunch> &canvas, unsigned &limit, bool &clip_elision) -> bool {
     if (argc < 2 || rstd::ffi::CStr::from_ptr(argv[1]).to_str().unwrap_or(""_str) != "--canvas"_str)
         return examples::frame_limit(argc, argv, limit);
     if (argc > 3 && rstd::ffi::CStr::from_ptr(argv[argc - 1]).to_str().unwrap_or(""_str) == "--clip-elision"_str) {
@@ -18,14 +18,19 @@ auto parse_args(int argc, char **argv, Option<Index> &canvas, unsigned &limit, b
         --argc;
     }
     if (argc == 3 || argc == 4) {
-        auto count = rstd::from_str<u32>(rstd::ffi::CStr::from_ptr(argv[2]).to_str().unwrap_or(""_str));
-        if (count.is_ok() && Gallery::supports_canvas_load(count->to_primitive())) {
-            canvas = Some(Index(count->to_primitive()));
+        const auto name = rstd::ffi::CStr::from_ptr(argv[2]).to_str().unwrap_or(""_str);
+        if (name == "fourier"_str) canvas = Some(Gallery::CanvasLaunch{.fourier = true});
+        else {
+            auto count = rstd::from_str<u32>(name);
+            if (count.is_ok() && Gallery::supports_canvas_load(count->to_primitive()))
+                canvas = Some(Gallery::CanvasLaunch{.particles = count->to_primitive()});
+        }
+        if (canvas) {
             char *frames[]{argv[0], argv[3]};
             return examples::frame_limit(argc - 2, frames, limit);
         }
     }
-    rstd::io::eprintln("usage: vui-gallery --canvas <256|1024|4096> [frame-count] [--clip-elision]");
+    rstd::io::eprintln("usage: vui-gallery --canvas <256|1024|4096|fourier> [frame-count] [--clip-elision]");
     return false;
 }
 
@@ -54,10 +59,11 @@ struct CanvasProfile {
         }
     }
 
-    void report(Index particles, CpuTiming paint) const {
+    void report(Gallery::CanvasLaunch launch, CpuTiming paint) const {
         if (!draws) return;
-        rstd::io::println("canvas particles={} extent={}x{} items={} batches={} instance_bytes={} surface_culled={} clip_culled={}",
-            particles, extent.width, extent.height, draws->items, draws->batches, draws->instance_bytes,
+        const auto workload = launch.fourier ? String::make("scene=fourier"_str) : rstd::format("particles={}", launch.particles);
+        rstd::io::println("canvas {} extent={}x{} items={} batches={} instance_bytes={} surface_culled={} clip_culled={}",
+            workload, extent.width, extent.height, draws->items, draws->batches, draws->instance_bytes,
             draws->surface_culled, draws->clip_culled);
         rstd::io::println("canvas scissored_batches={} scissor_updates={}", draws->scissored_batches, draws->scissor_updates);
         rstd::io::println("canvas clip_elided_items={}", draws->clip_elided_items);
@@ -78,7 +84,7 @@ struct CanvasProfile {
 
 int main(int argc, char **argv) {
     unsigned limit{};
-    Option<Index> canvas;
+    Option<Gallery::CanvasLaunch> canvas;
     bool clip_elision{};
     if (!parse_args(argc, argv, canvas, limit, clip_elision)) return 2;
     examples::Application app;
