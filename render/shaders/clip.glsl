@@ -2,8 +2,9 @@
 struct ClipData { vec4 rect; vec4 row0; vec4 row1; vec4 params; vec4 radii; };
 layout(std430,set=0,binding=1) readonly buffer Clips { ClipData clips[]; };
 float clip_coverage() {
-    float result = 1;
     int index = int(pc.params.z);
+    if (index < 0) return 1;
+    float result = 1;
     vec3 screen = vec3(gl_FragCoord.xy / vec2(pc.row0.w, pc.row1.w), 1);
     while (index >= 0) {
         ClipData c = clips[index];

@@ -48,6 +48,7 @@ class ThreadedFrames {
     FrameLoopStatus status_;
     RenderSnapshot snapshot_;
     bool closing_{}, windowed_;
+    gpu::DrawOptions draw_;
     Serial capture_pending_{};
     auto change_surface(gpu::SurfaceHost *, Serial generation) -> Result<empty, gpu::Error>;
     auto enqueue_capture(Option<CaptureSelection>) -> Result<Serial, FrameRequestError>;
@@ -63,9 +64,9 @@ class ThreadedFrames {
     static auto clock() -> FrameTiming {
         return {Serial(rstd::time::Instant::now().duration_since_epoch().as_nanos().to_primitive()), {}};
     }
-    template <class Backend> static void execute(Backend &renderer, bool windowed,
+    template <class Backend> static void execute(Backend &renderer, bool windowed, gpu::DrawOptions draw,
                         rstd::sync::Arc<Channel> channel) {
-        FrameExecutor frames(renderer, windowed, {.timings = true});
+        FrameExecutor frames(renderer, windowed, draw);
         Option<FramePacket> packet;
         Serial request{}, revision{}, surface_completed{};
         Option<CaptureRequest> capture;
@@ -265,14 +266,17 @@ class ThreadedFrames {
 
   public:
     // Renderer is exclusively borrowed until join; it must outlive this object.
-    ThreadedFrames(UiSession &session, bool windowed, Option<FrameWaker> waker = {})
-        : session_(session), channel_(rstd::sync::Arc<Channel>::make(rstd::move(waker))), windowed_(windowed) {}
+    ThreadedFrames(UiSession &session, bool windowed, Option<FrameWaker> waker = {},
+                   gpu::DrawOptions draw = {.timings = true})
+        : session_(session), channel_(rstd::sync::Arc<Channel>::make(rstd::move(waker))), windowed_(windowed),
+          draw_(draw) {}
     ThreadedFrames(const ThreadedFrames &) = delete;
     ~ThreadedFrames();
     template <class Backend> auto start(Backend &renderer) -> Result<empty, gpu::Error> {
         if (worker_.is_some() || closing_) return Err(gpu::Error{gpu::Stage::State});
-        auto spawned = rstd::thread::spawn([&renderer, windowed = windowed_, channel = channel_.clone()]() mutable {
-            execute(renderer, windowed, rstd::move(channel));
+        auto spawned = rstd::thread::spawn([&renderer, windowed = windowed_, draw = draw_,
+                                            channel = channel_.clone()]() mutable {
+            execute(renderer, windowed, draw, rstd::move(channel));
         });
         if (spawned.is_err()) return Err(gpu::Error{gpu::Stage::State});
         worker_ = Some(rstd::move(spawned).unwrap());

@@ -96,11 +96,16 @@ struct ExternalBinding {
 };
 struct OwnedFrame;
 struct UiFrameData;
+struct ClipScissors {
+    VkRect2D full;
+    Vec<VkRect2D> rects;
+};
 struct PrepareContext {
     const UiFrameData &frame;
     const vk::Device &device;
     VkDescriptorSetLayout layout;
     VkSampler sampler, glyph_sampler;
+    const ClipScissors *scissors{};
 };
 struct RecordContext {
     VkCommandBuffer command;
@@ -108,12 +113,14 @@ struct RecordContext {
     VkPipelineLayout layout;
     VkPipeline shape, composite, glyph, image, additive, additive_rgb, plus;
     VkPipeline backdrop_filter{}, backdrop_composite{};
+    Option<VkRect2D> scissor_area;
 };
 struct PreparedDraw {
     VkDescriptorSet descriptor{};
     DrawKind kind;
     Index first{}, count{1};
     ImageBlend blend{ImageBlend::SourceOver};
+    VkRect2D scissor{};
 };
 struct FrameGpu {
     vk::DeviceSession session;
@@ -146,6 +153,7 @@ struct UiFrameData {
     Index first{};
     DrawOptions options;
     rstd::sync::Arc<DrawStats> stats;
+    Option<rstd::sync::Arc<ClipScissors>> scissors;
 };
 struct FrameFence {
     vk::DeviceSession session;
@@ -265,6 +273,59 @@ void shape_values(float (&rect)[4], float (&radii)[4], float &kind, const Shape 
     radii_values(radii, shape.radii);
     kind = static_cast<float>(shape.kind);
 }
+auto surface_pixels(const SurfaceInfo &surface) -> Size {
+    if (surface.pixel_size) return {Scalar(surface.pixel_size->width), Scalar(surface.pixel_size->height)};
+    return {std::ceil(surface.logical_size.width * surface.scale),
+            std::ceil(surface.logical_size.height * surface.scale)};
+}
+auto gpu_clip(const ClipInstance &source) -> Option<GpuClip> {
+    GpuClip clip{};
+    shape_values(clip.rect, clip.radii, clip.params[0], source.shape);
+    auto inverse = source.transform.inverse();
+    if (inverse) {
+        clip.row0[0] = static_cast<float>(inverse->a);
+        clip.row0[1] = static_cast<float>(inverse->c);
+        clip.row0[2] = static_cast<float>(inverse->tx);
+        clip.row1[0] = static_cast<float>(inverse->b);
+        clip.row1[1] = static_cast<float>(inverse->d);
+        clip.row1[2] = static_cast<float>(inverse->ty);
+    }
+    clip.params[1] = source.parent == no_clip ? -1 : static_cast<float>(source.parent);
+    clip.params[2] = inverse && !source.shape.empty() ? 1 : 0;
+    float values[sizeof(GpuClip) / sizeof(float)];
+    std::memcpy(values, &clip, sizeof(GpuClip));
+    for (auto value : values)
+        if (!std::isfinite(value)) return None();
+    return Some(GpuClip(clip));
+}
+auto same_rect(VkRect2D a, VkRect2D b) -> bool {
+    return a.offset.x == b.offset.x && a.offset.y == b.offset.y &&
+           a.extent.width == b.extent.width && a.extent.height == b.extent.height;
+}
+auto enclosing_rect(VkRect2D a, VkRect2D b) -> VkRect2D {
+    const auto x = rstd::min(a.offset.x, b.offset.x);
+    const auto y = rstd::min(a.offset.y, b.offset.y);
+    const auto right = rstd::cmp::max(Index(a.offset.x) + a.extent.width, Index(b.offset.x) + b.extent.width);
+    const auto bottom = rstd::cmp::max(Index(a.offset.y) + a.extent.height, Index(b.offset.y) + b.extent.height);
+    return {{x, y}, {right - Index(x), bottom - Index(y)}};
+}
+auto build_clip_scissors(slice<visibility::ClipCoverage> coverage, VkExtent2D extent) -> ClipScissors {
+    ClipScissors scissors{{{}, extent}, {}};
+    scissors.rects.reserve(coverage.len());
+    for (const auto &clip : coverage) {
+        auto scissor = scissors.full;
+        if (!clip.empty) {
+            // The outer bound already includes the shader's antialiasing footprint.
+            const auto x = std::floor(clip.outer.left), y = std::floor(clip.outer.top);
+            const auto right = std::ceil(clip.outer.right), bottom = std::ceil(clip.outer.bottom);
+            if (x >= 0 && y >= 0 && right <= extent.width && bottom <= extent.height &&
+                right > x && bottom > y)
+                scissor = {{static_cast<int>(x), static_cast<int>(y)}, {Index(right - x), Index(bottom - y)}};
+        }
+        scissors.rects.push(VkRect2D(scissor));
+    }
+    return scissors;
+}
 auto UiExecutor::prepare(const rg::PassExecutionInfo &pass, const vk::GraphBindings &bindings,
                          PrepareContext &context) -> Result<empty, vk::GraphExecutionError> {
     const auto &frame = context.frame;
@@ -295,6 +356,9 @@ auto UiExecutor::prepare(const rg::PassExecutionInfo &pass, const vk::GraphBindi
     };
     for (const auto &paint : frame.items) {
         PreparedDraw item{{}, paint.kind, instance++, 1, paint.blend};
+        if (context.scissors)
+            item.scissor = paint.clip == no_clip ? context.scissors->full
+                                                : context.scissors->rects[usize(paint.clip)];
         VkImageView source_view{}, original_view{};
         auto sources = frame.sources[paint_index++];
         if (item.kind != DrawKind::Shape) {
@@ -331,6 +395,7 @@ auto UiExecutor::prepare(const rg::PassExecutionInfo &pass, const vk::GraphBindi
             else if (previous_sampler != sampler)
                 ++frame.stats->sampler_breaks;
             else {
+                if (context.scissors) previous.scissor = enclosing_rect(previous.scissor, item.scissor);
                 ++previous.count;
                 ++frame.stats->merged_items;
                 continue;
@@ -384,11 +449,24 @@ auto UiExecutor::prepare(const rg::PassExecutionInfo &pass, const vk::GraphBindi
                                  original_view ? 4 : source_view ? 3 : 2, writes, 0, nullptr);
         draws.push(rstd::move(item));
     }
+    if (context.scissors) {
+        auto current = context.scissors->full;
+        for (const auto &draw : draws) {
+            frame.stats->scissored_batches += !same_rect(draw.scissor, context.scissors->full);
+            frame.stats->scissor_updates += !same_rect(draw.scissor, current);
+            current = draw.scissor;
+        }
+    }
     return Ok(empty{});
 }
 auto UiExecutor::record(RecordContext &context) const -> Result<empty, vk::GraphExecutionError> {
     const auto &d = context.dispatch;
+    auto current = context.scissor_area.unwrap_or(VkRect2D{});
     for (const auto &draw : draws) {
+        if (context.scissor_area && !same_rect(current, draw.scissor)) {
+            current = draw.scissor;
+            d.vkCmdSetScissor(context.command, 0, 1, &current);
+        }
         d.vkCmdBindPipeline(context.command, VK_PIPELINE_BIND_POINT_GRAPHICS,
                             draw.kind == DrawKind::Image || draw.kind == DrawKind::External
                                 ? (draw.blend == ImageBlend::Plus ? context.plus : draw.blend == ImageBlend::AdditiveRgb ? context.additive_rgb : draw.blend == ImageBlend::Additive ? context.additive : context.image)
@@ -516,7 +594,7 @@ struct ScopeBackend {
     }
 };
 auto resolve_items(OwnedFrame &frame, GlyphCache &cache, ImageCache &images, Index max_extent,
-                   const vk::DeviceSession &session) -> Result<empty, Error> {
+                   const vk::DeviceSession &session, float raster_x, float raster_y) -> Result<empty, Error> {
     auto surface = frame.plan.surface();
     const auto scale_x = frame.extent.width / surface.logical_size.width;
     const auto scale_y = frame.extent.height / surface.logical_size.height;
@@ -524,8 +602,6 @@ auto resolve_items(OwnedFrame &frame, GlyphCache &cache, ImageCache &images, Ind
     if (!finite(raster_scale) || raster_scale <= 0)
         return Err(Error{Stage::State});
     auto coverage_scale = rstd::cmp::min(scale_x, scale_y);
-    const auto raster_x = frame.extent.width / static_cast<float>(surface.logical_size.width);
-    const auto raster_y = frame.extent.height / static_cast<float>(surface.logical_size.height);
     Serial total{};
     for (usize pass{}; pass < frame.plan.pass_count(); ++pass) {
         Vec<PaintItem> items;
@@ -710,7 +786,8 @@ auto resolve_items(OwnedFrame &frame, GlyphCache &cache, ImageCache &images, Ind
     }
     return Ok(empty{});
 }
-auto cull_items(OwnedFrame &frame, slice<GpuClip> clips) -> Result<empty, Error> {
+auto cull_items(OwnedFrame &frame, slice<GpuClip> clips, slice<visibility::ClipCoverage> coverage,
+                float raster_x, float raster_y) -> Result<empty, Error> {
     RasterBounds surface{0, 0, double(frame.extent.width), double(frame.extent.height)};
     for (auto &items : frame.items) {
         Option<visibility::QuadMapping> mapping;
@@ -723,8 +800,14 @@ auto cull_items(OwnedFrame &frame, slice<GpuClip> clips) -> Result<empty, Error>
                     return Err(Error{Stage::Unsupported});
             ++frame.stats->resolved_items;
             bool discard{};
-            if (frame.options.culling &&
-                !(item.clip == no_clip && visibility::center_on_surface(item.data))) {
+            if (frame.options.culling) {
+                const auto *clip = item.clip == no_clip ? nullptr : &coverage[usize(item.clip)];
+                const auto keep = clip ? clip->keep && visibility::center_in(item.data, *clip->keep)
+                                       : visibility::center_on_surface(item.data);
+                if (keep) {
+                    visible.push(rstd::move(item));
+                    continue;
+                }
                 if (mapping.is_none() || !mapping->matches(item.data))
                     mapping = Some(visibility::QuadMapping(item.data));
                 auto bounds = mapping->quad(item.data, frame.extent);
@@ -732,22 +815,18 @@ auto cull_items(OwnedFrame &frame, slice<GpuClip> clips) -> Result<empty, Error>
                     ++frame.stats->surface_culled;
                     continue;
                 }
-                auto pixels = surface;
-                if (bounds.is_some()) {
-                    pixels = {std::fmax(surface.left, bounds->left),
-                              std::fmax(surface.top, bounds->top),
-                              std::fmin(surface.right, bounds->right),
-                              std::fmin(surface.bottom, bounds->bottom)};
+                const auto pixels = bounds ? visibility::intersect(surface, *bounds) : surface;
+                if (clip && (clip->empty || visibility::outside(pixels, clip->outer))) {
+                    ++frame.stats->clip_culled;
+                    continue;
                 }
-                auto clip = item.clip;
-                while (clip != no_clip) {
-                    const auto &value = clips[usize(clip)];
-                    if (visibility::clipped(pixels, value, item.data.row0[3], item.data.row1[3])) {
+                for (auto index = item.clip; index != no_clip; index = coverage[usize(index)].parent) {
+                    if (visibility::clipped(pixels, clips[usize(index)], coverage[usize(index)].tolerance,
+                                            raster_x, raster_y)) {
                         discard = true;
                         ++frame.stats->clip_culled;
                         break;
                     }
-                    clip = value.params[1] < 0 ? no_clip : static_cast<Index>(value.params[1]);
                 }
             }
             if (!discard)
@@ -759,7 +838,7 @@ auto cull_items(OwnedFrame &frame, slice<GpuClip> clips) -> Result<empty, Error>
 }
 
 auto segment_draws(OwnedFrame &frame, vk::TextureContext &textures, slice<GpuClip> clips,
-                   rg::AttachmentLoad root_load) -> Result<empty, Error> {
+                   slice<visibility::ClipCoverage> coverage, rg::AttachmentLoad root_load) -> Result<empty, Error> {
     auto logical_items = rstd::move(frame.items);
     Vec<Index> final_versions;
     for (usize i{}; i < logical_items.len(); ++i)
@@ -811,7 +890,7 @@ auto segment_draws(OwnedFrame &frame, vk::TextureContext &textures, slice<GpuCli
                 continue;
             }
             auto blur = BackdropBlur::plan(paint.data, paint.sigma, frame.plan.surface().logical_size,
-                                          frame.extent, clips, paint.clip);
+                                          frame.extent, clips, coverage, paint.clip);
             if (!blur)
                 continue;
             if (blur->samples > remaining_samples) {
@@ -947,6 +1026,23 @@ auto prepare_images(OwnedFrame &frame, ImageCache &cache, vk::TextureContext &te
 }
 } // namespace
 
+auto frame_clip_culling(const SurfaceInfo &surface) -> FrameClipCulling {
+    const auto size = surface_pixels(surface);
+    if (!surface.valid() || size.width < 1 || size.height < 1 || size.width > Scalar(~Index{}) ||
+        size.height > Scalar(~Index{})) return {};
+    const auto scale_x = Index(size.width) / static_cast<float>(surface.logical_size.width);
+    const auto scale_y = Index(size.height) / static_cast<float>(surface.logical_size.height);
+    if (!std::isfinite(scale_x) || !std::isfinite(scale_y) || scale_x <= 0 || scale_y <= 0) return {};
+    return {{{0, 0, size.width, size.height}}, scale_x, scale_y,
+            [](FrameClipBounds bounds, const ClipInstance &source, float sx, float sy) -> FrameClipCoverage {
+                auto clip = gpu_clip(source);
+                if (!clip) return {bounds};
+                visibility::ClipCoverage coverage{bounds};
+                visibility::prepare_clip(coverage, *clip, sx, sy, true);
+                return {coverage.outer, coverage.empty};
+            }};
+}
+
 } // namespace vui::gpu
 namespace rstd {
 template <>
@@ -968,8 +1064,11 @@ auto UiDrawPass::Instantiate(const vk::GraphPrepareContext &inputs,
     -> Result<vrento::Preparation<rstd::sync::Arc<dyn<vk::VulkanPass>>>, vk::GraphExecutionError> {
     if (!inputs.scope)
         return Err(vk::GraphExecutionError{vk::GraphExecutionStage::Schema});
+    const auto area = (*inputs.scope)->Info().area;
+    const auto *scissors = frame->scissors && same_rect(area, (*frame->scissors)->full)
+                               ? &**frame->scissors : nullptr;
     PrepareContext context{*frame, inputs.session.device(), assets->descriptor(), *assets->sampler,
-                           *assets->glyph_sampler};
+                           *assets->glyph_sampler, scissors};
     UiExecutor executor;
     auto prepared = executor.prepare(description, inputs.bindings, context);
     if (prepared.is_err())
@@ -988,6 +1087,7 @@ auto UiDrawPass::Instantiate(const vk::GraphPrepareContext &inputs,
         native.backdrop_filter = *(*pipelines)[usize(7)].pipeline->pipeline.handle;
         native.backdrop_composite = *(*pipelines)[usize(8)].pipeline->pipeline.handle;
     }
+    if (scissors) native.scissor_area = Some(VkRect2D(area));
     return Ok(rstd::sync::Arc<dyn<vk::VulkanPass>>::make(
         UiPrepared{context.frame.gpu.clone(), assets.clone(), pipelines.clone(),
                    rstd::move(executor), native}));
@@ -1587,10 +1687,7 @@ auto Renderer::prepare_impl(FramePlan plan, DrawOptions options,
     if (options.timings)
         prepare_start = Some(rstd::time::Instant::now());
     auto surface = plan.surface();
-    auto width = surface.pixel_size.is_some() ? Scalar(surface.pixel_size->width)
-                                              : std::ceil(surface.logical_size.width * surface.scale);
-    auto height = surface.pixel_size.is_some() ? Scalar(surface.pixel_size->height)
-                                               : std::ceil(surface.logical_size.height * surface.scale);
+    const auto [width, height] = surface_pixels(surface);
     if (width < 1 || height < 1 || width > self.device().limits().maxImageDimension2D ||
         height > self.device().limits().maxImageDimension2D || plan.pass_count() > usize(1024) ||
         plan.clips().len() > usize(65535))
@@ -1614,38 +1711,29 @@ auto Renderer::prepare_impl(FramePlan plan, DrawOptions options,
     };
     Vec<GpuClip> clip_data;
     for (const auto &source : frame.plan.clips()) {
-        GpuClip clip{};
-        shape_values(clip.rect, clip.radii, clip.params[0], source.shape);
-        auto inverse = source.transform.inverse();
-        if (inverse.is_some()) {
-            clip.row0[0] = static_cast<float>(inverse->a);
-            clip.row0[1] = static_cast<float>(inverse->c);
-            clip.row0[2] = static_cast<float>(inverse->tx);
-            clip.row1[0] = static_cast<float>(inverse->b);
-            clip.row1[1] = static_cast<float>(inverse->d);
-            clip.row1[2] = static_cast<float>(inverse->ty);
-        }
-        clip.params[1] = source.parent == no_clip ? -1 : static_cast<float>(source.parent);
-        clip.params[2] = inverse.is_some() && !source.shape.empty() ? 1 : 0;
-        float values[sizeof(GpuClip) / sizeof(float)];
-        std::memcpy(values, &clip, sizeof(GpuClip));
-        for (unsigned i = 0; i < sizeof(GpuClip) / sizeof(float); ++i)
-            if (!std::isfinite(values[i]))
-                return Err(Error{Stage::Unsupported});
-        clip_data.push(rstd::move(clip));
+        auto clip = gpu_clip(source);
+        if (!clip) return Err(Error{Stage::Unsupported});
+        clip_data.push(clip.unwrap());
     }
     CpuSample resolve(frame.metric(&FrameTimings::resolve));
+    const auto raster_x = frame.extent.width / static_cast<float>(surface.logical_size.width);
+    const auto raster_y = frame.extent.height / static_cast<float>(surface.logical_size.height);
     auto reserved =
         self.image_cache.reserve_frame(frame.plan, self.device().limits().maxImageDimension2D);
     if (reserved.is_err())
         return reserved;
     auto resolved = resolve_items(frame, self.glyph_cache, self.image_cache,
-                                  self.device().limits().maxImageDimension2D, *self.session);
+                                  self.device().limits().maxImageDimension2D, *self.session, raster_x, raster_y);
     resolve.pause();
     if (resolved.is_err())
         return resolved;
     CpuSample visibility(frame.metric(&FrameTimings::visibility));
-    auto culled = cull_items(frame, clip_data.as_slice());
+    const RasterBounds raster{0, 0, double(frame.extent.width), double(frame.extent.height)};
+    const auto coverage = options.culling || options.scissor || options.clip_elision
+                              ? visibility::prepare_clips(clip_data.as_slice(), frame.plan.clips(),
+                                                          raster, raster_x, raster_y, options.clip_elision)
+                              : Vec<visibility::ClipCoverage>{};
+    auto culled = cull_items(frame, clip_data.as_slice(), coverage.as_slice(), raster_x, raster_y);
     visibility.pause();
     if (culled.is_err())
         return culled;
@@ -1680,7 +1768,7 @@ auto Renderer::prepare_impl(FramePlan plan, DrawOptions options,
         frame.gpu->targets.push(target.unwrap());
         frame.textures.push(rg::ResourceId{});
     }
-    auto segmented = segment_draws(frame, *self.textures, clip_data.as_slice(),
+    auto segmented = segment_draws(frame, *self.textures, clip_data.as_slice(), coverage.as_slice(),
                                    target_override ? load : rg::AttachmentLoad::Clear);
     if (segmented.is_err())
         return segmented;
@@ -1709,11 +1797,20 @@ auto Renderer::prepare_impl(FramePlan plan, DrawOptions options,
             return fail(Stage::Allocation, flushed.unwrap_err().api_result);
     }
     Vec<DrawData> instance_data;
-    for (const auto &items : frame.items) {
+    for (usize pass{}; pass < frame.items.len(); ++pass) {
         frame.item_offsets.push(static_cast<Index>(instance_data.len().to_primitive()));
-        for (const auto &paint : items) {
+        const auto elide = options.clip_elision && usize(frame.segments[pass].target) < frame.plan.pass_count();
+        for (const auto &paint : frame.items[pass]) {
             auto data = paint.data;
-            data.params[2] = paint.clip == no_clip ? -1 : static_cast<float>(paint.clip);
+            auto shader_clip = paint.clip;
+            if (elide && shader_clip != no_clip) {
+                const auto &inner = coverage[usize(shader_clip)].inner;
+                if (inner && visibility::quad_inside(data, frame.extent, *inner)) {
+                    shader_clip = no_clip;
+                    ++frame.stats->clip_elided_items;
+                }
+            }
+            data.params[2] = shader_clip == no_clip ? -1 : static_cast<float>(shader_clip);
             instance_data.push(rstd::move(data));
         }
     }
@@ -1951,10 +2048,15 @@ auto Renderer::prepare_impl(FramePlan plan, DrawOptions options,
     }
     auto compiled = self.compiler->compiled().unwrap();
     Vec<vk::PassFrameBinding> inputs;
+    Option<rstd::sync::Arc<ClipScissors>> scissors;
+    if (options.scissor && !coverage.is_empty())
+        scissors = Some(rstd::sync::Arc<ClipScissors>::make(build_clip_scissors(coverage.as_slice(), frame.extent)));
     for (usize index{}; index < frame.segments.len(); ++index) {
         UiFrameData data{
             frame.gpu.clone(),  {}, {}, frame.item_offsets[index], frame.options,
             frame.stats.clone()};
+        if (usize(frame.segments[index].target) < frame.plan.pass_count())
+            data.scissors = scissors.clone();
         data.items = rstd::move(frame.items[index]);
         for (const auto &paint : data.items) {
             DrawSources sources;

@@ -1,5 +1,5 @@
 module vui.render:effects.backdrop_blur;
-import :renderer;
+import :visibility;
 
 using namespace rstd::prelude;
 
@@ -15,7 +15,8 @@ struct BackdropBlur {
     Serial samples{};
 
     static auto plan(const DrawData &, Scalar sigma, Size logical, VkExtent2D target,
-                     slice<GpuClip> clips, Index clip) -> Option<BackdropBlur>;
+                     slice<GpuClip> clips, slice<visibility::ClipCoverage> coverage, Index clip)
+        -> Option<BackdropBlur>;
     void snapshot(DrawData &) const;
     void filter(DrawData &, bool vertical_pass) const;
     void composite(DrawData &) const;

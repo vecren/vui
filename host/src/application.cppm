@@ -10,6 +10,7 @@ struct ApplicationOptions {
     Index width{1280}, height{720};
     bool validation{true}, readback{};
     WindowBackend backend{WindowBackend::Automatic};
+    gpu::DrawOptions draw{.timings = true};
 };
 struct WindowDriver {
     Window &window;

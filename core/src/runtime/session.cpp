@@ -506,7 +506,7 @@ auto UiSession::publish_update() -> Result<empty, SessionError> {
     return Ok(empty{});
 }
 
-auto UiSession::plan_frame() -> Result<FramePlan, FrameError> {
+auto UiSession::plan_frame(FrameClipPolicy clip_policy) -> Result<FramePlan, FrameError> {
     if (closed_ || closing_ || surface_.is_none())
         return Err(FrameError::InvalidSurface);
     if (advancing_ || planning_ || !document_.can_route()) return Err(FrameError::InvalidContent);
@@ -537,11 +537,11 @@ auto UiSession::plan_frame() -> Result<FramePlan, FrameError> {
     if (published.is_err()) return Err(FrameError::InvalidContent);
     observe_content();
     FramePlanner planner;
-    return planner.build(endpoint_.scene(), *surface_, ++frame_id_);
+    return planner.build(endpoint_.scene(), *surface_, ++frame_id_, clip_policy);
 }
 
-auto UiSession::plan_ui_frame() -> Result<UiFrame, FrameError> {
-    auto plan = plan_frame();
+auto UiSession::plan_ui_frame(FrameClipPolicy clip_policy) -> Result<UiFrame, FrameError> {
+    auto plan = plan_frame(clip_policy);
     if (plan.is_err()) return Err(plan.unwrap_err());
     auto frame = visual_.frame(rstd::move(*plan));
     if (frame.is_err()) return Err(FrameError::InvalidContent);

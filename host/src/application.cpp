@@ -43,8 +43,8 @@ struct Application::Execution {
     ThreadedFrames frames;
     SessionRunner<ThreadedFrames> runner;
 
-    Execution(UiSession &session, Option<FrameWaker> waker)
-        : frames(session, true, rstd::move(waker)), runner(session, frames) {}
+    Execution(UiSession &session, Option<FrameWaker> waker, gpu::DrawOptions draw)
+        : frames(session, true, rstd::move(waker), draw), runner(session, frames) {}
 };
 
 Application::Application() = default;
@@ -70,7 +70,7 @@ auto Application::open(ApplicationOptions options) -> Result<empty, gpu::Error> 
         window_.close();
         return connected;
     }
-    execution_ = Some(Box<Execution>::make(session_, window_.event_waker()));
+    execution_ = Some(Box<Execution>::make(session_, window_.event_waker(), options.draw));
     (*execution_)->frames.set_frame_interval(frame_interval_ns_);
     (void)(*execution_)->frames.set_present_mode(presentation_);
     opened_ = true;

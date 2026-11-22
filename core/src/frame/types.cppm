@@ -24,11 +24,26 @@ struct SurfaceInfo {
                finite(logical_size.width * scale) && finite(logical_size.height * scale);
     }
 };
+struct FrameClipBounds {
+    Scalar left{}, top{}, right{}, bottom{};
+};
+struct FrameClipCoverage {
+    FrameClipBounds bounds;
+    bool empty{};
+};
 struct ClipInstance {
     Shape shape;
     Transform transform;
     Index parent{no_clip};
+    Option<FrameClipCoverage> coverage;
 };
+// Only a proven zero coverage region can be excluded from replay. Bounds are in target pixels.
+struct FrameClipCulling {
+    FrameClipCoverage surface;
+    float scale_x{}, scale_y{};
+    FrameClipCoverage (*restrict_bounds)(FrameClipBounds, const ClipInstance &, float, float){};
+};
+using FrameClipPolicy = FrameClipCulling (*)(const SurfaceInfo &);
 class FrameDraw {
     RSTD_ENUM(FrameDraw,
               (Shape, (vui::Shape shape; Color color; Scalar border_width; Transform transform;
@@ -138,6 +153,7 @@ class FramePlanner {
     };
     FramePlan::Data output_;
     Index depth_limit_;
+    FrameClipCulling culling_;
 
     auto select(const ContentSource &source) -> const ContentSelection & {
         for (const auto &selected : output_.sources)
@@ -152,11 +168,19 @@ class FramePlanner {
         output_.clips.push({value, transform, parent});
         return id;
     }
-    auto clip(Clip value, Transform transform, Index parent) -> Index {
-        return value.enabled ? clip(value.shape.normalized(), transform, parent) : parent;
+    auto clip(Clip value, Transform transform, Index parent, FrameClipCoverage &scope) -> Index {
+        if (!value.enabled) return parent;
+        ClipInstance instance{value.shape.normalized(), transform, parent};
+        if (culling_.restrict_bounds) {
+            if (!scope.empty) scope = culling_.restrict_bounds(scope.bounds, instance, culling_.scale_x, culling_.scale_y);
+            instance.coverage = Some(FrameClipCoverage(scope));
+        }
+        const auto id = static_cast<Index>(output_.clips.len().to_primitive());
+        output_.clips.push(rstd::move(instance));
+        return id;
     }
     auto append(const RenderScene &scene, RenderId id, Transform parent_transform,
-                Index inherited_clip, Index destination, Index depth) -> Option<FrameError> {
+                Index inherited_clip, FrameClipCoverage scope, Index destination, Index depth) -> Option<FrameError> {
         if (depth >= depth_limit_)
             return Some(FrameError::Limit);
         auto node = scene.get(id);
@@ -167,8 +191,13 @@ class FramePlanner {
         auto world = parent_transform * node->properties.transform;
         if (!world.valid())
             return Some(FrameError::InvalidTransform);
-        auto node_clip = clip(node->properties.clip, world * node->properties.clip_transform, inherited_clip);
-        node_clip = clip(node->properties.layout_clip, world * node->properties.layout_clip_transform, node_clip);
+        const auto clips_begin = output_.clips.len();
+        auto node_clip = clip(node->properties.clip, world * node->properties.clip_transform, inherited_clip, scope);
+        node_clip = clip(node->properties.layout_clip, world * node->properties.layout_clip_transform, node_clip, scope);
+        if (scope.empty && !scene.subtree_has_frame_queries(id)) {
+            output_.clips.truncate(clips_begin);
+            return None();
+        }
         auto target = destination;
         bool isolated = node->properties.opacity < 1;
         if (isolated) {
@@ -177,6 +206,7 @@ class FramePlanner {
         }
         // An isolated group applies its inherited mask once at composition.
         auto base_clip = isolated ? no_clip : node_clip;
+        if (isolated) scope = culling_.surface;
         State state{world, base_clip};
         Vec<State> stack;
         output_.contents.push(DisplayList(node->content));
@@ -235,7 +265,7 @@ class FramePlanner {
             } else if (op.is_Children()) {
                 for (auto child : node->children.values()) {
                     auto error = append(scene, child, state.transform * op.as_Children().parent_coordinates,
-                                        state.clip, target, depth + 1);
+                                        state.clip, scope, target, depth + 1);
                     if (error.is_some())
                         return error;
                 }
@@ -249,17 +279,18 @@ class FramePlanner {
 
   public:
     explicit FramePlanner(Index depth_limit = 256) : depth_limit_(depth_limit) {}
-    auto build(const RenderScene &scene, SurfaceInfo surface, Serial frame_id)
+    auto build(const RenderScene &scene, SurfaceInfo surface, Serial frame_id, FrameClipPolicy clip_policy = {})
         -> Result<FramePlan, FrameError> {
         if (!surface.valid())
             return Err(FrameError::InvalidSurface);
         output_ = FramePlan::Data{};
+        culling_ = clip_policy ? clip_policy(surface) : FrameClipCulling{};
         output_.identity = {frame_id, scene.session(), scene.revision(), scene.ui_revision(),
                             surface.generation};
         output_.surface = surface;
         output_.passes.push(FramePass{});
         if (scene.root().is_some()) {
-            auto error = append(scene, *scene.root(), {}, no_clip, 0, 0);
+            auto error = append(scene, *scene.root(), {}, no_clip, culling_.surface, 0, 0);
             if (error.is_some()) {
                 output_ = FramePlan::Data{};
                 return Err(*error);

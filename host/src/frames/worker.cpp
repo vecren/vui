@@ -130,7 +130,7 @@ auto ThreadedFrames::pump_pending() -> Result<empty, gpu::Error> {
         if (!channel_->ready || channel_->packet.is_some() ||
             (windowed_ && (control.suspended || !control.extent.width || !control.extent.height))) return Ok(empty{});
     }
-    auto planned = detail::plan_frame_packet(session_);
+    auto planned = detail::plan_frame_packet(session_, draw_.culling);
     if (planned.is_err()) {
         auto error = planned.unwrap_err();
         if (error == FrameError::Busy) return Ok(empty{});

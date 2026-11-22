@@ -2,7 +2,6 @@ module;
 #include <cmath>
 module vui.render;
 import :effects.backdrop_blur;
-import :visibility;
 
 namespace vui::gpu::detail {
 namespace {
@@ -16,18 +15,18 @@ void cover(DrawData &draw, VkExtent2D extent) {
 }
 
 void trim(RasterBounds &bounds, double RasterBounds::*edge, double RasterBounds::*opposite,
-          const GpuClip &clip, float scale_x, float scale_y) {
+          const GpuClip &clip, visibility::ClipTolerance tolerance, float scale_x, float scale_y) {
     // Retain every strip that cannot be conservatively rejected by the clip test.
     auto first = bounds.*edge;
     auto last = bounds.*opposite;
     auto strip = bounds;
     strip.*opposite = first;
-    if (!visibility::clipped(strip, clip, scale_x, scale_y))
+    if (!visibility::clipped(strip, clip, tolerance, scale_x, scale_y))
         return;
     while (std::fabs(last - first) > 1) {
         auto middle = (first + last) * .5;
         strip.*opposite = middle;
-        if (visibility::clipped(strip, clip, scale_x, scale_y))
+        if (visibility::clipped(strip, clip, tolerance, scale_x, scale_y))
             first = middle;
         else
             last = middle;
@@ -37,23 +36,28 @@ void trim(RasterBounds &bounds, double RasterBounds::*edge, double RasterBounds:
 }
 
 auto BackdropBlur::plan(const DrawData &draw, Scalar sigma, Size logical, VkExtent2D target,
-                        slice<GpuClip> clips, Index clip_index) -> Option<BackdropBlur> {
+                        slice<GpuClip> clips, slice<visibility::ClipCoverage> coverage, Index clip_index)
+    -> Option<BackdropBlur> {
     auto bounds = visibility::QuadMapping(draw).quad(draw, target)
                       .unwrap_or(RasterBounds{0, 0, double(target.width), double(target.height)});
     bounds = {std::fmax(0, bounds.left), std::fmax(0, bounds.top),
               std::fmin(target.width, bounds.right), std::fmin(target.height, bounds.bottom)};
     if (bounds.left >= bounds.right || bounds.top >= bounds.bottom)
         return None();
-    for (; clip_index != no_clip;) {
-        const auto &clip = clips[usize(clip_index)];
-        const auto scale_x = draw.row0[3];
-        const auto scale_y = draw.row1[3];
-        if (visibility::clipped(bounds, clip, scale_x, scale_y))
+    const auto scale_x = draw.row0[3];
+    const auto scale_y = draw.row1[3];
+    while (clip_index != no_clip) {
+        const auto index = usize(clip_index);
+        const auto &clip = clips[index];
+        const auto tolerance = coverage.is_empty() || coverage[index].empty
+                                   ? visibility::clip_tolerance(clip, scale_x, scale_y)
+                                   : coverage[index].tolerance;
+        if (visibility::clipped(bounds, clip, tolerance, scale_x, scale_y))
             return None();
-        trim(bounds, &RasterBounds::left, &RasterBounds::right, clip, scale_x, scale_y);
-        trim(bounds, &RasterBounds::right, &RasterBounds::left, clip, scale_x, scale_y);
-        trim(bounds, &RasterBounds::top, &RasterBounds::bottom, clip, scale_x, scale_y);
-        trim(bounds, &RasterBounds::bottom, &RasterBounds::top, clip, scale_x, scale_y);
+        trim(bounds, &RasterBounds::left, &RasterBounds::right, clip, tolerance, scale_x, scale_y);
+        trim(bounds, &RasterBounds::right, &RasterBounds::left, clip, tolerance, scale_x, scale_y);
+        trim(bounds, &RasterBounds::top, &RasterBounds::bottom, clip, tolerance, scale_x, scale_y);
+        trim(bounds, &RasterBounds::bottom, &RasterBounds::top, clip, tolerance, scale_x, scale_y);
         clip_index = clip.params[1] < 0 ? no_clip : static_cast<Index>(clip.params[1]);
     }
 

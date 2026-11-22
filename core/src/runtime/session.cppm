@@ -177,8 +177,8 @@ class UiSession {
     auto publish_update() -> Result<empty, SessionError>;
 
   public:
-    auto plan_frame() -> Result<FramePlan, FrameError>;
-    auto plan_ui_frame() -> Result<UiFrame, FrameError>;
+    auto plan_frame(FrameClipPolicy clip_policy = {}) -> Result<FramePlan, FrameError>;
+    auto plan_ui_frame(FrameClipPolicy clip_policy = {}) -> Result<UiFrame, FrameError>;
     // The host acknowledges a completed plan; GPU completion does not prove display presentation.
     auto complete_frame(UiFrame frame) -> Result<bool, FrameError>;
     auto close() -> Result<empty, SessionError>;

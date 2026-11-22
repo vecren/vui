@@ -111,12 +111,16 @@ struct ImageCacheStats {
 };
 struct DrawOptions {
     bool batching{true}, culling{true}, timings{false};
+    bool scissor{true}, clip_elision{};
 };
+auto frame_clip_culling(const SurfaceInfo &surface) -> FrameClipCulling;
 struct DrawStats {
     FrameIdentity frame;
     Serial items{}, batches{}, merged_items{}, instance_bytes{};
     Serial resolved_items{}, surface_culled{}, clip_culled{}, used_external_frames{};
     Serial pass_starts{}, pipeline_breaks{}, texture_breaks{}, sampler_breaks{}, disabled_breaks{};
+    Serial scissored_batches{}, scissor_updates{};
+    Serial clip_elided_items{};
     Serial backdrop_captures{}, backdrop_capture_pixels{}, backdrop_filter_pixels{};
     Serial backdrop_filter_passes{}, backdrop_downsampled{}, backdrop_unavailable{}, backdrop_budget_skips{};
 };

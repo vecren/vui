@@ -128,7 +128,9 @@ class RenderScene {
     struct Slot {
         Serial generation{};
         Option<RenderNode> node;
+        bool has_frame_queries{};
     };
+    static constexpr Index no_parent = ~Index{};
     Serial session_, revision_{}, ui_revision_{};
     Index limit_;
     Vec<Slot> slots_;
@@ -164,8 +166,8 @@ class RenderScene {
                 size = required;
         }
         Vec<Slot> candidate;
-        Vec<unsigned char> touched, parents;
-        Vec<Index> queue;
+        Vec<unsigned char> touched;
+        Vec<Index> parents, queue;
         if (candidate.try_reserve_exact(size).is_err() ||
             touched.try_reserve_exact(size).is_err() || parents.try_reserve_exact(size).is_err() ||
             queue.try_reserve_exact(size).is_err())
@@ -179,7 +181,7 @@ class RenderScene {
             }
             candidate.push(rstd::move(slot));
             touched.push(0);
-            parents.push(0);
+            parents.push(Index(no_parent));
         }
         auto mark = [&](RenderId id, unsigned mask) -> Option<ApplyError> {
             if (!id.valid() || id.session != header.session)
@@ -249,11 +251,14 @@ class RenderScene {
         if (data.root_changed)
             root = data.root;
         usize count{};
-        for (const auto &slot : candidate) {
+        bool has_frame_queries{};
+        for (auto &slot : candidate) {
             if (slot.node.is_none())
                 continue;
             ++count;
             const auto &node = *slot.node;
+            slot.has_frame_queries = node.content.has_frame_queries();
+            has_frame_queries |= slot.has_frame_queries;
             if (!node.properties.valid())
                 return Err(ApplyError::InvalidProperties);
             if (!node.children.values().is_empty() && !node.content.has_children())
@@ -262,18 +267,18 @@ class RenderScene {
                 if (!resolve(candidate, child, header.session))
                     return Err(ApplyError::Missing);
                 auto &incoming = parents[usize(child.slot)];
-                if (incoming != 0)
+                if (incoming != no_parent)
                     return Err(ApplyError::MultipleParents);
-                incoming = 1;
+                incoming = node.id.slot;
             }
         }
         if (root.is_some()) {
-            if (!resolve(candidate, *root, header.session) || parents[usize(root->slot)] != 0)
+            if (!resolve(candidate, *root, header.session) || parents[usize(root->slot)] != no_parent)
                 return Err(ApplyError::Root);
         } else if (count != usize())
             return Err(ApplyError::Root);
         for (usize i{}; i < size; ++i)
-            if (candidate[i].node.is_some() && parents[i] == 0)
+            if (candidate[i].node.is_some() && parents[i] == no_parent)
                 queue.push(static_cast<Index>(i.to_primitive()));
         for (usize head{}; head < queue.len(); ++head) {
             auto index = usize(queue[head]);
@@ -283,9 +288,18 @@ class RenderScene {
         if (queue.len() != count)
             return Err(ApplyError::Cycle);
         for (usize i{}; i < size; ++i)
-            if (candidate[i].node.is_some() && parents[i] == 0 &&
+            if (candidate[i].node.is_some() && parents[i] == no_parent &&
                 (root.is_none() || i != usize(root->slot)))
                 return Err(ApplyError::Unreachable);
+        if (has_frame_queries) {
+            for (auto i = queue.len(); i != usize();) {
+                i -= usize(1);
+                const auto child = usize(queue[i]);
+                const auto parent = parents[child];
+                if (parent != no_parent && candidate[child].has_frame_queries)
+                    candidate[usize(parent)].has_frame_queries = true;
+            }
+        }
         slots_ = rstd::move(candidate);
         root_ = root;
         session_ = header.session;
@@ -310,6 +324,9 @@ class RenderScene {
         if (slot.generation != id.generation || slot.node.is_none())
             return nullptr;
         return &*slot.node;
+    }
+    auto subtree_has_frame_queries(RenderId id) const -> bool {
+        return get(id) && slots_[usize(id.slot)].has_frame_queries;
     }
     auto apply(const RenderTransaction &transaction) -> Result<Applied, ApplyError> {
         return apply_to(transaction, false);

@@ -43,18 +43,18 @@ class DisplayListRecorder;
 class DisplayList {
     struct Data {
         Vec<DrawOp> operations;
-        bool children{};
+        bool children{}, frame_queries{};
         Option<Rect> bounds;
-        Data(Vec<DrawOp> ops, bool has_children, Option<Rect> extent)
-            : operations(rstd::move(ops)), children(has_children), bounds(extent) {}
+        Data(Vec<DrawOp> ops, bool has_children, bool has_frame_queries, Option<Rect> extent)
+            : operations(rstd::move(ops)), children(has_children), frame_queries(has_frame_queries), bounds(extent) {}
     };
     rstd::sync::Arc<Data> data_;
-    DisplayList(Vec<DrawOp> ops, bool children, Option<Rect> bounds = None())
-        : data_(rstd::sync::Arc<Data>::make(rstd::move(ops), children, bounds)) {}
+    DisplayList(Vec<DrawOp> ops, bool children, bool frame_queries, Option<Rect> bounds = None())
+        : data_(rstd::sync::Arc<Data>::make(rstd::move(ops), children, frame_queries, bounds)) {}
     friend class DisplayListRecorder;
 
   public:
-    DisplayList() : DisplayList(Vec<DrawOp>{}, false) {}
+    DisplayList() : DisplayList(Vec<DrawOp>{}, false, false) {}
     DisplayList(const DisplayList &other) : data_(other.data_.clone()) {}
     auto operator=(const DisplayList &other) -> DisplayList & {
         if (this != &other)
@@ -65,6 +65,7 @@ class DisplayList {
     auto operator=(DisplayList &&) -> DisplayList & = default;
     auto operations() const -> slice<DrawOp> { return data_->operations.as_slice(); }
     auto has_children() const -> bool { return data_->children; }
+    auto has_frame_queries() const -> bool { return data_->frame_queries; }
     auto bounds() const -> Option<Rect> { return data_->bounds; }
     auto same_content(const DisplayList &other) const -> bool {
         return rstd::sync::Arc<Data>::ptr_eq(data_, other.data_);
@@ -80,7 +81,7 @@ class Canvas {
 
     Vec<DrawOp> operations_;
     usize depth_{};
-    bool children_{}, base_modified_{}, closed_{};
+    bool children_{}, frame_queries_{}, base_modified_{}, closed_{};
     Option<RecordingError> error_;
     Transform coordinates_;
     Vec<Transform> coordinates_stack_;
@@ -255,6 +256,7 @@ class Canvas {
         }
         if (radial.amount == 0) return;
         include(destination);
+        frame_queries_ = true;
         operations_.push(DrawOp::Image(rstd::move(data), destination, source, sampling, tint, edges,
                                        clamp_source, blend, radial, color_source));
     }
@@ -290,6 +292,7 @@ class Canvas {
             return;
         }
         include(destination);
+        frame_queries_ = true;
         operations_.push(
             DrawOp::External(rstd::move(source), destination, fit, sampling, placeholder, blend));
     }
@@ -328,7 +331,7 @@ class DisplayListRecorder : public Canvas {
         closed_ = true;
         if (depth_ != usize())
             return Err(RecordingError::Unbalanced);
-        return Ok(DisplayList(rstd::move(operations_), children_, bounds_));
+        return Ok(DisplayList(rstd::move(operations_), children_, frame_queries_, bounds_));
     }
 };
 } // namespace vui

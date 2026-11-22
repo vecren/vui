@@ -66,8 +66,8 @@ struct FramePacket {
 } // namespace vui::host
 
 namespace vui::host::detail {
-inline auto plan_frame_packet(UiSession &session) -> Result<FramePacket, FrameError> {
-    auto frame = session.plan_ui_frame();
+inline auto plan_frame_packet(UiSession &session, bool culling = true) -> Result<FramePacket, FrameError> {
+    auto frame = session.plan_ui_frame(culling ? gpu::frame_clip_culling : nullptr);
     if (frame.is_err()) return Err(frame.unwrap_err());
     return Ok(FramePacket{frame->plan(), session.last_successful_input_timings(), false,
                           Some(rstd::move(*frame))});
@@ -450,15 +450,16 @@ template <class Backend = gpu::Renderer> class FrameExecutor {
 };
 class FrameLoop : public FrameExecutor<> {
     UiSession &session_;
+    bool culling_;
   public:
     FrameLoop(UiSession &session, gpu::Renderer &renderer, bool windowed = true,
               gpu::DrawOptions options = {})
-        : FrameExecutor<>(renderer, windowed, options), session_(session) {}
+        : FrameExecutor<>(renderer, windowed, options), session_(session), culling_(options.culling) {}
     auto pump(FrameTiming timing = {}) -> Result<empty, gpu::Error> {
         return pump_with_clock([timing] { return timing; });
     }
     auto pump_with_clock(auto clock) -> Result<empty, gpu::Error> {
-        return FrameExecutor<>::pump_with_clock(clock, [&] { return detail::plan_frame_packet(session_); });
+        return FrameExecutor<>::pump_with_clock(clock, [&] { return detail::plan_frame_packet(session_, culling_); });
     }
 };
 } // namespace vui::host

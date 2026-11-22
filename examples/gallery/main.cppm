@@ -10,9 +10,13 @@ using namespace rstd::literals;
 namespace {
 using Gallery = examples::gallery::View;
 
-auto parse_args(int argc, char **argv, Option<Index> &canvas, unsigned &limit) -> bool {
+auto parse_args(int argc, char **argv, Option<Index> &canvas, unsigned &limit, bool &clip_elision) -> bool {
     if (argc < 2 || rstd::ffi::CStr::from_ptr(argv[1]).to_str().unwrap_or(""_str) != "--canvas"_str)
         return examples::frame_limit(argc, argv, limit);
+    if (argc > 3 && rstd::ffi::CStr::from_ptr(argv[argc - 1]).to_str().unwrap_or(""_str) == "--clip-elision"_str) {
+        clip_elision = true;
+        --argc;
+    }
     if (argc == 3 || argc == 4) {
         auto count = rstd::from_str<u32>(rstd::ffi::CStr::from_ptr(argv[2]).to_str().unwrap_or(""_str));
         if (count.is_ok() && Gallery::supports_canvas_load(count->to_primitive())) {
@@ -21,7 +25,7 @@ auto parse_args(int argc, char **argv, Option<Index> &canvas, unsigned &limit) -
             return examples::frame_limit(argc - 2, frames, limit);
         }
     }
-    rstd::io::eprintln("usage: vui-gallery --canvas <256|1024|4096> [frame-count]");
+    rstd::io::eprintln("usage: vui-gallery --canvas <256|1024|4096> [frame-count] [--clip-elision]");
     return false;
 }
 
@@ -55,6 +59,8 @@ struct CanvasProfile {
         rstd::io::println("canvas particles={} extent={}x{} items={} batches={} instance_bytes={} surface_culled={} clip_culled={}",
             particles, extent.width, extent.height, draws->items, draws->batches, draws->instance_bytes,
             draws->surface_culled, draws->clip_culled);
+        rstd::io::println("canvas scissored_batches={} scissor_updates={}", draws->scissored_batches, draws->scissor_updates);
+        rstd::io::println("canvas clip_elided_items={}", draws->clip_elided_items);
         if (paint.calls)
             rstd::io::println("canvas paint_samples={} paint_ms_avg={:.3}", paint.calls,
                 double(paint.nanoseconds) / (1e6 * double(paint.calls)));
@@ -73,9 +79,11 @@ struct CanvasProfile {
 int main(int argc, char **argv) {
     unsigned limit{};
     Option<Index> canvas;
-    if (!parse_args(argc, argv, canvas, limit)) return 2;
+    bool clip_elision{};
+    if (!parse_args(argc, argv, canvas, limit, clip_elision)) return 2;
     examples::Application app;
-    if (!app.open("vui gallery", 800, 600, canvas.is_none())) return 1;
+    if (!app.open("vui gallery", 800, 600, canvas.is_none(), {.timings = true, .clip_elision = clip_elision}))
+        return 1;
     auto &ui = app.session.document();
     Gallery gallery(app.session, canvas);
     if (gallery.mount().is_err()) return 1;

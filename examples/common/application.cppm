@@ -54,12 +54,14 @@ class Application {
     auto snapshot() -> host::RenderSnapshot { return application_.snapshot(); }
     UiSession &session{application_.session()};
 
-    auto open(const char *title, Index width, Index height, bool validation = true) -> bool {
+    auto open(const char *title, Index width, Index height, bool validation = true,
+              gpu::DrawOptions draw = {.timings = true}) -> bool {
         capture_path_ = None();
         auto path = rstd::env::var_os("VUI_CAPTURE"_str);
         if (path.is_some() && !path->is_empty())
             capture_path_ = Some(rstd::path::PathBuf::from(rstd::move(path).unwrap()));
-        auto opened = application_.open({title, width, height, validation, capture_path_.is_some()});
+        auto opened = application_.open({.title = title, .width = width, .height = height,
+                                        .validation = validation, .readback = capture_path_.is_some(), .draw = draw});
         if (opened.is_err()) {
             report(opened.unwrap_err());
             return false;
