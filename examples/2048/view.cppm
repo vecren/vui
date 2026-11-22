@@ -136,8 +136,26 @@ class View {
         auto create() const -> State { return {move}; }
         void update(State &state, cx::BehaviorContext &) const { state.move = move; }
     };
-    struct Canvas {
-        ReferenceCanvas layout;
+    struct BoardLayout {
+        static constexpr Size portrait{500, 700}, landscape{840, 492};
+
+        static auto viewport(LayoutConstraints limits) -> Size {
+            return {limits.max_width.unwrap_or(rstd::cmp::max(portrait.width, limits.min_width)),
+                    limits.max_height.unwrap_or(rstd::cmp::max(portrait.height, limits.min_height))};
+        }
+        static auto wide(Size available) -> bool { return available.width > available.height * 1.25; }
+        static auto reference(Size available) -> ReferenceCanvas {
+            return {wide(available) ? landscape : portrait, CanvasFit::Contain, {.5, .5}, true, Some(Scalar(1.2))};
+        }
+        auto measure(LayoutMeasureContext &context, LayoutConstraints limits) -> Result<Size, UiError> {
+            return reference(viewport(limits)).measure(context, limits);
+        }
+        auto arrange(LayoutArrangeContext &context, Size size) -> Result<empty, UiError> {
+            return reference(size).arrange(context, size);
+        }
+    };
+    template <class Layout> struct Canvas {
+        Layout layout;
         auto prepare(cx::PrepareContext &context, Option<UiId> previous, NodeStyle style) -> cx::ComposeResult<UiNodeRef> {
             auto node = previous.is_some() ? context.edit().existing(*previous)
                 : context.edit().create(LayoutKind::Custom, style);
@@ -148,7 +166,7 @@ class View {
                 context.on_mount([target](cx::CommittedContext &committed) -> cx::ComposeResult<cx::EffectLease> {
                     auto resolved = committed.resolve(target);
                     if (resolved.is_err()) return Err(resolved.unwrap_err());
-                    auto attached = committed.session().document().attach_layout<ReferenceCanvas>(resolved.unwrap());
+                    auto attached = committed.session().document().attach_layout<Layout>(resolved.unwrap());
                     if (attached.is_err()) return Err(cx::ComposeError(cx::ComposeStage::Effect, Some(attached.unwrap_err())));
                     return Ok(cx::EffectLease{});
                 });
@@ -194,12 +212,14 @@ class View {
         return cx::text(value).format(TextFormatBuilder{}.size(size).wrap(TextWrap::None).bold(bold).build())
             .color(tint).style(NodeStyleBuilder{}.transform({1, 0, 0, 1, at.x, at.y}).hit_test_visible(false).build());
     }
-    template <class F> static auto button(ref<str> title, Scalar x, F clicked, bool visible = true) -> cx::Element {
+    template <class F> static auto button(ref<str> title, Point origin, F clicked, bool visible = true,
+                                          Scalar height = 48) -> cx::Element {
         return cx::button(label(title, 17, {}, true, {1, 1, 1, 1})
                 .style(NodeStyleBuilder{}.horizontal(Alignment::Center).vertical(Alignment::Center).hit_test_visible(false).build()),
             rstd::move(clicked), ButtonStyleBuilder{}.normal(ink).pressed({.01, .025, .05, 1})
                 .focused({.035, .12, .26, 1}).radius(10).build())
-            .style(NodeStyleBuilder{}.width(210).height(48).transform({1, 0, 0, 1, x, 562}).visible(visible).build());
+            .style(NodeStyleBuilder{}.width(210).height(height)
+                .transform({1, 0, 0, 1, origin.x, origin.y}).visible(visible).build());
     }
     struct BoardDecoration {
         auto draw(ModifierDrawContext &context) -> Result<empty, UiError> {
@@ -230,7 +250,8 @@ class View {
             .reference(value.node);
     }
     [[vui::compose]]
-    static auto content(cx::Borrowed<View> owner, state::Value<rstd::rc::Rc<Model>> source) -> cx::ComposeResult<cx::Element> {
+    static auto content(cx::Borrowed<View> owner, state::Value<rstd::rc::Rc<Model>> source, bool wide)
+        -> cx::ComposeResult<cx::Element> {
         auto observed = cx::read(source);
         if (observed.is_err()) return Err(observed.unwrap_err());
         auto snapshot = observed.unwrap();
@@ -279,21 +300,27 @@ class View {
         if (effect.is_err()) return Err(effect.unwrap_err());
         const auto hint = owner->input_hint_ == InputHint::Swipe ? "在棋盘上滑动以移动方块"_str
             : "方向键移动 · Tab 切换按钮 · Esc 退出"_str;
+        constexpr Scalar panel_x = 506;
+        const Point board = wide ? Point{24, 24} : Point{0, 86};
+        const auto action_height = wide ? 68 : 48;
         return Ok(cx::stack({
-            label("2048"_str, 54, {0, 0}, true),
-            label("得分"_str, 14, {330, 8}), label(score.as_str(), 28, {330, 28}, true),
+            label("2048"_str, 54, wide ? Point{panel_x, 24} : Point{}, true),
+            label("得分"_str, 14, wide ? Point{panel_x, 121} : Point{330, 8}),
+            label(score.as_str(), 28, wide ? Point{panel_x, 143} : Point{330, 28}, true),
             cx::stack(rstd::move(cells)).style(NodeStyleBuilder{
                 examples::block(board_size, board_size, {0, 0, 0, 0})}
-                .transform({1, 0, 0, 1, 0, 86}).build())
+                .transform({1, 0, 0, 1, board.x, board.y}).build())
                 .behavior(cx::Key{1}, BoardDecorationDescriptor{}).behavior(cx::Key{2}, BoardSwipeDescriptor{move}),
-            label(message, 16, {0, 538}),
-            button("重新开始"_str, 0, [owner] { owner->restart(); }),
-            button("继续挑战"_str, 234, [owner] {
+            label(message, 16, wide ? Point{panel_x, 238} : Point{0, 538}),
+            button("重新开始"_str, wide ? Point{panel_x, 275} : Point{0, 562},
+                [owner] { owner->restart(); }, true, action_height),
+            button("继续挑战"_str, wide ? Point{panel_x, 359} : Point{234, 562}, [owner] {
                 owner->continue_game();
                 owner->session_.input().focus_when_ready(owner->input_.id().unwrap(), None<ScopeId>(), owner->lifetime_.guard()).unwrap();
-            }, model.won),
-            label(hint, 14, {0, 628}),
-        }).style(NodeStyleBuilder{examples::block(board_size, 650, {0, 0, 0, 0})}.focusable(true).build())
+            }, model.won, action_height),
+            label(hint, 14, wide ? Point{panel_x, 449} : Point{0, 628}),
+        }).style(NodeStyleBuilder{examples::block(wide ? BoardLayout::landscape.width : board_size,
+            wide ? BoardLayout::landscape.height : 650, {0, 0, 0, 0})}.focusable(true).build())
             .reference(owner->input_).behavior(cx::Key{1}, GameInputDescriptor{move}));
     }
     [[vui::compose]]
@@ -308,12 +335,12 @@ class View {
         auto saved_focus = cx::node();
         if (saved_focus.is_err()) return Err(saved_focus.unwrap_err());
         auto result_focus = saved_focus.unwrap();
-        auto restart = button("重新开始"_str, 0, [owner] { owner->restart(); })
+        auto restart = button("重新开始"_str, {}, [owner] { owner->restart(); })
             .style(NodeStyleBuilder{}.width(176).height(48).build());
         Vec<cx::Element> actions;
         if (model.won) {
             actions.push(rstd::move(restart));
-            actions.push(button("继续挑战"_str, 0, [owner] { owner->continue_game(); })
+            actions.push(button("继续挑战"_str, {}, [owner] { owner->continue_game(); })
                 .style(NodeStyleBuilder{}.width(176).height(48).build()).reference(result_focus));
         } else actions.push(rstd::move(restart).reference(result_focus));
         auto message = model.over ? "没有可移动的方块了，再来一局吧。"_str
@@ -425,13 +452,11 @@ class View {
         composition_->set_content(cx::with_constraints(cx::Key{1},
             [owner = cx::borrow(*this), source = model_.value()](cx::CompositionContext &, LayoutConstraints constraints)
                 -> cx::ComposeResult<cx::Element> {
-                auto width = constraints.max_width.unwrap_or(rstd::cmp::max(Scalar(500), constraints.min_width));
-                auto height = constraints.max_height.unwrap_or(rstd::cmp::max(Scalar(700), constraints.min_height));
-                auto board = content(owner, source);
+                const auto size = BoardLayout::viewport(constraints);
+                auto board = content(owner, source, BoardLayout::wide(size));
                 if (board.is_err()) return Err(board.unwrap_err());
-                return Ok(cx::element(Canvas{ReferenceCanvas{{500, 700}, CanvasFit::Contain, {.5, .5}, true, Some(Scalar(1.2))}},
-                    cx::elements({board.unwrap()}))
-                    .style(NodeStyleBuilder{}.width(width).height(height).build()));
+                return Ok(cx::element(Canvas{BoardLayout{}}, cx::elements({board.unwrap()}))
+                    .style(NodeStyleBuilder{}.width(size.width).height(size.height).build()));
             })).unwrap();
         auto overlay = ui().append<Stack>(background_, NodeStyleBuilder{}.hit_self(false)
             .horizontal(Alignment::Stretch).vertical(Alignment::Stretch).build()).unwrap();

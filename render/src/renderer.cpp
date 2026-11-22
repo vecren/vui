@@ -1277,8 +1277,13 @@ struct Renderer::Impl {
     }
     PresentMode presentation{PresentMode::Fifo};
     auto swapchain_options() const -> vk::SwapchainOptions {
-        return {true, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
-                          (readback_enabled ? VK_IMAGE_USAGE_TRANSFER_SRC_BIT : 0u), presentation};
+        vk::SwapchainOptions options{true, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                            (readback_enabled ? VK_IMAGE_USAGE_TRANSFER_SRC_BIT : 0u), presentation};
+#if __is_target_environment(android)
+        // Vui draws in window coordinates. The compositor applies the display rotation.
+        options.pre_transform = Some(VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR);
+#endif
+        return options;
     }
     auto presentation_sync() -> Result<empty, Error> {
         Vec<PresentSync> next;
