@@ -54,12 +54,12 @@ class Application {
     auto snapshot() -> host::RenderSnapshot { return application_.snapshot(); }
     UiSession &session{application_.session()};
 
-    auto open(const char *title, Index width, Index height) -> bool {
+    auto open(const char *title, Index width, Index height, bool validation = true) -> bool {
         capture_path_ = None();
         auto path = rstd::env::var_os("VUI_CAPTURE"_str);
         if (path.is_some() && !path->is_empty())
             capture_path_ = Some(rstd::path::PathBuf::from(rstd::move(path).unwrap()));
-        auto opened = application_.open({title, width, height, true, capture_path_.is_some()});
+        auto opened = application_.open({title, width, height, validation, capture_path_.is_some()});
         if (opened.is_err()) {
             report(opened.unwrap_err());
             return false;
@@ -75,7 +75,7 @@ class Application {
     }
     template <class BeforeUpdate, class AfterUpdate, class Presented>
     auto run(unsigned limit, BeforeUpdate before_update, AfterUpdate after_update,
-             Presented presented) -> int {
+             Presented presented, bool redraw_for_limit = true) -> int {
         unsigned frames{};
         auto hooks = host::callback_hooks(
             [&](const host::HostEvents &events) -> Result<empty, UiError> {
@@ -105,7 +105,7 @@ class Application {
                 ++frames;
                 if (limit && frames >= limit)
                     application_.request_close();
-                else if (limit)
+                else if (limit && redraw_for_limit)
                     application_.request_redraw();
                 return Ok(empty{});
             },

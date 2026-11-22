@@ -5,6 +5,7 @@ import :glass;
 import :controls;
 import :lists;
 import :motion;
+import :canvas_workload;
 import vui.compose;
 import vui.examples;
 import rstd;
@@ -18,13 +19,15 @@ using examples::block;
 namespace {
 using namespace examples::gallery::detail;
 
-enum class Page { Controls, Lists, Motion };
+enum class Page { Controls, Lists, Motion, Canvas };
+constexpr unsigned tab_count = unsigned(Page::Canvas) + 1;
 
 auto page_title(Page page) -> ref<str> {
     switch (page) {
     case Page::Controls: return "Controls"_str;
     case Page::Lists: return "Lists"_str;
     case Page::Motion: return "Motion"_str;
+    case Page::Canvas: return "Canvas"_str;
     }
     return ""_str;
 }
@@ -85,7 +88,7 @@ struct Tabs {
     state::Cell<Page> selected;
 };
 
-struct TabButtons { cx::NodeRef nodes[3]; };
+struct TabButtons { cx::NodeRef nodes[tab_count]; };
 
 struct TabKeys {
     using State = TabKeys;
@@ -102,10 +105,10 @@ struct TabKeys {
         const auto previous = vertical ? Key::Up : Key::Left;
         const auto next = vertical ? Key::Down : Key::Right;
         auto index = unsigned(page);
-        if (event.input.key == previous) index = (index + 2) % 3;
-        else if (event.input.key == next) index = (index + 1) % 3;
+        if (event.input.key == previous) index = (index + tab_count - 1) % tab_count;
+        else if (event.input.key == next) index = (index + 1) % tab_count;
         else if (event.input.key == Key::Home || event.input.key == Key::PageUp) index = 0;
-        else if (event.input.key == Key::End || event.input.key == Key::PageDown) index = 2;
+        else if (event.input.key == Key::End || event.input.key == Key::PageDown) index = tab_count - 1;
         else return;
         auto id = buttons.nodes[index].id();
         if (id.is_err()) return;
@@ -140,13 +143,14 @@ auto tab_list(cx::Borrowed<Tabs> tabs, Page current, Scalar width, bool desktop)
     if (buttons.is_err()) return Err(buttons.unwrap_err());
     constexpr Scalar padding = 12;
     constexpr Scalar spacing = 6;
-    const auto tab_width = rstd::cmp::max(Scalar(0), (width - 2 * (padding + spacing)) / 3);
+    const auto tab_width = rstd::cmp::max(Scalar(0), (width - 2 * padding - (tab_count - 1) * spacing) / tab_count);
     auto wordmark = label("vui gallery"_str, 20, foreground, true)
         .style(label_style().horizontal(desktop ? Alignment::Start : Alignment::Center).build());
     auto items = cx::elements({
         tab(tabs, **buttons, Page::Controls, current == Page::Controls, desktop, tab_width),
         tab(tabs, **buttons, Page::Lists, current == Page::Lists, desktop, tab_width),
         tab(tabs, **buttons, Page::Motion, current == Page::Motion, desktop, tab_width),
+        tab(tabs, **buttons, Page::Canvas, current == Page::Canvas, desktop, tab_width),
     });
     auto group = desktop ? cx::column(rstd::move(items)) : cx::row(rstd::move(items));
     return Ok(cx::column({rstd::move(wordmark), rstd::move(group)
@@ -181,7 +185,8 @@ auto dialog(cx::Borrowed<state::Cell<bool>> shown, state::Value<Insets> insets) 
 [[vui::compose]]
 auto gallery_content(cx::Borrowed<Tabs> tabs, cx::Borrowed<LevelRowsOwner> rows, cx::NodeRef picture,
              cx::Borrowed<state::Cell<bool>> dialog_open, state::Value<Insets> insets,
-             state::Value<Scalar> width) -> cx::ComposeResult<cx::Element> {
+             state::Value<Scalar> width, cx::Borrowed<state::Cell<CanvasOptions>> canvas_options,
+             cx::Borrowed<CanvasRecording> canvas_recording) -> cx::ComposeResult<cx::Element> {
     auto selected = cx::read(tabs->selected.value());
     if (selected.is_err()) return Err(selected.unwrap_err());
     auto available = cx::read(width);
@@ -195,10 +200,17 @@ auto gallery_content(cx::Borrowed<Tabs> tabs, cx::Borrowed<LevelRowsOwner> rows,
     if (lists_page.is_err()) return Err(lists_page.unwrap_err());
     auto motion_page = motion(cx::borrow(tabs->session), picture, content_width);
     if (motion_page.is_err()) return Err(motion_page.unwrap_err());
+    auto canvas_page = cx::stack({});
+    if (current == Page::Canvas) {
+        auto workload = canvas_workload(canvas_options, canvas_recording, content_width);
+        if (workload.is_err()) return Err(workload.unwrap_err());
+        canvas_page = workload.unwrap();
+    }
     auto panels = cx::stack({
         tab_panel(Page::Controls, current, controls_page.unwrap()),
         tab_panel(Page::Lists, current, lists_page.unwrap()),
         tab_panel(Page::Motion, current, motion_page.unwrap()),
+        tab_panel(Page::Canvas, current, rstd::move(canvas_page)),
     }).style(fill().hit_self(false).build());
     auto navigation = GalleryLayout::wide(available->value())
         ? tab_list(tabs, current, available->value(), true)
@@ -220,14 +232,26 @@ class View {
     cx::NodeRef picture_;
     LevelRowsOwner rows_{rstd::rc::make_rc<LevelRows>()};
     state::Graph graph_;
-    Tabs tabs_{session_, graph_.cell(Page::Controls).unwrap()};
+    Tabs tabs_;
     state::Cell<Scalar> width_{graph_.cell(Scalar(0)).unwrap()};
     state::Cell<bool> dialog_open_{graph_.cell(false).unwrap()};
     state::Cell<Insets> dialog_insets_{graph_.cell(Insets{}).unwrap()};
+    state::Cell<CanvasOptions> canvas_options_;
+    CanvasRecording canvas_recording_;
     Option<cx::Composition> composition_;
 
   public:
-    explicit View(UiSession &session) : session_(session) {}
+    static constexpr Serial canvas_warmup_frames = detail::canvas_warmup;
+
+    static auto supports_canvas_load(Index count) -> bool {
+        for (auto load : detail::canvas_loads)
+            if (count == load) return true;
+        return false;
+    }
+
+    explicit View(UiSession &session, Option<Index> canvas_load = {})
+        : session_(session), tabs_{session_, graph_.cell(canvas_load ? Page::Canvas : Page::Controls).unwrap()},
+          canvas_options_(graph_.cell(CanvasOptions{canvas_load.unwrap_or(CanvasOptions{}.particles)}).unwrap()) {}
 
     auto mount() -> Result<empty, UiError> {
         auto &ui = session_.document();
@@ -253,7 +277,7 @@ class View {
         if (made.is_err()) return Err(UiError::LayoutFailed);
         auto composition = made.unwrap();
         auto content = gallery_content(cx::borrow(tabs_), cx::borrow(rows_), picture_, cx::borrow(dialog_open_),
-            dialog_insets_.value(), width_.value());
+            dialog_insets_.value(), width_.value(), cx::borrow(canvas_options_), cx::borrow(canvas_recording_));
         if (content.is_err()) return Err(UiError::InvalidValue);
         auto applied = composition.set_content(content.unwrap());
         if (applied.is_err()) return Err(UiError::PaintFailed);
@@ -290,5 +314,6 @@ class View {
         return lists_status(session_.document(), *rows_);
     }
     auto picture() const -> cx::ComposeResult<UiId> { return picture_.id(); }
+    auto canvas_paint_time() const -> CpuTiming { return canvas_recording_.paint; }
 };
 } // namespace examples::gallery
