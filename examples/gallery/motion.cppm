@@ -43,8 +43,17 @@ struct TileController {
     cx::NodeRef canvas, node;
     static constexpr Point origin{20, 44};
     Point position{origin}, grab;
+    Option<PointerKey> pointer;
     PresentationLease lease;
     TileController(cx::Borrowed<UiSession> owner, cx::NodeRef reference) : session(owner), canvas(rstd::move(reference)) {}
+    static auto primary(const InputEvent &input) -> bool {
+        return input.pointer_kind == PointerKind::Touch || input.button == PointerButton::Primary;
+    }
+    auto observe(InputContext &, const InputPacket &packet) -> InputDecision {
+        if (packet.input.type != EventType::PointerDown) return {};
+        return !pointer && primary(packet.input) ? InputDecision::accept() : InputDecision::reject();
+    }
+    void cancel(InputContext &, CancelReason) {}
     void move(UiDocument &ui, Point value) {
         position = value; auto id = node.id().unwrap();
         if (lease.active()) {
@@ -61,30 +70,58 @@ struct TileController {
         ui.animate_transform(node.id().unwrap(), {1, 0, 0, 1, origin.x, origin.y},
             {280'000'000, AnimationEasing::EaseInOut, AnimationEndPolicy::CommitFinal}).unwrap();
     }
+    void move_in_canvas(EventContext &context, Point value) {
+        const auto *area = context.visual(canvas.id().unwrap());
+        const auto *tile = context.visual(node.id().unwrap());
+        if (!area || !tile) return;
+        const auto max_x = rstd::cmp::max(Scalar(0), area->layout_bounds.width - tile->layout_bounds.width);
+        const auto max_y = rstd::cmp::max(Scalar(0), area->layout_bounds.height - tile->layout_bounds.height);
+        move(context.document(), {rstd::min(max_x, rstd::cmp::max(Scalar(0), value.x)),
+                                  rstd::min(max_y, rstd::cmp::max(Scalar(0), value.y))});
+    }
+    void follow(EventContext &context, Point position) {
+        auto snapshot = session->input().snapshot();
+        if (snapshot.is_none()) return;
+        const auto matrix = snapshot->local_to_surface(canvas.id().unwrap());
+        if (matrix.is_err()) return;
+        const auto inverse = matrix->inverse();
+        if (inverse.is_none()) return;
+        const auto local = inverse->map(position);
+        move_in_canvas(context, {local.x - grab.x, local.y - grab.y});
+    }
     void handle(EventContext &context, const RoutedEvent &event) {
+        if (event.current != event.target) return;
         auto &ui = context.document();
-        if (event.input.type == EventType::PointerDown && event.input.button == PointerButton::Primary) {
-            grab = event.local; context.capture_pointer().unwrap(); context.focus().unwrap();
-            PropertyKey key{event.current, PresentationProperty::Transform};
-            lease = ui.take_over(slice<PropertyKey>::from_raw_parts(&key, usize(1))).unwrap();
-        } else if (event.input.type == EventType::PointerMove && lease.active()) {
-            auto snapshot = session->input().snapshot();
-            if (snapshot.is_none()) return;
-            auto matrix = snapshot->local_to_surface(canvas.id().unwrap()).unwrap().inverse().unwrap();
-            auto pointer = matrix.map(event.input.position);
-            move(ui, {pointer.x - grab.x, pointer.y - grab.y});
-        } else if (event.input.type == EventType::CaptureLost || event.input.type == EventType::PointerCancel) {
-            if (lease.active()) ui.release_presentation(lease).unwrap();
-        } else if (event.input.type == EventType::KeyDown) {
+        const auto &input = event.input;
+        const PointerKey key{input.device, input.pointer};
+        if (input.type == EventType::PointerDown) {
+            if (pointer || !primary(input) || session->input().captured(input.pointer, input.device) != Some(event.current))
+                return;
+            pointer = Some(PointerKey(key));
+            grab = event.local;
+            context.focus().unwrap();
+            PropertyKey transform{event.current, PresentationProperty::Transform};
+            lease = ui.take_over(slice<PropertyKey>::from_raw_parts(&transform, usize(1))).unwrap();
+            return;
+        }
+        if (input.type == EventType::KeyDown) {
             auto next = position;
-            switch (event.input.key) {
+            switch (input.key) {
             case Key::Left: next.x -= 8; break;
             case Key::Right: next.x += 8; break;
             case Key::Up: next.y -= 8; break;
             case Key::Down: next.y += 8; break;
             default: return;
             }
-            move(ui, next);
+            move_in_canvas(context, next);
+            return;
+        }
+        if (pointer != Some(PointerKey(key))) return;
+        const bool released = input.type == EventType::PointerUp && primary(input);
+        if (input.type == EventType::PointerMove || released) follow(context, input.position);
+        if (released || input.type == EventType::CaptureLost || input.type == EventType::PointerCancel) {
+            pointer = None();
+            if (lease.active()) ui.release_presentation(lease).unwrap();
         }
     }
 };
@@ -123,6 +160,20 @@ struct TileElement {
         context.behavior<TileFeedback>(node, feedback);
         context.behavior<TileBehavior>(node, drag);
         auto target = context.target();
+        context.on_mount([target, receiver = controller.downgrade()](cx::CommittedContext &committed)
+            -> cx::ComposeResult<cx::EffectLease> {
+            auto id = committed.resolve(target);
+            if (id.is_err()) return Err(id.unwrap_err());
+            auto participant = committed.session().input().arena().bind(id.unwrap(), receiver);
+            if (participant.is_err()) {
+                cx::ComposeError error(cx::ComposeStage::Input);
+                error.input = Some(participant.unwrap_err());
+                return Err(rstd::move(error));
+            }
+            return Ok(cx::EffectLease([binding = rstd::move(participant).unwrap().binding]() mutable {
+                binding.disconnect();
+            }));
+        });
         context.on_commit([controller = controller, target](cx::CommittedContext &) mutable -> cx::ComposeResult<empty> {
             controller.get()->node = target; return Ok(empty{});
         });

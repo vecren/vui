@@ -157,7 +157,7 @@ struct AndroidHost::Impl {
     struct Pointer {
         int device, id;
         SequenceId sequence;
-        PointerKind kind;
+        Serial generation;
         Point position;
         unsigned buttons{};
     };
@@ -382,7 +382,7 @@ void AndroidHost::pointer(int action, int pointer, int tool, int device, int but
         if (tracked && (tracked->buttons & mask))
             return;
         if (!tracked) {
-            data_->pointers.push({device, pointer, new_session(), kind, {x / scale, y / scale}});
+            data_->pointers.push({device, pointer, new_session(), data_->generation, {x / scale, y / scale}});
             tracked = &data_->pointers[data_->pointers.len() - usize(1)];
         }
         tracked->buttons |= mask;
@@ -401,6 +401,19 @@ void AndroidHost::pointer(int action, int pointer, int tool, int device, int but
     event.pressure = Some(rstd::cmp::max(Scalar(0), rstd::cmp::min(Scalar(1), pressure)));
     if (event.type != EventType::PointerDown && event.type != EventType::PointerUp)
         event.button = PointerButton::None;
+    if (tracked) {
+        if ((action == AMOTION_EVENT_ACTION_UP || action == AMOTION_EVENT_ACTION_POINTER_UP) &&
+            kind != PointerKind::Mouse && tracked->generation == data_->generation &&
+            tracked->position != event.position) {
+            // Android can report the last segment of a drag only at lift-off.
+            auto move = event;
+            move.type = EventType::PointerMove;
+            move.button = PointerButton::None;
+            data_->push(rstd::move(move));
+        }
+        tracked->position = event.position;
+        tracked->generation = data_->generation;
+    }
     if (times.len() <= usize(2048) && points.len() == times.len() * usize(3)) {
         Vec<PointerSample> history;
         for (usize i{}; i < times.len(); ++i) {
