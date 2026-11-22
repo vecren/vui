@@ -115,7 +115,7 @@ auto clipped(RasterBounds pixels, const GpuClip &clip, float scale_x, float scal
     RasterBounds local{local_x.low, local_y.low, local_x.high, local_y.high};
     if (!finite_bounds(local))
         return false;
-    // Rounded-box distance is 1-Lipschitz; bound both screen derivatives and float SDF error.
+    // Bound the rounded-box AA band and the ellipse shader's local footprint.
     auto derivative = std::hypot(double(clip.row0[0]), double(clip.row1[0])) / scale_x +
                       std::hypot(double(clip.row0[1]), double(clip.row1[1])) / scale_y;
     double magnitude = 1;
@@ -124,7 +124,8 @@ auto clipped(RasterBounds pixels, const GpuClip &clip, float scale_x, float scal
         magnitude += std::fabs(value);
     for (auto value : clip.rect)
         magnitude += std::fabs(value);
-    magnitude += std::fabs(clip.params[0]);
+    for (auto value : clip.radii)
+        magnitude += std::fabs(value);
     if (!std::isfinite(derivative) || magnitude > 1.0e12)
         return false;
     auto margin = 4 * std::fmax(derivative, 0.0001) + magnitude * 0x1p-16;

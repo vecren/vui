@@ -27,7 +27,7 @@ struct PhaseDecoration {
         if (value.is_err()) return Err(UiError::PaintFailed);
         auto &paint = context.paint();
         auto size = paint.size();
-        paint.rect({18, size.height - 8, size.width - 36, 3},
+        paint.canvas().rect({18, size.height - 8, size.width - 36, 3},
             value.unwrap().value() ? theme::accent : theme::tint, 1.5);
         return Ok(empty{});
     }

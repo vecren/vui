@@ -109,30 +109,54 @@ struct Color {
     auto modulate(Color other) const -> Color { return {r * other.r, g * other.g, b * other.b, a * other.a}; }
     friend auto operator==(const Color &, const Color &) -> bool = default;
 };
+enum class ShapeKind { Rectangle, RoundedRectangle, Ellipse };
+
+struct CornerRadii {
+    Scalar top_left{}, top_right{}, bottom_right{}, bottom_left{};
+    auto valid() const -> bool {
+        return finite(top_left) && finite(top_right) && finite(bottom_right) && finite(bottom_left) &&
+               top_left >= 0 && top_right >= 0 && bottom_right >= 0 && bottom_left >= 0;
+    }
+    friend auto operator==(const CornerRadii &, const CornerRadii &) -> bool = default;
+};
+
+struct Shape {
+    Rect bounds;
+    CornerRadii radii;
+    ShapeKind kind{ShapeKind::Rectangle};
+
+    static constexpr auto rectangle(Rect bounds) -> Shape { return {bounds, {}, ShapeKind::Rectangle}; }
+    static constexpr auto rounded_rect(Rect bounds, CornerRadii radii) -> Shape {
+        return {bounds, radii, ShapeKind::RoundedRectangle};
+    }
+    static constexpr auto rounded_rect(Rect bounds, Scalar radius) -> Shape {
+        return rounded_rect(bounds, CornerRadii{radius, radius, radius, radius});
+    }
+    static constexpr auto ellipse(Rect bounds) -> Shape { return {bounds, {}, ShapeKind::Ellipse}; }
+    static constexpr auto circle(Point center, Scalar radius) -> Shape {
+        return ellipse({center.x - radius, center.y - radius, 2 * radius, 2 * radius});
+    }
+    static constexpr auto capsule(Rect bounds) -> Shape {
+        return rounded_rect(bounds, rstd::cmp::min(bounds.width, bounds.height) / 2);
+    }
+    auto empty() const -> bool { return bounds.width <= 0 || bounds.height <= 0; }
+    auto valid() const -> bool;
+    auto normalized() const -> Shape;
+    auto inset(Scalar amount) const -> Shape;
+    auto contains(Point point) const -> bool;
+    friend auto operator==(const Shape &, const Shape &) -> bool = default;
+};
+
 struct Clip {
     bool enabled{};
-    Rect rect;
-    Scalar radius{};
-    auto valid() const -> bool { return rect.valid() && finite(radius) && radius >= 0; }
-    auto contains(Point point) const -> bool {
-        if (!enabled)
-            return true;
-        if (!rect.contains(point))
-            return false;
-        auto r = radius;
-        if (r > rect.width / 2)
-            r = rect.width / 2;
-        if (r > rect.height / 2)
-            r = rect.height / 2;
-        auto cx = point.x < rect.x + r ? rect.x + r : point.x;
-        if (cx > rect.x + rect.width - r)
-            cx = rect.x + rect.width - r;
-        auto cy = point.y < rect.y + r ? rect.y + r : point.y;
-        if (cy > rect.y + rect.height - r)
-            cy = rect.y + rect.height - r;
-        auto dx = point.x - cx, dy = point.y - cy;
-        return dx * dx + dy * dy <= r * r;
-    }
+    Shape shape;
+    constexpr Clip() = default;
+    constexpr Clip(bool enabled, Shape shape) : enabled(enabled), shape(shape) {}
+    constexpr Clip(bool enabled, Rect bounds, Scalar radius = 0)
+        : Clip(enabled, Shape::rounded_rect(bounds, radius)) {}
+    auto bounds() const -> Rect { return shape.bounds; }
+    auto valid() const -> bool { return shape.valid(); }
+    auto contains(Point point) const -> bool { return !enabled || shape.contains(point); }
     friend auto operator==(const Clip &, const Clip &) -> bool = default;
 };
 

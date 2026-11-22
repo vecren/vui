@@ -222,8 +222,8 @@ struct UiDocument::ArrangeContext final : LayoutArrangeContext {
             error = document.layout_failure(id, LayoutIssue::InvalidChild);
             return Err(*error);
         }
-        clip.rect.x += padding;
-        clip.rect.y += padding;
+        clip.shape.bounds.x += padding;
+        clip.shape.bounds.y += padding;
         node.layout_clip = clip;
         node.layout_clip_transform = node.modifiers.is_empty() ? Transform{} : node.modifier_content_transform;
         return Ok(empty{});

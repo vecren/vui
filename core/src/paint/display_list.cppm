@@ -16,8 +16,9 @@ inline auto valid(DrawColorSource source) -> bool {
 }
 class DrawOp {
     RSTD_ENUM(DrawOp, (Save), (Restore), (Transform, (vui::Transform value;)),
-              (Clip, (vui::Clip value;)), (Rect, (vui::Rect rect; Color color; Scalar radius; DrawColorSource color_source{DrawColorSource::Fixed};)),
-              (BackdropBlur, (vui::Clip mask; Scalar sigma;)),
+              (Clip, (vui::Shape value;)),
+              (Shape, (vui::Shape shape; Color color; Scalar border_width; DrawColorSource color_source;)),
+              (BackdropBlur, (vui::Shape mask; Scalar sigma;)),
               (Text, (TextLayout layout; Point origin; Color color; TextEffects effects{}; TextColors colors{};)),
               (Image, (ImageData data; Rect destination; Rect source; ImageSampling sampling;
                        Color tint; ImageEdges edges; bool clamp_source;
@@ -70,7 +71,13 @@ class DisplayList {
     }
 };
 
-class DisplayListRecorder {
+class Canvas {
+    friend class DisplayListRecorder;
+    Canvas() = default;
+    Canvas(Canvas &&) = default;
+    auto operator=(Canvas &&) -> Canvas & = default;
+    ~Canvas() = default;
+
     Vec<DrawOp> operations_;
     usize depth_{};
     bool children_{}, base_modified_{}, closed_{};
@@ -117,6 +124,20 @@ class DisplayListRecorder {
             reject(RecordingError::Closed);
         return error_.is_none();
     }
+    void draw_shape(Shape shape, Color color, Scalar width, DrawColorSource color_source,
+                    bool border) {
+        if (!active())
+            return;
+        if (!shape.valid() || !color.valid() || !valid(color_source) ||
+            !finite(width) || width < 0) {
+            reject(RecordingError::InvalidValue);
+            return;
+        }
+        if (shape.empty() || (border && width == 0))
+            return;
+        include(shape.bounds);
+        operations_.push(DrawOp::Shape(shape.normalized(), color, width, color_source));
+    }
 
   public:
     auto local_transform() const -> Transform { return coordinates_; }
@@ -145,16 +166,17 @@ class DisplayListRecorder {
     void transform(Transform value) {
         if (!active())
             return;
-        if (!value.valid()) {
+        auto coordinates = coordinates_ * value;
+        if (!value.valid() || !coordinates.valid()) {
             reject(RecordingError::InvalidValue);
             return;
         }
         if (depth_ == usize())
             base_modified_ = true;
-        coordinates_ = coordinates_ * value;
+        coordinates_ = coordinates;
         operations_.push(DrawOp::Transform(value));
     }
-    void clip(Clip value) {
+    void clip(Shape value) {
         if (!active())
             return;
         if (!value.valid()) {
@@ -163,29 +185,30 @@ class DisplayListRecorder {
         }
         if (depth_ == usize())
             base_modified_ = true;
-        operations_.push(DrawOp::Clip(value));
+        operations_.push(DrawOp::Clip(value.normalized()));
     }
-    void rect(Rect value, Color color, Scalar radius = 0, DrawColorSource color_source = DrawColorSource::Fixed) {
-        if (!active())
-            return;
-        if (!value.valid() || !color.valid() || !valid(color_source) || !finite(radius) || radius < 0) {
-            reject(RecordingError::InvalidValue);
-            return;
-        }
-        include(value);
-        operations_.push(DrawOp::Rect(value, color, radius, color_source));
+    void fill(Shape shape, Color color, DrawColorSource color_source = DrawColorSource::Fixed) {
+        draw_shape(shape, color, 0, color_source, false);
     }
-    void backdrop_blur(Clip mask, Scalar sigma) {
+    void border(Shape shape, Scalar width, Color color,
+                DrawColorSource color_source = DrawColorSource::Fixed) {
+        draw_shape(shape, color, width, color_source, true);
+    }
+    void rect(Rect bounds, Color color, Scalar radius = 0,
+              DrawColorSource color_source = DrawColorSource::Fixed) {
+        fill(Shape::rounded_rect(bounds, radius), color, color_source);
+    }
+    void backdrop_blur(Shape mask, Scalar sigma) {
         if (!active())
             return;
         if (!mask.valid() || !finite(sigma) || sigma < 0) {
             reject(RecordingError::InvalidValue);
             return;
         }
-        if (!mask.enabled || sigma == 0 || mask.rect.width == 0 || mask.rect.height == 0)
+        if (sigma == 0 || mask.empty())
             return;
-        include(mask.rect);
-        operations_.push(DrawOp::BackdropBlur(mask, sigma));
+        include(mask.bounds);
+        operations_.push(DrawOp::BackdropBlur(mask.normalized(), sigma));
     }
     void text(TextLayout layout, Point origin, Color color, TextEffects effects = {}, TextColors colors = {}, TextDecorations decorations = {}, TextInlineImages inline_images = {}) {
         if (!active())
@@ -270,6 +293,10 @@ class DisplayListRecorder {
         operations_.push(
             DrawOp::External(rstd::move(source), destination, fit, sampling, placeholder, blend));
     }
+};
+
+class DisplayListRecorder : public Canvas {
+  public:
     void children() {
         if (!active())
             return;

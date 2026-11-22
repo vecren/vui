@@ -9,33 +9,28 @@ namespace examples::gallery::detail {
 namespace {
 
 struct ArenaPaint {
-    ImageRegion frame;
-
     auto paint(PaintContext &context) -> Result<empty, UiError> {
+        auto &canvas = context.canvas();
         auto size = context.size();
         for (Scalar x = 24; x < size.width; x += 24)
-            context.rect({x, 0, 1, size.height}, edge);
+            canvas.rect({x, 0, 1, size.height}, edge);
         for (Scalar y = 24; y < size.height; y += 24)
-            context.rect({0, y, size.width, 1}, edge);
-        if (size.width >= 4 && size.height >= 4)
-            context.nine_patch(frame, {{1, 1, 1, 1}, Some(Insets{2, 2, 2, 2}), false},
-                {0, 0, size.width, size.height}, edge);
+            canvas.rect({0, y, size.width, 1}, edge);
         context.children();
+        canvas.border(Shape::rounded_rect({0, 0, size.width, size.height}, context.style().radius), 2, edge);
         return Ok(empty{});
     }
 };
 
 struct Arena {
-    ImageRegion frame;
-
     auto prepare(cx::PrepareContext &context, Option<UiId> previous, NodeStyle style) -> cx::ComposeResult<UiNodeRef> {
         auto node = previous.is_some() ? context.edit().existing(*previous) : context.edit().create(LayoutKind::Stack, style);
         context.style(node, style);
         auto target = context.target();
-        context.on_mount([target, frame = frame](cx::CommittedContext &context) -> cx::ComposeResult<cx::EffectLease> {
+        context.on_mount([target](cx::CommittedContext &context) -> cx::ComposeResult<cx::EffectLease> {
             auto id = context.resolve(target);
             if (id.is_err()) return Err(id.unwrap_err());
-            auto installed = context.session().document().install_paint(id.unwrap(), ArenaPaint{frame});
+            auto installed = context.session().document().install_paint(id.unwrap(), ArenaPaint{});
             if (installed.is_err()) return Err(cx::ComposeError(cx::ComposeStage::Effect, Some(installed.unwrap_err())));
             return Ok(cx::EffectLease{});
         });
@@ -136,7 +131,7 @@ struct TileElement {
 };
 struct MotionDemo {
     rstd::rc::Rc<TileController> tile;
-    ImageData picture{examples::make_sample_image()}, frame{examples::make_button_frame()};
+    ImageData picture{examples::make_sample_image()};
     Scalar opacity{1};
 
     MotionDemo(cx::Borrowed<UiSession> session, cx::NodeRef canvas)
@@ -181,7 +176,7 @@ auto motion(cx::Borrowed<UiSession> session, cx::NodeRef image, Scalar width)
     auto lens_area = cx::stack({rstd::move(lens)}).style(fill().padding(12).hit_test_visible(false).build());
     auto drag_card = glass(LayoutKind::Column, cx::elements({
         cx::row({label("Drag"_str, 16, foreground, true), rstd::move(reset)}).gap(12),
-        cx::element(Arena{ImageRegion::whole(demo->frame)}, cx::elements({rstd::move(drag), rstd::move(lens_area)}))
+        cx::element(Arena{}, cx::elements({rstd::move(drag), rstd::move(lens_area)}))
             .style(NodeStyleBuilder{}.horizontal(Alignment::Stretch).height(canvas_height)
                 .background({0, 0, 0, .52f}).radius(9).clip({true, {0, 0, canvas_width, canvas_height}, 9}).build())
             .reference(canvas),

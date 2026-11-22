@@ -68,14 +68,14 @@ struct ControlFinish {
 
     auto draw(ModifierDrawContext &context) -> Result<empty, UiError> {
         auto &paint = context.paint();
+        auto &canvas = paint.canvas();
         const auto size = paint.size();
-        const Rect bounds{0, 0, size.width, size.height};
-        const auto radius = paint.style().radius;
-        if (highlight) glass_sheen(paint, bounds, radius);
+        const auto shape = Shape::rounded_rect({0, 0, size.width, size.height}, paint.style().radius);
+        if (highlight) glass_sheen(canvas, shape);
         auto drawn = context.draw_content();
         if (drawn.is_err()) return drawn;
-        if (focused) glass_rim(paint, bounds, radius, white(.68f));
-        else if (highlight) glass_rim(paint, bounds, radius, white(.012f));
+        if (focused) canvas.border(shape, 1, white(.68f));
+        else if (highlight) canvas.border(shape, 1, white(.012f));
         return Ok(empty{});
     }
 };

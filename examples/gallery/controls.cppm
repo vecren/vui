@@ -41,21 +41,23 @@ struct PowerPaint {
     auto paint(PaintContext &context) -> Result<empty, UiError> {
         auto state = Slider::status(session.document(), context.id());
         if (state.is_err()) return Err(state.unwrap_err());
+        auto &canvas = context.canvas();
         const auto size = context.size();
         const auto radius = rstd::min(Scalar(10), rstd::min(size.width, size.height) / 2);
         if (radius <= 0) return Ok(empty{});
         const auto x = radius + (size.width - 2 * radius) * state->ratio;
         const auto y = size.height / 2;
         const auto thickness = rstd::min(Scalar(6), radius);
-        context.rect({0, y - thickness / 2, size.width, thickness}, selected_surface, thickness / 2);
-        context.rect({0, y - thickness / 2, x, thickness}, muted, thickness / 2);
+        canvas.fill(Shape::capsule({0, y - thickness / 2, size.width, thickness}), selected_surface);
+        canvas.fill(Shape::capsule({0, y - thickness / 2, x, thickness}), muted);
         if (session.input().focused() == Some(context.id())) {
-            context.rect({x - radius, y - radius, 2 * radius, 2 * radius}, foreground, radius);
             const auto inset = radius * .88;
-            context.rect({x - inset, y - inset, 2 * inset, 2 * inset}, panel_surface, inset);
+            canvas.fill(Shape::ellipse({x - inset, y - inset, 2 * inset, 2 * inset}), panel_surface);
+            canvas.border(Shape::ellipse({x - radius, y - radius, 2 * radius, 2 * radius}), radius - inset,
+                foreground);
         }
         const auto grip = radius * .7;
-        context.rect({x - grip, y - grip, 2 * grip, 2 * grip}, foreground, grip);
+        canvas.fill(Shape::ellipse({x - grip, y - grip, 2 * grip, 2 * grip}), foreground);
         return Ok(empty{});
     }
 };
@@ -124,6 +126,19 @@ auto mount_power(UiSession &session, UiId parent) -> Result<empty, UiError> {
     return ui.attach_state(control, changed.unwrap(), NodeStateKey::of<Binding>());
 }
 
+struct FieldOutline {
+    UiSession &session;
+    UiId field;
+
+    auto paint(PaintContext &context) -> Result<empty, UiError> {
+        const auto size = context.size();
+        const auto shape = Shape::rounded_rect({0, 0, size.width, size.height}, context.style().radius);
+        context.children();
+        context.canvas().border(shape, 1, session.input().focused() == Some(field) ? muted : edge);
+        return Ok(empty{});
+    }
+};
+
 auto mount_text_field(UiSession &session, UiId outline) -> Result<empty, UiError> {
     auto &ui = session.document();
     TextFieldStyle appearance;
@@ -140,9 +155,10 @@ auto mount_text_field(UiSession &session, UiId outline) -> Result<empty, UiError
     auto id = field.unwrap();
     auto attached = ui.attach(outline, id);
     if (attached.is_err()) return attached;
-    auto border = [outline](EventContext &context, const RoutedEvent &event) {
-        auto color = event.input.type == EventType::FocusGained ? muted : edge;
-        context.document().set_background(outline, color, 8).unwrap();
+    auto painted = ui.install_paint(outline, FieldOutline{session, id});
+    if (painted.is_err()) return painted;
+    auto border = [outline](EventContext &context, const RoutedEvent &) {
+        context.document().invalidate_paint(outline).unwrap();
     };
     if (session.input().on(id, EventType::FocusGained, border).is_err() ||
         session.input().on(id, EventType::FocusLost, border).is_err()) return Err(UiError::InvalidValue);
@@ -224,7 +240,7 @@ auto controls(cx::Borrowed<state::Cell<bool>> dialog_open, Scalar width) -> cx::
     auto count = counter();
     if (count.is_err()) return Err(count.unwrap_err());
     auto outline = native_part(mount_text_field).style(NodeStyleBuilder{}.horizontal(Alignment::Stretch)
-        .background(edge).radius(8).padding(1).build());
+        .radius(8).padding(1).build());
     auto input = layout_part(InputLayout{}, cx::elements({rstd::move(outline), count.unwrap()}))
         .style(NodeStyleBuilder{}.horizontal(Alignment::Stretch).hit_self(false).build());
     auto settings = glass(LayoutKind::Column, cx::elements({rstd::move(input), divider(), rstd::move(actions), divider(),

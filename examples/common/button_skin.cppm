@@ -14,13 +14,14 @@ struct ButtonSkin {
     ButtonStyle appearance{theme::button_style()};
     auto paint(PaintContext &context) -> Result<empty, UiError> {
         auto size = context.size();
+        auto &canvas = context.canvas();
         auto color = status.pressed ? appearance.pressed : status.focused ? appearance.focused : appearance.normal;
-        context.nine_patch(frame, border, {0, 0, size.width, size.height}, color);
+        canvas.nine_patch(frame, border, {0, 0, size.width, size.height}, color);
         if (icon.is_some()) {
             auto width = rstd::min(Scalar(24), rstd::min(size.width, size.height));
-            context.image(ImageData(icon->image),
-                          {(size.width - width) / 2, (size.height - width) / 2, width, width},
-                          icon->source);
+            canvas.image(ImageData(icon->image),
+                         {(size.width - width) / 2, (size.height - width) / 2, width, width},
+                         icon->source);
         }
         context.children();
         return Ok(empty{});
@@ -82,15 +83,5 @@ auto skinned_button(vui::compose::Element content, F clicked, ImageRegion frame,
     auto options = ButtonOptionsBuilder{}.appearance(ButtonAppearance::Custom).build();
     return cx::element(SkinnedButtonElement{cx::ButtonElement{rstd::rc::make_rc<cx::ClickFunction>(rstd::move(clicked)), {}, options},
         rstd::move(frame), border}, rstd::move(children));
-}
-inline auto make_button_frame() -> ImageData {
-    unsigned char pixels[36];
-    for (unsigned i = 0; i < 9; ++i) {
-        auto value = static_cast<unsigned char>(i == 4 ? 250 : 255);
-        pixels[i * 4] = pixels[i * 4 + 1] = pixels[i * 4 + 2] = value;
-        pixels[i * 4 + 3] = 255;
-    }
-    return ImageData::rgba8_srgb(3, 3, slice<unsigned char>::from_raw_parts(pixels, usize(36)))
-        .unwrap();
 }
 } // namespace examples

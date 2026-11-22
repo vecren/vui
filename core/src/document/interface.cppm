@@ -982,9 +982,10 @@ class UiDocument {
                 if (bounds.is_err()) return Err(bounds.unwrap_err());
                 rect = bounds.unwrap();
                 const auto &metrics = *node.viewport;
-                Point requested{metrics.offset.x + nearest(rect.x, rect.width, clip.rect.x,
+                const auto viewport_bounds = clip.bounds();
+                Point requested{metrics.offset.x + nearest(rect.x, rect.width, viewport_bounds.x,
                                                            metrics.viewport.width),
-                                metrics.offset.y + nearest(rect.y, rect.height, clip.rect.y,
+                                metrics.offset.y + nearest(rect.y, rect.height, viewport_bounds.y,
                                                            metrics.viewport.height)};
                 if (!finite(requested.x) || !finite(requested.y))
                     return Err(UiError::InvalidValue);
@@ -1006,7 +1007,7 @@ class UiDocument {
                 if (inverse.is_none()) return Ok(BringIntoViewResult{RevealStatus::NonInvertible});
                 auto mapped = visible.map(*inverse);
                 if (mapped.is_err()) return Err(mapped.unwrap_err());
-                auto clipped = visible.clip(clips[index].rect);
+                auto clipped = visible.clip(clips[index].bounds());
                 if (clipped.is_err()) return Err(clipped.unwrap_err());
                 if (clipped.unwrap()) result.status = RevealStatus::Partial;
                 mapped = visible.map(coordinates[index]);

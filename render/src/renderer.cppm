@@ -237,10 +237,13 @@ struct DrawData {
     float rect[4], color[4], row0[4], row1[4], params[4], surface[3];
     float image_edges;
     float uv[4];
+    // The shape pipelines use this slot for corner radii.
     float radial[4]{0, 0, 0, 1};
 };
 static_assert(sizeof(DrawData) == 128);
 struct GpuClip {
     float rect[4], row0[4], row1[4], params[4];
+    float radii[4];
 };
+static_assert(sizeof(GpuClip) == 80);
 } // namespace vui::gpu::detail

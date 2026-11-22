@@ -72,36 +72,17 @@ auto sheen_image() -> const ImageRegion & {
     });
     return image;
 }
-
-constexpr Scalar rim_inset = 16;
-
-auto rim_image() -> const ImageRegion & {
-    static const auto image = texture(35, 35, [](Scalar x, Scalar y, Scalar) {
-        const auto dx = rstd::cmp::max(Scalar(0), __builtin_fabs((x - .5) * 35) - (17.5 - rim_inset));
-        const auto dy = rstd::cmp::max(Scalar(0), __builtin_fabs((y - .5) * 35) - (17.5 - rim_inset));
-        const auto distance = __builtin_sqrt(dx * dx + dy * dy) - rim_inset;
-        const auto coverage = unit(.5 - distance) - unit(-1 - distance);
-        return Pixel{255, 255, 255, 255 * coverage};
-    });
-    return image;
-}
 } // namespace
 
 constexpr auto white(float opacity) -> Color { return {opacity, opacity, opacity, opacity}; }
 
-void glass_rim(PaintContext &context, Rect bounds, Scalar radius, Color color) {
-    if (bounds.width <= 0 || bounds.height <= 0) return;
-    constexpr Insets source{rim_inset, rim_inset, rim_inset, rim_inset};
-    context.nine_patch(rim_image(), {source, Some(Insets{radius, radius, radius, radius}), false}, bounds, color);
-}
-
-void glass_sheen(PaintContext &context, Rect bounds, Scalar radius) {
-    if (bounds.width <= 0 || bounds.height <= 0) return;
+void glass_sheen(Canvas &canvas, Shape shape) {
+    if (shape.empty()) return;
     const auto &image = sheen_image();
-    context.save();
-    context.clip({true, bounds, radius});
-    context.image(image.image, bounds, image.source);
-    context.restore();
+    canvas.save();
+    canvas.clip(shape);
+    canvas.image(image.image, shape.bounds, image.source);
+    canvas.restore();
 }
 
 struct GlassPaint {
@@ -110,22 +91,22 @@ struct GlassPaint {
     Color tint{0, 0, 0, 0};
 
     auto paint(PaintContext &context) -> Result<empty, UiError> {
+        auto &canvas = context.canvas();
         const auto size = context.size();
-        const Rect bounds{0, 0, size.width, size.height};
-        if (size.width > 0 && size.height > 0) {
-            const auto radius = context.style().radius;
-            if (blur > 0) context.backdrop_blur({true, bounds, radius}, blur);
-            if (tint.a > 0) context.rect(bounds, tint, radius);
-            context.save();
-            context.clip({true, bounds, radius});
+        const auto shape = Shape::rounded_rect({0, 0, size.width, size.height}, context.style().radius);
+        if (!shape.empty()) {
+            if (blur > 0) canvas.backdrop_blur(shape, blur);
+            if (tint.a > 0) canvas.fill(shape, tint);
+            canvas.save();
+            canvas.clip(shape);
             const auto &glow = panel_light();
-            context.image(glow.image, bounds, glow.source);
+            canvas.image(glow.image, shape.bounds, glow.source);
             const auto &image = frost_image();
-            context.image(image.image, bounds, image.source, ImageSampling::Linear, white(opacity));
-            context.restore();
-            glass_rim(context, bounds, radius, white(.012f));
+            canvas.image(image.image, shape.bounds, image.source, ImageSampling::Linear, white(opacity));
+            canvas.restore();
         }
         context.children();
+        canvas.border(shape, 1, white(.012f));
         return Ok(empty{});
     }
 };
@@ -135,7 +116,7 @@ struct BackdropPaint {
         const auto size = context.size();
         const auto &image = backdrop_image();
         if (size.width > 0 && size.height > 0)
-            context.image(image.image, {0, 0, size.width, size.height}, image.source);
+            context.canvas().image(image.image, {0, 0, size.width, size.height}, image.source);
         context.children();
         return Ok(empty{});
     }

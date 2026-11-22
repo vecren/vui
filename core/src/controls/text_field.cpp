@@ -151,14 +151,15 @@ auto TextFieldState::arrange(LayoutArrangeContext &context, Size size) -> Result
 }
 
 auto TextFieldState::paint(PaintContext &context) -> Result<empty, UiError> {
-    context.save();
-    context.clip({true, content_clip_});
-    if (focused_ && selection_.width > 0) context.rect(selection_, selection_color_);
+    auto &canvas = context.canvas();
+    canvas.save();
+    canvas.clip(Shape::rectangle(content_clip_));
+    if (focused_ && selection_.width > 0) canvas.rect(selection_, selection_color_);
     context.children();
     if (focused_ && underline_.width > 0)
-        context.rect({underline_.x, underline_.y + underline_.height - 1, underline_.width, 1}, composition_color_);
-    if (caret_visible()) context.rect(caret_, caret_color_);
-    context.restore();
+        canvas.rect({underline_.x, underline_.y + underline_.height - 1, underline_.width, 1}, composition_color_);
+    if (caret_visible()) canvas.rect(caret_, caret_color_);
+    canvas.restore();
     return Ok(empty{});
 }
 

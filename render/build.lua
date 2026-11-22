@@ -10,7 +10,7 @@ local content = {
 
 for _, shader in ipairs({
   { name = "quad", source = "quad.vert", stage = "vertex" },
-  { name = "rectangle", source = "rectangle.frag", stage = "fragment" },
+  { name = "shape", source = "shape.frag", stage = "fragment" },
   { name = "composite", source = "composite.frag", stage = "fragment" },
   { name = "glyph", source = "glyph.frag", stage = "fragment" },
   { name = "image", source = "image.frag", stage = "fragment" },

@@ -60,13 +60,13 @@ auto Error::resource(Stage stage, vrento::resource::ResourceError cause) -> Erro
 }
 namespace {
 using CpuSample = vui::CpuTimer;
-enum class DrawKind { Rectangle, Composite, Glyph, Image, External, BackdropFilter, BackdropComposite };
+enum class DrawKind { Shape, Composite, Glyph, Image, External, BackdropFilter, BackdropComposite };
 auto pipeline_kind(DrawKind kind) -> DrawKind {
     return kind == DrawKind::External ? DrawKind::Image : kind;
 }
 struct PaintItem {
     DrawData data{};
-    DrawKind kind{DrawKind::Rectangle};
+    DrawKind kind{DrawKind::Shape};
     Index clip{no_clip}, source_target{}, resource_index{};
     Index source_version{}, original_target{};
     Scalar sigma{};
@@ -106,7 +106,7 @@ struct RecordContext {
     VkCommandBuffer command;
     const vvk::DeviceDispatch &dispatch;
     VkPipelineLayout layout;
-    VkPipeline rectangle, composite, glyph, image, additive, additive_rgb, plus;
+    VkPipeline shape, composite, glyph, image, additive, additive_rgb, plus;
     VkPipeline backdrop_filter{}, backdrop_composite{};
 };
 struct PreparedDraw {
@@ -251,6 +251,20 @@ void transform_values(DrawData &output, Transform transform) {
     output.row1[1] = static_cast<float>(transform.d);
     output.row1[2] = static_cast<float>(transform.ty);
 }
+void radii_values(float (&values)[4], CornerRadii radii) {
+    values[0] = static_cast<float>(radii.top_left);
+    values[1] = static_cast<float>(radii.top_right);
+    values[2] = static_cast<float>(radii.bottom_right);
+    values[3] = static_cast<float>(radii.bottom_left);
+}
+void shape_values(float (&rect)[4], float (&radii)[4], float &kind, const Shape &shape) {
+    static_assert(static_cast<unsigned>(ShapeKind::Rectangle) == 0 &&
+                  static_cast<unsigned>(ShapeKind::RoundedRectangle) == 1 &&
+                  static_cast<unsigned>(ShapeKind::Ellipse) == 2);
+    rectangle_values(rect, shape.bounds);
+    radii_values(radii, shape.radii);
+    kind = static_cast<float>(shape.kind);
+}
 auto UiExecutor::prepare(const rg::PassExecutionInfo &pass, const vk::GraphBindings &bindings,
                          PrepareContext &context) -> Result<empty, vk::GraphExecutionError> {
     const auto &frame = context.frame;
@@ -283,7 +297,7 @@ auto UiExecutor::prepare(const rg::PassExecutionInfo &pass, const vk::GraphBindi
         PreparedDraw item{{}, paint.kind, instance++, 1, paint.blend};
         VkImageView source_view{}, original_view{};
         auto sources = frame.sources[paint_index++];
-        if (item.kind != DrawKind::Rectangle) {
+        if (item.kind != DrawKind::Shape) {
             auto view = sampled_view(sources.primary);
             if (view.is_err())
                 return Err(view.unwrap_err());
@@ -353,7 +367,7 @@ auto UiExecutor::prepare(const rg::PassExecutionInfo &pass, const vk::GraphBindi
         VkDescriptorImageInfo image{sampler, source_view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
         VkDescriptorImageInfo original{context.sampler, original_view,
                                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-        if (item.kind != DrawKind::Rectangle) {
+        if (item.kind != DrawKind::Shape) {
             writes[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             writes[2].dstSet = item.descriptor;
             writes[2].dstBinding = 0;
@@ -382,7 +396,7 @@ auto UiExecutor::record(RecordContext &context) const -> Result<empty, vk::Graph
                             : draw.kind == DrawKind::Composite ? context.composite
                             : draw.kind == DrawKind::BackdropFilter ? context.backdrop_filter
                             : draw.kind == DrawKind::BackdropComposite ? context.backdrop_composite
-                                                               : context.rectangle);
+                                                               : context.shape);
         d.vkCmdBindDescriptorSets(context.command, VK_PIPELINE_BIND_POINT_GRAPHICS, context.layout,
                                   0, 1, &draw.descriptor, 0, nullptr);
         d.vkCmdDraw(context.command, 6, draw.count, 0, draw.first);
@@ -528,12 +542,19 @@ auto resolve_items(OwnedFrame &frame, GlyphCache &cache, ImageCache &images, Ind
                 item.data.color[2] = c.b;
                 item.data.color[3] = c.a;
             };
-            if (draw.is_Rectangle()) {
-                const auto &value = draw.as_Rectangle();
-                rectangle_values(item.data.rect, value.rect);
+            if (draw.is_Shape()) {
+                const auto &value = draw.as_Shape();
+                shape_values(item.data.rect, item.data.radial, item.data.params[0], value.shape);
                 color(value.color);
                 transform_values(item.data, value.transform);
-                item.data.params[0] = static_cast<float>(value.radius);
+                item.data.params[1] = -1;
+                if (value.border_width > 0) {
+                    auto inner = value.shape.inset(value.border_width);
+                    if (!inner.empty()) {
+                        item.data.params[1] = static_cast<float>(value.border_width);
+                        radii_values(item.data.uv, inner.radii);
+                    }
+                }
                 item.clip = value.clip;
             } else if (draw.is_BackdropBlur()) {
                 const auto &value = draw.as_BackdropBlur();
@@ -541,9 +562,8 @@ auto resolve_items(OwnedFrame &frame, GlyphCache &cache, ImageCache &images, Ind
                     continue;
                 item.kind = DrawKind::BackdropComposite;
                 item.sigma = value.sigma;
-                rectangle_values(item.data.rect, value.mask.rect);
+                shape_values(item.data.rect, item.data.radial, item.data.params[0], value.mask);
                 transform_values(item.data, value.transform);
-                item.data.params[0] = static_cast<float>(value.mask.radius);
                 item.clip = value.clip;
             } else if (draw.is_Composite()) {
                 const auto &value = draw.as_Composite();
@@ -1018,9 +1038,9 @@ auto UiAssets::initialize(vk::PipelinePreparationMode mode) -> Result<empty, Err
     auto add = [&](const auto &fragment, ImageBlend blend = ImageBlend::SourceOver) {
         return register_pipeline(fragment, blend, false);
     };
-    auto rectangle = add(shaders::rectangle);
-    if (rectangle.is_err())
-        return rectangle;
+    auto shape = add(shaders::shape);
+    if (shape.is_err())
+        return shape;
     auto composite = add(shaders::composite);
     if (composite.is_err())
         return composite;
@@ -1595,7 +1615,7 @@ auto Renderer::prepare_impl(FramePlan plan, DrawOptions options,
     Vec<GpuClip> clip_data;
     for (const auto &source : frame.plan.clips()) {
         GpuClip clip{};
-        rectangle_values(clip.rect, source.shape.rect);
+        shape_values(clip.rect, clip.radii, clip.params[0], source.shape);
         auto inverse = source.transform.inverse();
         if (inverse.is_some()) {
             clip.row0[0] = static_cast<float>(inverse->a);
@@ -1605,9 +1625,8 @@ auto Renderer::prepare_impl(FramePlan plan, DrawOptions options,
             clip.row1[1] = static_cast<float>(inverse->d);
             clip.row1[2] = static_cast<float>(inverse->ty);
         }
-        clip.params[0] = static_cast<float>(source.shape.radius);
         clip.params[1] = source.parent == no_clip ? -1 : static_cast<float>(source.parent);
-        clip.params[2] = inverse.is_some() ? 1 : 0;
+        clip.params[2] = inverse.is_some() && !source.shape.empty() ? 1 : 0;
         float values[sizeof(GpuClip) / sizeof(float)];
         std::memcpy(values, &clip, sizeof(GpuClip));
         for (unsigned i = 0; i < sizeof(GpuClip) / sizeof(float); ++i)

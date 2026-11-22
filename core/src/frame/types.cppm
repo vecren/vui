@@ -25,15 +25,15 @@ struct SurfaceInfo {
     }
 };
 struct ClipInstance {
-    Clip shape;
+    Shape shape;
     Transform transform;
     Index parent{no_clip};
 };
 class FrameDraw {
     RSTD_ENUM(FrameDraw,
-              (Rectangle, (Rect rect; Color color; Scalar radius; Transform transform; Index clip;
-                           RenderId node;)),
-              (BackdropBlur, (Clip mask; Scalar sigma; Transform transform; Index clip; RenderId node;)),
+              (Shape, (vui::Shape shape; Color color; Scalar border_width; Transform transform;
+                       Index clip; RenderId node;)),
+              (BackdropBlur, (vui::Shape mask; Scalar sigma; Transform transform; Index clip; RenderId node;)),
               (Text, (TextLayout layout; Point origin; Color color; Transform transform; Index clip;
                       RenderId node; TextEffects effects{}; TextColors colors{}; Color tint{1, 1, 1, 1};)),
               (Image, (ImageData data; Rect destination; Rect source; ImageSampling sampling;
@@ -147,12 +147,13 @@ class FramePlanner {
         return output_.sources[output_.sources.len() - usize(1)];
     }
 
-    auto clip(Clip value, Transform transform, Index parent) -> Index {
-        if (!value.enabled)
-            return parent;
+    auto clip(Shape value, Transform transform, Index parent) -> Index {
         auto id = static_cast<Index>(output_.clips.len().to_primitive());
         output_.clips.push({value, transform, parent});
         return id;
+    }
+    auto clip(Clip value, Transform transform, Index parent) -> Index {
+        return value.enabled ? clip(value.shape.normalized(), transform, parent) : parent;
     }
     auto append(const RenderScene &scene, RenderId id, Transform parent_transform,
                 Index inherited_clip, Index destination, Index depth) -> Option<FrameError> {
@@ -190,10 +191,13 @@ class FramePlanner {
                     return Some(FrameError::InvalidTransform);
             } else if (op.is_Clip()) {
                 state.clip = clip(op.as_Clip().value, state.transform, state.clip);
-            } else if (op.is_Rect()) {
-                const auto &value = op.as_Rect();
-                output_.passes[usize(target)].draws.push(FrameDraw::Rectangle(
-                    value.rect, (value.color_source == DrawColorSource::Current ? node->properties.paint_color : value.color).modulate(node->properties.content_tint), value.radius, state.transform, state.clip, id));
+            } else if (op.is_Shape()) {
+                const auto &value = op.as_Shape();
+                auto color = value.color_source == DrawColorSource::Current
+                                 ? node->properties.paint_color : value.color;
+                output_.passes[usize(target)].draws.push(FrameDraw::Shape(
+                    value.shape, color.modulate(node->properties.content_tint), value.border_width,
+                    state.transform, state.clip, id));
             } else if (op.is_BackdropBlur()) {
                 const auto &value = op.as_BackdropBlur();
                 output_.passes[usize(target)].draws.push(
@@ -223,8 +227,10 @@ class FramePlanner {
                         TextureFrame(*selected.frame), selected.source_id, placement.destination,
                         placement.source, value.sampling, state.transform, state.clip, id, node->properties.content_tint, value.blend));
                 } else {
-                    output_.passes[usize(target)].draws.push(FrameDraw::Rectangle(
-                        value.destination, value.placeholder.modulate(node->properties.content_tint), 0, state.transform, state.clip, id));
+                    output_.passes[usize(target)].draws.push(FrameDraw::Shape(
+                        Shape::rectangle(value.destination),
+                        value.placeholder.modulate(node->properties.content_tint), 0,
+                        state.transform, state.clip, id));
                 }
             } else if (op.is_Children()) {
                 for (auto child : node->children.values()) {

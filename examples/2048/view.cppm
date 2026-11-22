@@ -205,10 +205,11 @@ class View {
         auto draw(ModifierDrawContext &context) -> Result<empty, UiError> {
             auto &paint = context.paint();
             auto size = paint.size();
-            paint.rect({0, 0, size.width, size.height}, {.729, .788, .851, 1}, 16);
+            auto &canvas = paint.canvas();
+            canvas.rect({0, 0, size.width, size.height}, {.729, .788, .851, 1}, 16);
             for (unsigned i{}; i < 16; ++i) {
                 auto at = position(i);
-                paint.rect({at.tx, at.ty, cell, cell}, {.82, .87, .92, 1}, 10);
+                canvas.rect({at.tx, at.ty, cell, cell}, {.82, .87, .92, 1}, 10);
             }
             return context.draw_content();
         }
