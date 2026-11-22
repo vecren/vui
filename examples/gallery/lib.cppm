@@ -243,9 +243,10 @@ class View {
 
   public:
     static constexpr Serial canvas_warmup_frames = detail::canvas_warmup;
+    using CanvasScene = detail::CanvasScene;
     struct CanvasLaunch {
         Index particles{detail::canvas_loads[1]};
-        bool fourier{};
+        CanvasScene scene{CanvasScene::Particles};
     };
 
     static auto supports_canvas_load(Index count) -> bool {
@@ -257,7 +258,7 @@ class View {
     explicit View(UiSession &session, Option<CanvasLaunch> canvas = {})
         : session_(session), tabs_{session_, graph_.cell(canvas ? Page::Canvas : Page::Controls).unwrap()},
           canvas_options_(graph_.cell(CanvasOptions{.particles = canvas ? canvas->particles : detail::canvas_loads[1],
-                                                    .fourier = canvas && canvas->fourier}).unwrap()) {}
+                                                    .scene = canvas ? canvas->scene : CanvasScene::Particles}).unwrap()) {}
 
     auto mount() -> Result<empty, UiError> {
         auto &ui = session_.document();

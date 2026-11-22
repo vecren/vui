@@ -19,7 +19,8 @@ auto parse_args(int argc, char **argv, Option<Gallery::CanvasLaunch> &canvas, un
     }
     if (argc == 3 || argc == 4) {
         const auto name = rstd::ffi::CStr::from_ptr(argv[2]).to_str().unwrap_or(""_str);
-        if (name == "fourier"_str) canvas = Some(Gallery::CanvasLaunch{.fourier = true});
+        if (name == "fourier"_str) canvas = Some(Gallery::CanvasLaunch{.scene = Gallery::CanvasScene::Fourier});
+        else if (name == "cube"_str) canvas = Some(Gallery::CanvasLaunch{.scene = Gallery::CanvasScene::Cube});
         else {
             auto count = rstd::from_str<u32>(name);
             if (count.is_ok() && Gallery::supports_canvas_load(count->to_primitive()))
@@ -30,7 +31,7 @@ auto parse_args(int argc, char **argv, Option<Gallery::CanvasLaunch> &canvas, un
             return examples::frame_limit(argc - 2, frames, limit);
         }
     }
-    rstd::io::eprintln("usage: vui-gallery --canvas <256|1024|4096|fourier> [frame-count] [--clip-elision]");
+    rstd::io::eprintln("usage: vui-gallery --canvas <256|1024|4096|fourier|cube> [frame-count] [--clip-elision]");
     return false;
 }
 
@@ -61,7 +62,14 @@ struct CanvasProfile {
 
     void report(Gallery::CanvasLaunch launch, CpuTiming paint) const {
         if (!draws) return;
-        const auto workload = launch.fourier ? String::make("scene=fourier"_str) : rstd::format("particles={}", launch.particles);
+        auto workload = [&] {
+            switch (launch.scene) {
+            case Gallery::CanvasScene::Fourier: return String::make("scene=fourier"_str);
+            case Gallery::CanvasScene::Cube: return String::make("scene=cube"_str);
+            case Gallery::CanvasScene::Particles: return rstd::format("particles={}", launch.particles);
+            }
+            return String{};
+        }();
         rstd::io::println("canvas {} extent={}x{} items={} batches={} instance_bytes={} surface_culled={} clip_culled={}",
             workload, extent.width, extent.height, draws->items, draws->batches, draws->instance_bytes,
             draws->surface_culled, draws->clip_culled);

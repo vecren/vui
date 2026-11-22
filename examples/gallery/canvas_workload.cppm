@@ -1,4 +1,5 @@
 export module vui.examples.gallery:canvas_workload;
+import :canvas_cube;
 import :canvas_fourier;
 import :canvas_recording;
 import :style;
@@ -9,12 +10,14 @@ import rstd;
 
 namespace examples::gallery::detail {
 constexpr Index canvas_loads[]{256, 1024, 4096};
+enum class CanvasScene { Particles, Fourier, Cube };
 
 struct CanvasOptions {
     Index particles{canvas_loads[1]};
     bool particles_playing{true};
-    bool fourier{};
+    CanvasScene scene{CanvasScene::Particles};
     FourierOptions epicycles;
+    CubeOptions cube;
     friend auto operator==(CanvasOptions, CanvasOptions) -> bool = default;
 };
 
@@ -187,13 +190,14 @@ auto canvas_workload(cx::Borrowed<state::Cell<CanvasOptions>> settings,
     if (read.is_err()) return Err(read.unwrap_err());
     const auto options = read->value();
     constexpr auto gap = CanvasLayout::toolbar_gap;
-    constexpr Scalar scenes_width = 180;
-    const auto compact = width < 516;
+    constexpr Scalar scenes_width = 240;
+    const auto compact = width < 540;
     const auto selector_width = rstd::min(scenes_width, width);
-    const auto scene_width = rstd::cmp::max(Scalar(0), (selector_width - gap) / 2);
+    const auto scene_width = rstd::cmp::max(Scalar(0), (selector_width - 2 * gap) / 3);
     const auto available = compact ? width : width - selector_width - gap;
-    const auto buttons = options.fourier ? 5 : 4;
-    const auto button_width = rstd::cmp::max(Scalar(0), rstd::min(Scalar(68), (available - (buttons - 1) * gap) / buttons));
+    auto button_width = [available](unsigned count) {
+        return rstd::cmp::max(Scalar(0), rstd::min(Scalar(84), (available - (count - 1) * gap) / count));
+    };
     auto change = [&](ref<str> title, Scalar extent, bool selected, auto update) {
         return workload_button(title, extent, selected, [settings, update] {
             auto updated = state::read(settings->value()).unwrap().value();
@@ -201,37 +205,56 @@ auto canvas_workload(cx::Borrowed<state::Cell<CanvasOptions>> settings,
             settings->set(updated).unwrap();
         });
     };
-    auto selector = cx::row({
-        change("Particles"_str, scene_width, !options.fourier, [](auto &value) { value.fourier = false; }),
-        change("Fourier"_str, scene_width, options.fourier, [](auto &value) { value.fourier = true; }),
-    }).gap(gap);
-    const auto playing = options.fourier ? options.epicycles.playing : options.particles_playing;
-    auto playback = change(playing ? "Pause"_str : "Run"_str, button_width, false, [](auto &value) {
-        auto &active = value.fourier ? value.epicycles.playing : value.particles_playing;
-        active = !active;
-    });
-    auto load = [&](ref<str> title, Index count) {
-        return change(title, button_width, options.particles == count, [count](auto &value) {
-            value.particles = count;
-        });
+    auto select = [&](ref<str> title, CanvasScene scene) {
+        return change(title, scene_width, options.scene == scene, [scene](auto &value) { value.scene = scene; });
     };
-    auto harmonics = [&](ref<str> title, Index count) {
-        return change(title, button_width, options.epicycles.circles == count, [count](auto &value) {
-            value.epicycles.circles = count;
-        });
+    auto selector = cx::row({select("Particles"_str, CanvasScene::Particles),
+        select("Fourier"_str, CanvasScene::Fourier), select("Cube"_str, CanvasScene::Cube)}).gap(gap);
+    auto playback = [&](bool playing, Scalar width, auto toggle) {
+        return change(playing ? "Pause"_str : "Run"_str, width, false, toggle);
     };
-    auto controls = options.fourier
-        ? cx::row({harmonics("16"_str, fourier_counts[0]), harmonics("48"_str, fourier_counts[1]),
-            harmonics("96"_str, fourier_counts[2]), rstd::move(playback),
-            change("Reset"_str, button_width, false, [](auto &value) { ++value.epicycles.preset_revision; })})
-        : cx::row({load("256"_str, canvas_loads[0]), load("1024"_str, canvas_loads[1]),
-            load("4096"_str, canvas_loads[2]), rstd::move(playback)});
-    controls = rstd::move(controls).gap(gap);
+
+    cx::Element controls, scene;
+    switch (options.scene) {
+    case CanvasScene::Particles: {
+        const auto width = button_width(4);
+        auto load = [&](ref<str> title, Index count) {
+            return change(title, width, options.particles == count, [count](auto &value) { value.particles = count; });
+        };
+        controls = cx::row({load("256"_str, canvas_loads[0]), load("1024"_str, canvas_loads[1]),
+            load("4096"_str, canvas_loads[2]), playback(options.particles_playing, width,
+                [](auto &value) { value.particles_playing = !value.particles_playing; })}).gap(gap);
+        scene = cx::native(LayoutKind::Leaf).style(fill().hit_test_visible(false).build())
+            .behavior(cx::Key{"canvas-particles"_str}, CanvasPainter{options.particles, options.particles_playing, recording});
+        break;
+    }
+    case CanvasScene::Fourier: {
+        const auto width = button_width(5);
+        auto harmonics = [&](ref<str> title, Index count) {
+            return change(title, width, options.epicycles.circles == count, [count](auto &value) {
+                value.epicycles.circles = count;
+            });
+        };
+        controls = cx::row({harmonics("16"_str, fourier_counts[0]), harmonics("48"_str, fourier_counts[1]),
+            harmonics("96"_str, fourier_counts[2]), playback(options.epicycles.playing, width,
+                [](auto &value) { value.epicycles.playing = !value.epicycles.playing; }),
+            change("Reset"_str, width, false, [](auto &value) { ++value.epicycles.preset_revision; })}).gap(gap);
+        scene = fourier_canvas(options.epicycles, recording);
+        break;
+    }
+    case CanvasScene::Cube: {
+        const auto width = button_width(3);
+        controls = cx::row({
+            playback(options.cube.playing, width, [](auto &value) { value.cube.playing = !value.cube.playing; }),
+            change("Scramble"_str, width, false, [](auto &value) { ++value.cube.scramble; value.cube.playing = true; }),
+            change("Reset"_str, width, false, [](auto &value) { ++value.cube.reset; value.cube.playing = false; }),
+        }).gap(gap);
+        scene = cube_canvas(options.cube, recording);
+        break;
+    }
+    }
     auto groups = cx::elements({rstd::move(selector), rstd::move(controls)});
     auto toolbar = (compact ? cx::column(rstd::move(groups)) : cx::row(rstd::move(groups))).gap(gap);
-    auto scene = options.fourier ? fourier_canvas(options.epicycles, recording)
-        : cx::native(LayoutKind::Leaf).style(fill().hit_test_visible(false).build())
-            .behavior(cx::Key{"canvas-particles"_str}, CanvasPainter{options.particles, playing, recording});
     return Ok(layout_part(CanvasLayout{}, cx::elements({rstd::move(toolbar), rstd::move(scene)}))
         .style(fill().hit_self(false).build()));
 }
