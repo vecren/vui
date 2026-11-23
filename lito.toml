@@ -17,6 +17,6 @@ vui-render = { path = "render" }
 vui-host = { path = "host" }
 vui-image = { path = "image" }
 rstd-std = { version = "0.1.5" }
-vrento = { version = "0.1.0" }
-vectext = { version = "0.1.0" }
 ligraph = { version = "0.1.0" }
+vrento = { git = "https://github.com/vecren/vrento.git" }
+vectext = { git = "https://github.com/vecren/vectext.git" }
