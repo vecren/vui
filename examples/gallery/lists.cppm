@@ -71,6 +71,10 @@ struct LevelRows {
         auto number = rstd::format("Level {:04}", item.key);
         auto label = append_label(ui, row, number.as_str(), label_style().build(), text_format(15, true), foreground);
         if (label.is_err()) return fail(label.unwrap_err());
+        auto properties = Button::default_semantics();
+        properties.label = rstd::move(number);
+        auto described = session.semantics().set(row, rstd::move(properties));
+        if (described.is_err()) return fail(described.unwrap_err());
         auto clicked = Button::on_clicked(ui, row,
             [owner = selection.clone(), row, key = item.key](EventContext &context, const ClickEvent &) mutable {
                 owner.get()->select(context.document(), row, key);

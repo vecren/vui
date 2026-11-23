@@ -40,7 +40,8 @@ auto text_format(Scalar size, bool bold = false, bool digits = false) -> TextFor
 }
 
 auto label(ref<str> text, Scalar size = 14, Color color = foreground, bool bold = false) -> cx::Element {
-    return cx::text(text).format(text_format(size, bold)).color(color).style(label_style().build());
+    return cx::with_semantics(cx::text(text).format(text_format(size, bold)).color(color).style(label_style().build()),
+        {.role = SemanticsRole::Text, .label = String::make(text)});
 }
 
 auto button_label(ref<str> text, Color color = foreground) -> cx::Element {

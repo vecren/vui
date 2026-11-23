@@ -47,9 +47,60 @@ void SliderState::drag(const Geometry &geometry) {
     write(options_.minimum+ratio*(options_.maximum-options_.minimum));
 }
 
+auto SliderState::describe() -> Result<empty, UiError> {
+    return session_.semantics().set_default(id_, {
+        .role = SemanticsRole::Slider,
+        .label = label_.clone(),
+        .value = rstd::format("{}", value_),
+        .actions = semantics_action_mask(SemanticsAction::Increment) |
+                   semantics_action_mask(SemanticsAction::Decrement) | semantics_action_mask(SemanticsAction::Focus),
+        .merge_descendants = true,
+    });
+}
+
+auto SliderState::refresh_semantics() -> Result<empty, UiError> {
+    if (!id_.valid() || semantics_pending_) return Ok(empty{});
+    auto &ui = session_.document();
+    if (!ui.routing()) return describe();
+    auto deferred = ui.defer([id = id_](UiDocument &ui) -> Result<empty, UiError> {
+        auto state = ui.state<SliderState>(id);
+        if (!state) return Ok(empty{});
+        state->semantics_pending_ = false;
+        return state->describe();
+    });
+    if (deferred.is_err()) return Err(deferred.unwrap_err());
+    semantics_pending_ = true;
+    return Ok(empty{});
+}
+
+auto SliderState::set(Scalar value) -> Result<empty, UiError> {
+    if (!finite(value) || value < options_.minimum || value > options_.maximum) return Err(UiError::InvalidValue);
+    value = options_.bounded(value);
+    if (value == value_) return Ok(empty{});
+    auto previous = value_;
+    value_ = value;
+    auto updated = refresh_semantics();
+    if (updated.is_err()) value_ = previous;
+    return updated;
+}
+
+auto SliderState::write(Scalar value) -> bool {
+    value = options_.bounded(value);
+    if (value == value_) return false;
+    value_ = value;
+    refresh_semantics();
+    changed_.emit(value_).unwrap();
+    return true;
+}
+
 auto SliderState::connect(UiId id) -> Result<empty,ControlError> {
     auto connected=session_.input().on_pointer_availability_changed(id,[&session=session_,id](bool available){if(!available)if(auto state=session.document().state<SliderState>(id))state->pointer_=None();});
-    if(connected.is_err())return Err(ControlError{{},Some(connected.unwrap_err())});availability_=rstd::move(connected).unwrap();return Ok(empty{});
+    if (connected.is_err()) return Err(ControlError{{}, Some(connected.unwrap_err())});
+    id_ = id;
+    auto described = describe();
+    if (described.is_err()) return Err(ControlError{Some(described.unwrap_err()), {}});
+    availability_ = rstd::move(connected).unwrap();
+    return Ok(empty{});
 }
 
 auto SliderState::parts(UiDocument &ui,SliderParts value) -> Result<empty,UiError> {
@@ -61,9 +112,20 @@ auto SliderState::parts(UiDocument &ui,SliderParts value) -> Result<empty,UiErro
 void SliderState::handle(EventContext &context,const RoutedEvent &event) {
     const auto &input=event.input;PointerKey pointer{input.device,input.pointer};
     if(input.type==EventType::CaptureLost || input.type==EventType::PointerCancel){if(pointer_==Some(pointer))pointer_=None();return;}
+    auto increment = options_.step > 0 ? options_.step : options_.keyboard_step;
+    if (input.type == EventType::SemanticAction) {
+        if (event.target != event.current || context.default_prevented()) return;
+        const auto action = input.semantic_action;
+        if (action != SemanticsAction::Increment && action != SemanticsAction::Decrement) return;
+        if (write(value_ + (action == SemanticsAction::Increment ? increment : -increment))) {
+            context.prevent_default();
+            context.stop_propagation();
+        }
+        return;
+    }
     if(input.type==EventType::KeyDown){
         if(event.target!=event.current || input.modifiers.alt || input.modifiers.control || input.modifiers.meta)return;
-        auto increment=options_.step>0 ? options_.step : options_.keyboard_step;auto next=value_;
+        auto next=value_;
         auto vertical=options_.axis==SliderAxis::Vertical;
         if(input.key==Key::Home)next=options_.minimum;else if(input.key==Key::End)next=options_.maximum;
         else if(input.key==(vertical ? Key::Up : Key::Left))next+=options_.reversed ? increment : -increment;
@@ -88,16 +150,16 @@ void SliderState::handle(EventContext &context,const RoutedEvent &event) {
     context.prevent_default();context.stop_propagation();
 }
 
-auto Slider::attach(UiSession &session,UiId id,SliderOptions options) -> Result<empty,ControlError> {
+auto Slider::attach(UiSession &session, UiId id, SliderOptions options, ref<str> label) -> Result<empty,ControlError> {
     auto &ui=session.document();if(!options.valid())return Err(ControlError{Some(UiError::InvalidValue),{}});
     if(!ui.valid(id) || ui.state<SliderState>(id))return Err(ControlError{Some(UiError::InvalidId),{}});
-    auto attached=ui.attach_state(id,SliderState(session,options));if(attached.is_err())return Err(ControlError{Some(attached.unwrap_err()),{}});
+    auto attached=ui.attach_state(id,SliderState(session, options, label));if(attached.is_err())return Err(ControlError{Some(attached.unwrap_err()),{}});
     auto behavior=session.input().attach_behavior<SliderState>(id);if(behavior.is_err())return Err(ControlError{{},Some(behavior.unwrap_err())});return ui.state<SliderState>(id)->connect(id);
 }
 
-auto Slider::create(UiSession &session,NodeStyle style,SliderOptions options) -> Result<UiId,ControlError> {
+auto Slider::create(UiSession &session, NodeStyle style, SliderOptions options, ref<str> label) -> Result<UiId,ControlError> {
     if(!options.valid())return Err(ControlError{Some(UiError::InvalidValue),{}});style.focusable=true;
     auto created=session.document().create<Stack>(style);if(created.is_err())return Err(ControlError{Some(created.unwrap_err()),{}});
-    auto attached=attach(session,*created,options);if(attached.is_err()){session.document().destroy(*created);return Err(attached.unwrap_err());}return Ok(*created);
+    auto attached=attach(session, *created, options, label);if(attached.is_err()){session.document().destroy(*created);return Err(attached.unwrap_err());}return Ok(*created);
 }
 } // namespace vui

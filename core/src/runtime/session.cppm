@@ -6,6 +6,7 @@ import :frame.types;
 import :frame.content;
 import :state.bindings;
 import :runtime.update;
+import :semantics;
 using namespace rstd::prelude;
 
 export namespace vui {
@@ -91,6 +92,7 @@ class UiSession {
     MotionRuntime motion_{document_};
     FrameContentRuntime frame_content_{document_};
     EventRouter input_{document_};
+    Semantics semantics_{document_, input_};
     UiStateBindings state_bindings_{document_};
     UiUpdates updates_{document_};
     Serial render_session_{new_session()};
@@ -144,6 +146,7 @@ class UiSession {
     auto operator=(const UiSession &) -> UiSession & = delete;
     auto document() -> UiDocument & { return document_; }
     auto input() -> EventRouter & { return input_; }
+    auto semantics() -> Semantics & { return semantics_; }
     auto motion() -> MotionRuntime & { return motion_; }
     auto frame_content() -> FrameContentRuntime & { return frame_content_; }
     auto state_bindings() -> UiStateBindings & { return state_bindings_; }

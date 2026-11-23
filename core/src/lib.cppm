@@ -19,4 +19,5 @@ export import :input;
 export import :interaction;
 export import :motion;
 export import :animation;
+export import :semantics;
 export import :runtime;

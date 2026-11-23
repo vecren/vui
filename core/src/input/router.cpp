@@ -1007,6 +1007,32 @@ auto EventRouter::completed_image(UiId id, Serial image_id) const -> Result<Opti
     return completed_frame_->image(id, image_id);
 }
 
+auto EventRouter::allows_semantics(const InputSnapshot &snapshot, UiId target) const -> bool {
+    // A scope that contains focus can be used by a non-modal control, such as a menu.
+    return !closed_ && scopes_.allows(snapshot, target, true);
+}
+
+auto EventRouter::dispatch_semantics(UiId target, SemanticsAction action) -> Result<bool, InputError> {
+    if (busy_ || !document_.can_route())
+        return Err(InputError::Reentrant);
+    if (closed_ || !controls_ || !window_focused_ || update_.is_none())
+        return Err(InputError::Unavailable);
+    bool focus = action == SemanticsAction::Focus;
+    if (!allows_semantics(*update_, target) || !input_eligible(*update_, target, false, focus))
+        return Ok(false);
+    if (focus) {
+        auto result = request_focus(Some(target));
+        if (result.is_err()) return Err(result.unwrap_err());
+        return Ok(focus_ == Some(target));
+    }
+    begin();
+    InputEvent input{.type = EventType::SemanticAction, .semantic_action = action};
+    auto handled = route(*update_, target, input, true);
+    auto result = end();
+    if (result.is_err()) return Err(result.unwrap_err());
+    return Ok(handled);
+}
+
 auto EventRouter::dispatch(InputEvent input) -> Result<empty, InputError> {
     work_ = {};
     if (closed_)

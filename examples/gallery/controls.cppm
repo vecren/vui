@@ -96,7 +96,7 @@ auto mount_power(UiSession &session, UiId parent) -> Result<empty, UiError> {
     auto name = append_label(ui, *deck, "Power"_str, label_style().build(), text_format(16, true), foreground);
     if (name.is_err()) return Err(name.unwrap_err());
 
-    auto slider = Slider::create(session, fill().build(), {.maximum = 100, .step = 5});
+    auto slider = Slider::create(session, fill().build(), {.maximum = 100, .step = 5}, "Power"_str);
     if (slider.is_err()) return Err(slider.unwrap_err().ui.unwrap_or(UiError::InvalidValue));
     auto control = slider.unwrap();
     auto attached = ui.attach(*deck, control);
@@ -169,11 +169,15 @@ auto effects_switch(bool checked, auto on_change) -> cx::Element {
     auto thumb = cx::native(LayoutKind::Leaf).style(NodeStyleBuilder{}.width(26).height(26)
         .horizontal(checked ? Alignment::End : Alignment::Start).vertical(Alignment::Center)
         .background(foreground).radius(13).hit_test_visible(false).build());
-    return control_finish(cx::button(rstd::move(thumb),
+    auto properties = Button::default_semantics();
+    properties.role = SemanticsRole::Switch;
+    properties.label = String::make("Effects"_str);
+    properties.checked = Some(bool(checked));
+    return cx::with_semantics(control_finish(cx::button(rstd::move(thumb),
         [on_change, checked] { return on_change(!checked); },
         ButtonStyleBuilder{button_style(checked)}.radius(20).build(), {.second_key = Key::Space})
         .style(NodeStyleBuilder{}.width(74).height(40).padding(6).horizontal(Alignment::End)
-            .vertical(Alignment::Center).build()), false);
+            .vertical(Alignment::Center).build()), false), rstd::move(properties));
 }
 } // namespace
 
@@ -218,7 +222,8 @@ auto controls(cx::Borrowed<state::Cell<bool>> dialog_open, Scalar width) -> cx::
     }).gap(8);
 
     auto toggle = effects_switch(effects_value->value(), [effects](bool next) { return effects.set(next); });
-    auto switch_row = cx::stack({label("Effects"_str, 16, foreground, true), rstd::move(toggle)})
+    auto effects_label = cx::text("Effects"_str).format(text_format(16, true)).color(foreground).style(label_style().build());
+    auto switch_row = cx::stack({rstd::move(effects_label), rstd::move(toggle)})
         .style(NodeStyleBuilder{}.horizontal(Alignment::Stretch).height(44).build());
 
     const ref<str> choices[]{"Easy"_str, "Normal"_str, "Hard"_str};

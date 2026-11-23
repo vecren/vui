@@ -174,9 +174,10 @@ auto dialog(cx::Borrowed<state::Cell<bool>> shown, state::Value<Insets> insets) 
     if (close.is_err()) return Err(close.unwrap_err());
     auto button = control_finish(cx::button(button_label("Close"_str), [shown] { shown->set(false).unwrap(); },
         button_style()).style(block(112, 44, {0, 0, 0, 0})).reference(*close));
-    auto panel = glass(LayoutKind::Column, cx::elements({label("Dialog"_str, 20, foreground, true), rstd::move(button)}),
+    auto panel = cx::with_semantics(glass(LayoutKind::Column, cx::elements({label("Dialog"_str, 20, foreground, true), rstd::move(button)}),
         {.blur = 12, .tint = Color::from_srgba8(16, 16, 16, 168).unwrap()})
-        .style(block(320, 146, white(0), panel_radius)).padding(20).gap(18);
+        .style(block(320, 146, white(0), panel_radius)).padding(20).gap(18),
+        {.role = SemanticsRole::Dialog, .label = String::make("Dialog"_str), .merge_descendants = true});
     cx::PopupOptions options;
     options.initial_focus = Some(close.unwrap());
     options.backdrop = {0, 0, 0, .32f};

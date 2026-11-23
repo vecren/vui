@@ -58,8 +58,10 @@ auto button(Element content, F clicked, ButtonStyle appearance = {}, ButtonOptio
 }
 template <class F>
 auto button(ref<str> title, F clicked, ButtonStyle appearance = {}, ButtonOptions options = {}, rstd::source_location source = rstd::source_location::current()) -> Element {
-    return button(text(title).style(NodeStyleBuilder{}.hit_test_visible(false)
-        .horizontal(Alignment::Center).vertical(Alignment::Center).build()), rstd::move(clicked), appearance, options, source);
+    auto label = with_semantics(text(title).style(NodeStyleBuilder{}.hit_test_visible(false)
+        .horizontal(Alignment::Center).vertical(Alignment::Center).build()),
+        {.role = SemanticsRole::Text, .label = String::make(title)});
+    return button(rstd::move(label), rstd::move(clicked), appearance, options, source);
 }
 struct ScrollElement {
     ScrollStyle scroll;

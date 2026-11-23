@@ -301,6 +301,12 @@ void ButtonState::handle(EventContext &context, const RoutedEvent &event) {
             activate = true;
         consume(context);
         break;
+    case EventType::SemanticAction:
+        if (event.target != event.current || input.semantic_action != SemanticsAction::Activate ||
+            context.default_prevented()) return;
+        activate = true;
+        consume(context);
+        break;
     case EventType::FocusGained:
         focused_ = true;
         break;
@@ -355,6 +361,12 @@ auto Button::prepare(UiDocument &document, UiEditBatch &edit, Option<UiId> previ
     return Ok(node);
 }
 
+auto Button::default_semantics() -> SemanticsProperties {
+    return {.role = SemanticsRole::Button,
+            .actions = semantics_action_mask(SemanticsAction::Activate) | semantics_action_mask(SemanticsAction::Focus),
+            .merge_descendants = true};
+}
+
 auto Button::create(UiSession &session, NodeStyle style, ButtonStyle appearance,
                    ButtonOptions options) -> Result<UiId, ControlError> {
     if (!appearance.valid())
@@ -380,6 +392,11 @@ auto Button::create(UiSession &session, NodeStyle style, ButtonStyle appearance,
     if (behavior.is_err()) {
         document.destroy(id);
         return Err(ControlError{{}, Some(behavior.unwrap_err())});
+    }
+    auto described = session.semantics().set_default(id, default_semantics());
+    if (described.is_err()) {
+        document.destroy(id);
+        return Err(ControlError{Some(described.unwrap_err()), {}});
     }
     return Ok(id);
 }

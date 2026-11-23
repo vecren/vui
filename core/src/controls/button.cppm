@@ -133,6 +133,7 @@ class ButtonState {
 
 class Button {
   public:
+    static auto default_semantics() -> SemanticsProperties;
     template <class F>
     static auto prepare_clicked(UiDocument &document, UiEditBatch &edit, UiNodeRef node, F callback)
         -> Result<Binding, ControlError> {

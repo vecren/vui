@@ -5,6 +5,7 @@ module;
 module vui.host;
 import :android_application;
 import :frames.worker;
+import vui;
 
 extern "C" auto vui_android_create_application() -> vui::host::AndroidApplication *;
 
@@ -211,6 +212,20 @@ struct AndroidBridge {
         // Choreographer schedules the next frame independently of this frame's prediction.
         return int((*data.runner)->next_wait({timing.now_ns}));
     }
+    static auto semantics(JNIEnv *env, jlong handle) -> jobjectArray {
+        auto &data = *get(handle).data_;
+        if (data.failed || data.closed || !host(handle).attached())
+            return nullptr;
+        return host(handle).accessibility_nodes(env, data.session.semantics().snapshot());
+    }
+    static auto perform_semantics(jlong handle, SemanticsId id, jint action) -> bool {
+        auto &data = *get(handle).data_;
+        if (data.failed || data.closed || !host(handle).attached() ||
+            action <= 0 || action > jint(SemanticsAction::Focus) + 1)
+            return false;
+        auto result = data.session.semantics().perform(id, SemanticsAction(action - 1));
+        return result.is_ok() && result.unwrap();
+    }
     static void redraw_async(JNIEnv *env, jlong handle, jobject runnable) {
         host(handle).redraw_async(env, runnable);
     }
@@ -239,6 +254,16 @@ JNIEXPORT jint JNICALL Java_io_vui_VuiView_nativePump(JNIEnv *, jclass, jlong ha
     using namespace rstd::prelude;
     auto present = expected > time ? Some(Serial(expected)) : None<Serial>();
     return AndroidBridge::pump(handle, {Serial(time), present, Some(Serial(sample))});
+}
+JNIEXPORT jobjectArray JNICALL Java_io_vui_VuiView_nativeSemantics(JNIEnv *env, jclass, jlong handle) {
+    return AndroidBridge::semantics(env, handle);
+}
+JNIEXPORT jboolean JNICALL Java_io_vui_VuiView_nativePerformSemantics(JNIEnv *, jclass, jlong handle, jlong session,
+                                                                    jint slot, jlong generation, jlong mount,
+                                                                    jint action) {
+    using namespace vui;
+    return AndroidBridge::perform_semantics(handle, {{Serial(session), Index(slot), Serial(generation)}, Serial(mount)},
+                                            action);
 }
 JNIEXPORT void JNICALL Java_io_vui_VuiView_nativeActive(JNIEnv *, jclass, jlong handle, jboolean value) {
     AndroidBridge::host(handle).active(value);

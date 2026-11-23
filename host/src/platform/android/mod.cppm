@@ -5,6 +5,7 @@ module;
 export module vui.host:platform.android;
 import :runner;
 import :platform.input;
+import vui;
 import rstd;
 
 export namespace vui::host {
@@ -60,6 +61,7 @@ class AndroidHost final : public gpu::SurfaceHost {
                  int composing_end);
     auto text_input(Option<TextInputState> state) -> NativeTextInputResult;
     auto read_clipboard() -> Result<String, ClipboardError>;
+    auto accessibility_nodes(JNIEnv *, const SemanticsSnapshot &) const -> jobjectArray;
     auto write_clipboard(ref<str>) -> Result<empty, ClipboardError>;
     auto request_clipboard(Serial) -> Result<empty, ClipboardError>;
     auto request_clipboard_write(Serial, Serial activation, ref<str>) -> Result<empty, ClipboardError>;

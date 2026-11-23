@@ -153,6 +153,7 @@ inline auto Element::identity(CallIdentity value) && -> Element {
 }
 
 
+auto with_semantics(Element element, SemanticsProperties properties) -> Element;
 auto native(LayoutKind kind, Vec<Element> children = {}, rstd::source_location source = rstd::source_location::current()) -> Element;
 inline auto elements(initializer_list<Element> values) -> Vec<Element> {
     Vec<Element> result; for (const auto &value : values) result.push(Element(value)); return result;

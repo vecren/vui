@@ -31,8 +31,14 @@ enum class EventType {
     ClipboardResult,
     ClipboardWriteResult,
     // Cancels active input after a gap; window_focused is the last known native state.
-    InputReset
+    InputReset,
+    SemanticAction
 };
+enum class SemanticsAction { Activate, Increment, Decrement, ScrollForward, ScrollBackward, Focus };
+constexpr auto semantics_action_mask(SemanticsAction action) -> unsigned {
+    auto index = static_cast<unsigned>(action);
+    return index <= static_cast<unsigned>(SemanticsAction::Focus) ? 1u << index : 0u;
+}
 enum class InputDelivery { EverySample, LatestWithHistory };
 enum class RoutePhase { Capture, Target, Bubble };
 enum class PointerButton { None, Primary, Secondary, Middle, Back, Forward };
@@ -288,6 +294,7 @@ struct InputEvent {
     Option<ClipboardError> clipboard_error;
     Serial activation{};
     Option<bool> window_focused;
+    SemanticsAction semantic_action{};
 };
 struct RoutedEvent {
     InputEvent input;

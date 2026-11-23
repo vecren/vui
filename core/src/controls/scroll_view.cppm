@@ -81,10 +81,7 @@ class ScrollState {
         stop(); if (interaction_.is_some()) interaction_->get()->configure();
     }
     auto viewport() const -> UiId { return viewport_; }
-    auto connect(UiSession &session,UiId root) -> Result<empty,ControlError> {
-        auto value=ScrollInteraction::make(session,root,viewport_,style_,user_scrolled_);if (value.is_err()) return Err(value.unwrap_err());
-        interaction_=Some(rstd::move(value).unwrap());return Ok(empty{});
-    }
+    auto connect(UiSession &session, UiId root) -> Result<empty, ControlError>;
     void stop() {if (interaction_.is_some()) interaction_->get()->stop();}
     auto status() const -> ScrollStatus {return interaction_.is_some() ? interaction_->get()->status() : ScrollStatus{};}
     auto on_user_scrolled(UiDocument &ui, auto callback) -> Result<Binding, UiError> {

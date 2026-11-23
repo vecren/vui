@@ -215,9 +215,10 @@ auto motion(cx::Borrowed<UiSession> session, cx::NodeRef image, Scalar width)
             context.document().animate_opacity(image.id().unwrap(), demo->opacity,
                 {300'000'000, AnimationEasing::EaseInOut, AnimationEndPolicy::CommitFinal}).unwrap();
         }, button_style()).style(NodeStyleBuilder{}.height(44).width(72).build()));
-    auto drag = control_finish(cx::element(TileElement{tile}, cx::elements({button_label("Drag"_str)}))
+    auto drag = cx::with_semantics(control_finish(cx::element(TileElement{tile}, cx::elements({button_label("Drag"_str)}))
         .style(NodeStyleBuilder{examples::block(104, 56, control_surface, 8)}
-            .transform({1, 0, 0, 1, TileController::origin.x, TileController::origin.y}).focusable(true).build()));
+            .transform({1, 0, 0, 1, TileController::origin.x, TileController::origin.y}).focusable(true).build())),
+        {.label = String::make("Drag tile"_str), .actions = semantics_action_mask(SemanticsAction::Focus), .merge_descendants = true});
     constexpr Scalar canvas_height = 176;
     auto canvas_width = rstd::cmp::max(Scalar(0), width - 2 * panel_padding);
     auto lens = glass(LayoutKind::Stack, {}, {.blur = 8, .tint = {0, 0, 0, .16f}})

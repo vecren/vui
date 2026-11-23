@@ -34,6 +34,13 @@ auto ButtonElement::prepare(PrepareContext &context, Option<UiId> previous, Node
             });
         if (connected.is_err()) return Err(ComposeError(ComposeStage::Prepare, connected.unwrap_err().ui));
         slot.get()->binding = Some(connected.unwrap()); context.behavior<ButtonState>(node);
+        context.on_commit([target = context.target()](CommittedContext &context) -> ComposeResult<empty> {
+            auto id = context.resolve(target);
+            if (id.is_err()) return Err(id.unwrap_err());
+            auto described = context.session().semantics().set_default(*id, Button::default_semantics());
+            if (described.is_err()) return Err(ComposeError(ComposeStage::Effect, Some(described.unwrap_err())));
+            return Ok(empty{});
+        });
     }
     auto action = context.document().bindings().make();
     context.on_commit([slot, callback = clicked, action = rstd::move(action), source = context.source()](CommittedContext &) mutable -> ComposeResult<empty> {

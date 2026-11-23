@@ -67,6 +67,7 @@ class EventContext {
 class EventRouter {
     friend class EventContext;
     friend class UiSession;
+    friend class Semantics;
     struct BehaviorEntry {
         UiId target;
         NodeStateKey role;
@@ -213,6 +214,8 @@ class EventRouter {
                 bool &prevented, Point &remaining);
     auto route(const InputSnapshot &update, UiId target, InputEvent input, bool direct = false)
         -> bool;
+    auto allows_semantics(const InputSnapshot &snapshot, UiId target) const -> bool;
+    auto dispatch_semantics(UiId target, SemanticsAction action) -> Result<bool, InputError>;
     static auto event(EventType type, const Pointer &pointer) -> InputEvent;
     void hover(Pointer &pointer, Option<UiId> target);
     void capture_native(Pointer &pointer, bool enabled);

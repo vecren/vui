@@ -43,6 +43,7 @@ class TextFieldState {
     TextFieldOptions options_;
     Option<TextBoundaries> original_;
     UiId label_, placeholder_;
+    String semantic_label_;
     TextEditState displayed_;
     Option<TextPlacement> placement_;
     Point origin_;
@@ -65,6 +66,7 @@ class TextFieldState {
     Signal<void(EventContext &, const TextEditState &)> submitted_, cancelled_;
     Option<StateBinding<TextEditState>> binding_;
 
+    auto describe(ref<str> text) -> Result<empty, UiError>;
     auto caret_visible() const -> bool;
     void reset_blink();
     void finish_focus(bool blur);
@@ -80,10 +82,12 @@ class TextFieldState {
     auto range_rect(TextRange range) const -> Rect;
 
   public:
-    TextFieldState(TextEdit edit, TextFieldStyle appearance, UiId label, UiId placeholder,TextFieldOptions options={})
+    TextFieldState(TextEdit edit, TextFieldStyle appearance, UiId label, UiId placeholder, TextFieldOptions options = {},
+                   ref<str> semantic_label = ""_str)
         : edit_(rstd::move(edit)), selection_color_(appearance.selection), caret_color_(appearance.caret),
           composition_color_(appearance.composition),caret_width_(appearance.caret_width),caret_blink_rate_(appearance.caret_blink_rate),
-          caret_with_selection_(appearance.caret_with_selection),alignment_(appearance.format.alignment),options_(options),label_(label), placeholder_(placeholder), displayed_(edit_.state().unwrap()) {}
+          caret_with_selection_(appearance.caret_with_selection),alignment_(appearance.format.alignment),options_(options),
+          label_(label), placeholder_(placeholder), semantic_label_(String::make(semantic_label)), displayed_(edit_.state().unwrap()) {}
     auto model() -> TextEdit & { return edit_; }
     auto last_error() const -> Option<TextFieldError> { return error_; }
     auto metrics() const -> TextFieldMetrics { return {caret_, offset_, placement_.is_some() ? placement_->layout.id() : 0, focused_,caret_visible()}; }

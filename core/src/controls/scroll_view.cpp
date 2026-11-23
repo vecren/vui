@@ -215,9 +215,25 @@ auto ScrollState::set_style(UiDocument &ui, ScrollStyle style) -> Result<empty, 
     return result;
 }
 
+auto ScrollState::connect(UiSession &session, UiId root) -> Result<empty, ControlError> {
+    auto value = ScrollInteraction::make(session, root, viewport_, style_, user_scrolled_);
+    if (value.is_err()) return Err(value.unwrap_err());
+    auto described = session.semantics().set_default(root, {
+        .role = SemanticsRole::ScrollArea,
+        .actions = semantics_action_mask(SemanticsAction::ScrollForward) |
+                   semantics_action_mask(SemanticsAction::ScrollBackward) | semantics_action_mask(SemanticsAction::Focus),
+    });
+    if (described.is_err()) return Err(ControlError{Some(described.unwrap_err()), {}});
+    interaction_ = Some(rstd::move(value).unwrap());
+    return Ok(empty{});
+}
+
 void ScrollState::handle(EventContext &context, const RoutedEvent &event) {
     if (interaction_.is_some() && interaction_->get()->handle(context,event)) return;
-    if (event.input.type==EventType::Wheel || (event.input.type==EventType::KeyDown && event.target==event.current)) stop();
+    const bool semantic = event.input.type == EventType::SemanticAction && event.target == event.current &&
+        (event.input.semantic_action == SemanticsAction::ScrollForward || event.input.semantic_action == SemanticsAction::ScrollBackward);
+    if (semantic && context.default_prevented()) return;
+    if (semantic || event.input.type==EventType::Wheel || (event.input.type==EventType::KeyDown && event.target==event.current)) stop();
     auto visual = context.visual(viewport_);
     if (!visual || visual->viewport.is_none())
         return;
@@ -245,8 +261,16 @@ void ScrollState::handle(EventContext &context, const RoutedEvent &event) {
         if (context.scroll_remaining() == Point{})
             context.prevent_default();
         user_scrolled_.emit({next, metrics.maximum}).unwrap();
-    } else if (event.input.type == EventType::KeyDown && event.target == event.current) {
-        switch (event.input.key) {
+    } else if (semantic || (event.input.type == EventType::KeyDown && event.target == event.current)) {
+        auto page = [&](Scalar direction) {
+            if (style_.axes.horizontal && (!style_.axes.vertical || (semantic && metrics.maximum.y <= 0)))
+                next.x = shift(next.x, direction * metrics.viewport.width, 1, metrics.maximum.x);
+            else next.y = shift(next.y, direction * metrics.viewport.height, 1, metrics.maximum.y);
+        };
+        if (semantic) {
+            page(event.input.semantic_action == SemanticsAction::ScrollForward ? 1 : -1);
+            if (next == metrics.offset) return;
+        } else switch (event.input.key) {
         case Key::Left:
             next.x = shift(next.x, -1, style_.line_step, metrics.maximum.x);
             break;
@@ -260,12 +284,10 @@ void ScrollState::handle(EventContext &context, const RoutedEvent &event) {
             next.y = shift(next.y, 1, style_.line_step, metrics.maximum.y);
             break;
         case Key::PageUp:
-            if (style_.axes.horizontal && !style_.axes.vertical) next.x=shift(next.x,-metrics.viewport.width,1,metrics.maximum.x);
-            else next.y = shift(next.y, -metrics.viewport.height, 1, metrics.maximum.y);
+            page(-1);
             break;
         case Key::PageDown:
-            if (style_.axes.horizontal && !style_.axes.vertical) next.x=shift(next.x,metrics.viewport.width,1,metrics.maximum.x);
-            else next.y = shift(next.y, metrics.viewport.height, 1, metrics.maximum.y);
+            page(1);
             break;
         case Key::Home:
             next = {};
@@ -278,6 +300,7 @@ void ScrollState::handle(EventContext &context, const RoutedEvent &event) {
         }
         if (context.document().set_viewport_offset(viewport_, next).is_ok()) {
             context.prevent_default();
+            if (semantic) context.stop_propagation();
             if (next != metrics.offset) user_scrolled_.emit({next, metrics.maximum}).unwrap();
         }
     }

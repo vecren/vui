@@ -1,5 +1,6 @@
 module vui.compose;
 import :element;
+import :behavior;
 using namespace rstd::prelude;
 using namespace rstd::literals;
 
@@ -9,6 +10,24 @@ auto forwards_modifiers(ElementKind kind) -> bool {
     return kind == ElementKind::Component || kind == ElementKind::Fragment ||
            kind == ElementKind::Provider || kind == ElementKind::Movable;
 }
+
+struct SemanticsModifier {
+    using State = empty;
+    SemanticsProperties properties;
+
+    auto create() const -> State { return {}; }
+    auto update(State &, BehaviorContext &context) const -> ComposeResult<empty> {
+        auto described = context.session().semantics().set(context.target(), {
+            properties.role, properties.label.clone(), properties.value.clone(),
+            properties.actions, properties.merge_descendants, properties.checked,
+        });
+        if (described.is_err()) return Err(ComposeError(ComposeStage::Effect, Some(described.unwrap_err())));
+        return Ok(empty{});
+    }
+    auto attach(State &, BehaviorContext &context, rstd::rc::Weak<State>) const -> EffectLease {
+        return EffectLease([&session = context.session(), id = context.target()] { session.semantics().clear(id); });
+    }
+};
 }
 ElementData::ElementData(const ElementData &other)
     : kind(other.kind), layout(other.layout), style(other.style),
@@ -84,6 +103,10 @@ auto Element::behavior(BehaviorDeclaration value) && -> Element {
         next.data_.get()->modifiers.push(rstd::move(modifier));
     } else next.data_.get()->behaviors.push(rstd::move(value));
     return next;
+}
+
+auto with_semantics(Element element, SemanticsProperties properties) -> Element {
+    return rstd::move(element).behavior(Key{"vui.semantics"_str}, SemanticsModifier{rstd::move(properties)});
 }
 
 auto native(LayoutKind kind, Vec<Element> children, rstd::source_location source) -> Element {

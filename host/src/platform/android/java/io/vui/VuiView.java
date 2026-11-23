@@ -20,6 +20,7 @@ import android.view.SurfaceHolder;
 import android.view.SurfaceView;
 import android.view.WindowInsets;
 import android.view.WindowInsetsAnimation;
+import android.view.accessibility.AccessibilityNodeProvider;
 import android.view.inputmethod.BaseInputConnection;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputConnection;
@@ -37,6 +38,7 @@ public final class VuiView extends SurfaceView implements SurfaceHolder.Callback
         posted.set(false);
         pump();
     };
+    private final VuiAccessibility accessibility;
     private long handle;
     private long period = 16_666_667;
     private boolean framePending, surfaceAvailable;
@@ -46,6 +48,8 @@ public final class VuiView extends SurfaceView implements SurfaceHolder.Callback
 
     public VuiView(Context context) {
         super(context);
+        accessibility = new VuiAccessibility(this);
+        setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_YES);
         setFocusable(true);
         setFocusableInTouchMode(true);
         getHolder().addCallback(this);
@@ -88,6 +92,8 @@ public final class VuiView extends SurfaceView implements SurfaceHolder.Callback
         posted.set(false);
         int wait = nativePump(handle, now, sample, expected);
         if (getContext() instanceof VuiActivity) ((VuiActivity)getContext()).setBackEnabled(nativeCanBack(handle));
+        if (wait < 0 || !surfaceAvailable) accessibility.reset();
+        else if (accessibility.enabled()) accessibility.publish(nativeSemantics(handle));
         if (wait < 0) return;
         if (wait <= 16 && surfaceAvailable) {
             if (!framePending) {
@@ -141,6 +147,7 @@ public final class VuiView extends SurfaceView implements SurfaceHolder.Callback
     public boolean back() { return handle != 0 && nativeBack(handle); }
 
     public void close() {
+        accessibility.detach();
         handler.removeCallbacksAndMessages(null);
         cancelFrame();
         posted.set(false);
@@ -151,6 +158,31 @@ public final class VuiView extends SurfaceView implements SurfaceHolder.Callback
         }
         getHolder().removeCallback(this);
         if (Build.VERSION.SDK_INT >= 30) setWindowInsetsAnimationCallback(null);
+    }
+
+    @Override protected void onAttachedToWindow() {
+        super.onAttachedToWindow();
+        if (handle != 0) accessibility.attach();
+    }
+
+    @Override protected void onDetachedFromWindow() {
+        accessibility.detach();
+        super.onDetachedFromWindow();
+    }
+
+    @Override public AccessibilityNodeProvider getAccessibilityNodeProvider() {
+        return accessibility != null && accessibility.enabled() ? accessibility : super.getAccessibilityNodeProvider();
+    }
+
+    @Override public boolean dispatchHoverEvent(MotionEvent event) {
+        return accessibility.hover(event) || super.dispatchHoverEvent(event);
+    }
+
+    boolean performSemantics(long session, int slot, long generation, long mount, int action) {
+        if (handle == 0 || !surfaceAvailable || !nativePerformSemantics(handle, session, slot, generation, mount, action))
+            return false;
+        schedulePump();
+        return true;
     }
 
     @Override
@@ -172,6 +204,7 @@ public final class VuiView extends SurfaceView implements SurfaceHolder.Callback
     @Override
     public void surfaceDestroyed(SurfaceHolder holder) {
         surfaceAvailable = false;
+        accessibility.reset();
         if (handle != 0) nativeSurface(handle, null);
         cancelFrame();
     }
@@ -447,6 +480,9 @@ public final class VuiView extends SurfaceView implements SurfaceHolder.Callback
     private static native boolean nativeSurface(long handle, Surface surface);
     private static native void nativeResize(long handle, int width, int height);
     private static native int nativePump(long handle, long now, long sample, long expected);
+    private static native VuiAccessibility.Node[] nativeSemantics(long handle);
+    private static native boolean nativePerformSemantics(long handle, long session, int slot, long generation,
+        long mount, int action);
     private static native void nativeActive(long handle, boolean active);
     private static native void nativeFocus(long handle, boolean focused);
     private static native void nativeWindowFocus(long handle, boolean focused);

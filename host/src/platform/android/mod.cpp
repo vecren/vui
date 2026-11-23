@@ -138,6 +138,19 @@ auto encode(JNIEnv *env, ref<str> value) -> jstring {
     }
     return env->NewString(units.as_slice().as_raw_ptr(), jsize(units.len().to_primitive()));
 }
+auto accessibility_class(SemanticsRole role) -> const char * {
+    switch (role) {
+    case SemanticsRole::Text: return "android.widget.TextView";
+    case SemanticsRole::Button: return "android.widget.Button";
+    case SemanticsRole::Slider: return "android.widget.SeekBar";
+    case SemanticsRole::TextField: return "android.widget.EditText";
+    case SemanticsRole::ScrollArea: return "android.widget.ScrollView";
+    case SemanticsRole::Dialog: return "android.app.Dialog";
+    case SemanticsRole::Switch: return "android.widget.Switch";
+    case SemanticsRole::Image: return "android.widget.ImageView";
+    default: return "android.view.View";
+    }
+}
 auto utf16_offset(ref<str> value, Index offset) -> int {
     int count{};
     auto chars = value->get(usize(), usize(offset)).unwrap()->chars();
@@ -212,6 +225,54 @@ AndroidHost::~AndroidHost() {
 auto AndroidHost::valid() const -> bool {
     return data_->view->view && data_->view->schedule && data_->view->update_text && data_->view->revision &&
            data_->view->system_bar_icons;
+}
+auto AndroidHost::accessibility_nodes(JNIEnv *env, const SemanticsSnapshot &snapshot) const -> jobjectArray {
+    auto nodes = snapshot.nodes();
+    auto type = env->FindClass("io/vui/VuiAccessibility$Node");
+    if (!type)
+        return nullptr;
+    auto constructor = env->GetMethodID(type, "<init>",
+                                       "(JIJJJIJJLjava/lang/String;Ljava/lang/String;Ljava/lang/String;FFFFIIIIIZZ)V");
+    if (!constructor || nodes.len() > usize(0x7fffffff))
+        return nullptr;
+    auto array = env->NewObjectArray(jsize(nodes.len().to_primitive()), type, nullptr);
+    if (!array)
+        return nullptr;
+    auto scale = data_->metrics.surface.scale;
+    jsize index{};
+    for (const auto &node : nodes) {
+        if (env->PushLocalFrame(4) < 0)
+            return nullptr;
+        const auto &properties = node.properties;
+        auto action = [&](SemanticsAction value) -> jint {
+            return (properties.actions & semantics_action_mask(value)) ? jint(value) + 1 : 0;
+        };
+        auto forward = action(SemanticsAction::Increment);
+        auto backward = action(SemanticsAction::Decrement);
+        const auto parent = node.parent ? *node.parent : SemanticsId{};
+        auto checked = properties.checked.is_some() ? jint(*properties.checked) : -1;
+        auto bounds = node.bounds;
+        auto class_name = env->NewStringUTF(accessibility_class(properties.role));
+        auto label = class_name ? encode(env, properties.label.as_str()) : nullptr;
+        auto value = label ? encode(env, properties.value.as_str()) : nullptr;
+        auto result = !value ? nullptr : env->NewObject(
+            type, constructor, jlong(node.id.node.session), jint(node.id.node.slot), jlong(node.id.node.generation),
+            jlong(node.id.mount_generation), jlong(parent.node.session), jint(parent.node.slot),
+            jlong(parent.node.generation), jlong(parent.mount_generation), class_name, label, value,
+            jfloat(bounds.x * scale), jfloat(bounds.y * scale), jfloat((bounds.x + bounds.width) * scale),
+            jfloat((bounds.y + bounds.height) * scale), action(SemanticsAction::Activate),
+            forward ? forward : action(SemanticsAction::ScrollForward),
+            backward ? backward : action(SemanticsAction::ScrollBackward), action(SemanticsAction::Focus), checked,
+            jboolean(node.enabled), jboolean(node.focused));
+        auto written = result != nullptr;
+        if (written)
+            env->SetObjectArrayElement(array, index++, result);
+        env->PopLocalFrame(nullptr);
+        if (!written || env->ExceptionCheck())
+            return nullptr;
+    }
+    env->DeleteLocalRef(type);
+    return array;
 }
 auto AndroidHost::attach(JNIEnv *env, jobject surface) -> bool {
     if (data_->window.is_some() || !surface)

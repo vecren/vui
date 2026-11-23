@@ -67,8 +67,20 @@ auto TextFieldState::range_rect(TextRange range) const -> Rect {
         __builtin_fabs(right.x - left.x), left.height};
 }
 
+auto TextFieldState::describe(ref<str> text) -> Result<empty, UiError> {
+    return session_->semantics().set_default(id_, {
+        .role = SemanticsRole::TextField,
+        .label = semantic_label_.clone(),
+        .value = String::make(text),
+        .actions = semantics_action_mask(SemanticsAction::Focus),
+        .merge_descendants = true,
+    });
+}
+
 auto TextFieldState::bind(UiSession &session, UiId id) -> Result<empty, TextFieldError> {
     session_=&session;id_=id;
+    auto described = describe(displayed_.text.text());
+    if (described.is_err()) return Err(TextFieldError{.ui = Some(described.unwrap_err())});
     if (caret_blink_rate_>0) {
         blink_=rstd::rc::make_rc<Blink>(session,id);auto bound=session.motion().bind(blink_.downgrade());
         if (bound.is_err()) return Err(TextFieldError{.ui=Some(UiError::Limit)});motion_=rstd::move(bound).unwrap();
@@ -86,6 +98,10 @@ auto TextFieldState::bind(UiSession &session, UiId id) -> Result<empty, TextFiel
             field->native_commit_ ? TextChangeCause::InputMethod : TextChangeCause::Other);
         if (surrounding.is_err()) field->error_ = Some(TextFieldError{.input = Some(surrounding.unwrap_err())});
         field->native_commit_ = field->reset_requested_ = false;
+        if (field->displayed_.text != value.text) {
+            auto described = field->describe(value.text.text());
+            if (described.is_err()) return described;
+        }
         field->displayed_ = value;field->reset_blink();
         auto written = ui.set_text(field->label_, value.display);
         if (written.is_err()) return written;
@@ -308,7 +324,7 @@ auto TextField::create(UiSession &session, NodeStyle style, ref<str> text,
     }
     ui.set_text_color(label.unwrap(), appearance.text).unwrap(); ui.set_text_color(hint.unwrap(), appearance.placeholder).unwrap();
     ui.set_text(hint.unwrap(), placeholder).unwrap();
-    auto state = ui.attach_state(id, TextFieldState(rstd::move(model).unwrap(), appearance, label.unwrap(), hint.unwrap(),behavior));
+    auto state = ui.attach_state(id, TextFieldState(rstd::move(model).unwrap(), appearance, label.unwrap(), hint.unwrap(), behavior, placeholder));
     if (state.is_err()) return fail({.ui = Some(state.unwrap_err())});
     auto layout = ui.attach_layout<TextFieldState>(id);
     if (layout.is_err()) return fail({.ui = Some(layout.unwrap_err())});
