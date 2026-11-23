@@ -33,9 +33,17 @@ struct LazyScrollPosition {
 
 enum class LazyScrollStatus { Idle, Requested, Animating, Finished, Cancelled };
 
+class LazyItemPin;
 }
 
 namespace vui::compose {
+struct LazyPinLease {
+    bool active{true};
+    Box<rstd::dyn<rstd::FnMut<void()>>> wake;
+    explicit LazyPinLease(Box<rstd::dyn<rstd::FnMut<void()>>> callback) : wake(rstd::move(callback)) {}
+    ~LazyPinLease() { if (active) (*wake)(); }
+};
+
 struct LazyStateData {
     LazyLayoutInfo info;
     Option<Key> anchor_key;
@@ -46,6 +54,7 @@ struct LazyStateData {
     Serial request_revision{};
     LazyScrollStatus scroll_status{};
     Option<Box<rstd::dyn<rstd::FnMut<void()>>>> wake;
+    Option<Box<rstd::dyn<rstd::FnMut<Result<LazyItemPin, UiError>(Index)>>>> pin;
     auto request(Index index, Scalar offset, Serial duration) -> Result<empty, UiError>;
 };
 
@@ -53,6 +62,19 @@ struct LazyStateAccess;
 }
 
 export namespace vui::compose {
+class LazyItemPin {
+    friend struct LazyStateAccess;
+    rstd::rc::Rc<LazyPinLease> lease_;
+    explicit LazyItemPin(rstd::rc::Rc<LazyPinLease> lease) : lease_(rstd::move(lease)) {}
+  public:
+    LazyItemPin(const LazyItemPin &) = delete;
+    auto operator=(const LazyItemPin &) -> LazyItemPin & = delete;
+    LazyItemPin(LazyItemPin &&) = default;
+    auto operator=(LazyItemPin &&) -> LazyItemPin & = default;
+    auto active() const -> bool { return lease_ && lease_->active; }
+    void release() { lease_.reset(); }
+};
+
 class LazyState {
     friend struct LazyStateAccess;
     rstd::rc::Rc<LazyStateData> data_{rstd::rc::make_rc<LazyStateData>()};
@@ -63,6 +85,7 @@ class LazyState {
         return {data_->info.first_visible_index, data_->info.first_visible_offset};
     }
     auto scroll_status() const -> LazyScrollStatus { return data_->scroll_status; }
+    auto pin_item(Index index) -> Result<LazyItemPin, UiError>;
     static auto restore(LazyScrollPosition position) -> Result<LazyState, UiError>;
     auto request_scroll_to_item(Index index, Scalar offset = 0) -> Result<empty, UiError> {
         return data_.get()->request(index, offset, 0);
@@ -80,5 +103,6 @@ struct LazyStateAccess {
     static auto share(const LazyState &state) -> rstd::rc::Rc<LazyStateData> {
         return state.data_.clone();
     }
+    static auto pin(rstd::rc::Rc<LazyPinLease> lease) -> LazyItemPin { return LazyItemPin(rstd::move(lease)); }
 };
 }

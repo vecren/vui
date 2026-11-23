@@ -3,6 +3,11 @@ import :lazy_state;
 using namespace rstd::prelude;
 
 namespace vui::compose {
+auto LazyState::pin_item(Index index) -> Result<LazyItemPin, UiError> {
+    if (!data_->pin) return Err(UiError::InvalidId);
+    return (**data_.get()->pin)(index);
+}
+
 auto LazyStateData::request(Index index, Scalar offset, Serial duration) -> Result<empty, UiError> {
     if (!finite(offset)) return Err(UiError::InvalidValue);
     requested = Some(index);

@@ -790,6 +790,115 @@ auto EventRouter::focus_candidates() const -> Vec<UiId> {
     return candidates;
 }
 
+auto EventRouter::focus_neighbor(bool backwards, bool wrap) -> Option<UiId> {
+    if (!update_) return None();
+    auto candidates = focus_candidates();
+    Option<UiId> first, last;
+    bool found{};
+    for (const auto id : candidates) {
+        if (focus_ == Some(id)) {
+            found = true;
+            if (backwards && last) return last;
+            continue;
+        }
+        bool accepted = true;
+        for (auto &provider : focus_providers_.as_mut_slice().as_mut_ref()) {
+            if (!provider.guard.alive() || !input_descendant(*update_, provider.root, id)) continue;
+            if (!(*provider.accepts)(*update_, id)) { accepted = false; break; }
+        }
+        if (!accepted) continue;
+        if (found && !backwards) return Some(UiId(id));
+        if (!first) first = Some(UiId(id));
+        last = Some(UiId(id));
+    }
+    if (!found || wrap) {
+        auto target = backwards ? last : first;
+        return target ? target : focus_;
+    }
+    return None();
+}
+
+auto EventRouter::focus_provider(UiId root) -> FocusSearchProvider * {
+    for (auto &provider : focus_providers_.as_mut_slice().as_mut_ref())
+        if (provider.root == root && provider.guard.alive()) return &provider;
+    return nullptr;
+}
+
+auto EventRouter::enclosing_focus_provider(UiId origin, Option<UiId> neighbor, Option<UiId> after)
+    -> FocusSearchProvider * {
+    auto route = path(*update_, origin);
+    for (auto i = route.len(); i > usize();) {
+        const auto id = route[--i];
+        if (after) {
+            if (*after == id) after = None();
+            continue;
+        }
+        if (neighbor && id != *neighbor && input_descendant(*update_, id, *neighbor)) break;
+        if (auto provider = focus_provider(id)) return provider;
+    }
+    return nullptr;
+}
+
+auto EventRouter::release_focus_search() -> bool {
+    if (!focus_search_) return false;
+    const auto root = focus_search_->root;
+    focus_search_ = None();
+    auto provider = focus_provider(root);
+    return provider && (*provider->release)();
+}
+
+auto EventRouter::move_focus(bool backwards) -> Result<empty, InputError> {
+    if (!update_) return Err(InputError::Unavailable);
+    release_focus_search();
+    const auto neighbor = focus_neighbor(backwards, false);
+    if (focus_) {
+        if (auto provider = enclosing_focus_provider(*focus_, neighbor)) {
+            const auto *root = update_->get(provider->root);
+            focus_search_ = Some(FocusSearch{*focus_, provider->root, focus_revision_, root->mount_generation, backwards});
+            document_.bindings().wake();
+            return Ok(empty{});
+        }
+    }
+    const auto target = neighbor ? neighbor : focus_neighbor(backwards, true);
+    return target ? request_focus(target) : Result<empty, InputError>(Ok(empty{}));
+}
+
+auto EventRouter::continue_focus_search() -> Result<bool, InputError> {
+    if (!focus_search_pending()) return Ok(false);
+    auto search = *focus_search_;
+    auto provider = focus_provider(search.root);
+    const auto *root = update_->get(search.root);
+    if (!provider || !root || root->mount_generation != search.mount || focus_revision_ != search.revision ||
+        focus_ != Some(search.origin) || !eligible(*update_, search.origin, false) ||
+        !input_descendant(*update_, search.root, search.origin))
+        return Ok(release_focus_search());
+    const auto neighbor = focus_neighbor(search.backwards, false);
+    if (neighbor && *neighbor != search.root && input_descendant(*update_, search.root, *neighbor)) {
+        focus_search_->selected = true;
+        auto focused = request_focus(neighbor);
+        if (focused.is_err()) return Err(focused.unwrap_err());
+        return Ok(true);
+    }
+    if (search.probes < 12 && (*provider->extend)(search.backwards)) {
+        ++focus_search_->probes;
+        return Ok(true);
+    }
+    auto enclosing = enclosing_focus_provider(search.origin, neighbor, Some(search.root));
+    const auto released = release_focus_search();
+    if (enclosing && search.probes < 12) {
+        search.root = enclosing->root;
+        search.mount = update_->get(enclosing->root)->mount_generation;
+        ++search.probes;
+        focus_search_ = Some(search);
+        return Ok(true);
+    }
+    const auto fallback = focus_neighbor(search.backwards, true);
+    if (!fallback || focus_ == fallback) return Ok(released);
+    auto focused = request_focus(fallback);
+    if (focused.is_err()) return Err(focused.unwrap_err());
+    return Ok(true);
+}
+
 auto EventRouter::transfer_input(ParticipantId participant, slice<PointerKey> pointers)
     -> Result<empty, InputError> {
     if (closed_ || update_.is_none())
@@ -1317,6 +1426,9 @@ auto EventRouter::close() -> Result<empty, InputError> {
             return result;
     }
     closed_ = true;
+    release_focus_search();
+    for (auto &provider : focus_providers_) provider.guard.disconnect();
+    focus_providers_.clear();
     for (auto &observer:pointer_observers_) observer.guard.disconnect();
     pointer_observers_.clear();
     for (auto &observer:input_observers_) observer.guard.disconnect();

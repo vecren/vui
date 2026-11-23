@@ -178,6 +178,21 @@ class EventRouter {
     Option<InputError> failure_;
     InputWork work_;
     Option<Box<rstd::dyn<rstd::FnMut<void(EventRouter &, const InputEvent &)>>>> navigation_;
+    struct FocusSearchProvider {
+        UiId root;
+        BindingGuard guard;
+        Box<rstd::dyn<rstd::FnMut<bool(bool)>>> extend;
+        Box<rstd::dyn<rstd::FnMut<bool()>>> release;
+        Box<rstd::dyn<rstd::FnMut<bool(const InputSnapshot &, UiId)>>> accepts;
+    };
+    Vec<FocusSearchProvider> focus_providers_;
+    struct FocusSearch {
+        UiId origin, root;
+        Serial revision, mount;
+        bool backwards{}, selected{};
+        Index probes{};
+    };
+    Option<FocusSearch> focus_search_;
     Option<Box<rstd::dyn<rstd::FnMut<NativeCaptureResult(PointerKind, bool)>>>> native_capture_;
     Option<Box<rstd::dyn<rstd::FnMut<NativeTextInputResult(Option<TextInputRequest>)>>>> native_text_input_;
     Option<Box<rstd::dyn<rstd::FnMut<NativeTextInputResult(Option<TextInputState>)>>>> native_text_state_;
@@ -215,6 +230,12 @@ class EventRouter {
     auto route(const InputSnapshot &update, UiId target, InputEvent input, bool direct = false)
         -> bool;
     auto allows_semantics(const InputSnapshot &snapshot, UiId target) const -> bool;
+    auto focus_neighbor(bool backwards, bool wrap) -> Option<UiId>;
+    auto focus_provider(UiId root) -> FocusSearchProvider *;
+    auto enclosing_focus_provider(UiId origin, Option<UiId> neighbor, Option<UiId> after = {}) -> FocusSearchProvider *;
+    auto continue_focus_search() -> Result<bool, InputError>;
+    auto release_focus_search() -> bool;
+    auto focus_search_pending() const -> bool { return focus_search_ && !focus_search_->selected; }
     auto dispatch_semantics(UiId target, SemanticsAction action, Option<SemanticsPosition>) -> Result<bool, InputError>;
     static auto event(EventType type, const Pointer &pointer) -> InputEvent;
     void hover(Pointer &pointer, Option<UiId> target);
@@ -529,6 +550,24 @@ class EventRouter {
         return Ok(rstd::move(binding));
     }
     auto focus_candidates() const -> Vec<UiId>;
+    auto move_focus(bool backwards) -> Result<empty, InputError>;
+    template <class Extend, class Release, class Accepts>
+    auto on_focus_search(UiId root, Extend extend, Release release, Accepts accepts) -> Result<Binding, InputError> {
+        if (closed_) return Err(InputError::Unavailable);
+        if (busy_ || !document_.can_route()) return Err(InputError::Reentrant);
+        if (!document_.valid(root)) return Err(InputError::InvalidId);
+        focus_providers_.retain([](const auto &provider) { return provider.guard.alive(); });
+        if (focus_provider(root)) return Err(InputError::InvalidSequence);
+        if (focus_providers_.len() >= usize(4096)) return Err(InputError::Limit);
+        auto binding = document_.bindings().make();
+        focus_providers_.push({
+            root, binding.guard(),
+            Box<rstd::dyn<rstd::FnMut<bool(bool)>>>::make(rstd::move(extend)),
+            Box<rstd::dyn<rstd::FnMut<bool()>>>::make(rstd::move(release)),
+            Box<rstd::dyn<rstd::FnMut<bool(const InputSnapshot &, UiId)>>>::make(rstd::move(accepts))
+        });
+        return Ok(rstd::move(binding));
+    }
     auto transfer_input(ParticipantId participant, slice<PointerKey> pointers)
         -> Result<empty, InputError>;
     auto arena() -> InputArena & { return arena_; }

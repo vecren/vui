@@ -124,16 +124,23 @@ class UiSession {
     auto observe_content() -> bool;
 
     template <class Snapshot>
-    auto reveal_focus(const Snapshot &snapshot) -> Result<bool, SessionError> {
-        if (revealed_focus_ == input_.focus_revision())
-            return Ok(false);
-        if (auto target = input_.focused(); target.is_some()) {
-            auto revealed = document_.bring_into_view(snapshot, *target);
-            if (revealed.is_err())
-                return Err(SessionError{SessionStage::Update, Some(revealed.unwrap_err())});
+    auto settle_focus(const Snapshot &snapshot, unsigned iteration) -> Result<bool, SessionError> {
+        if (input_.focus_search_pending()) {
+            if (iteration >= 12) return Ok(false);
+            auto searched = input_.continue_focus_search();
+            if (searched.is_err()) return Err(SessionError{SessionStage::Input, {}, Some(searched.unwrap_err())});
+            if (searched.unwrap()) return Ok(true);
         }
-        revealed_focus_ = input_.focus_revision();
-        return Ok(document_.revision() != snapshot.revision());
+        if (revealed_focus_ != input_.focus_revision()) {
+            if (auto target = input_.focused(); target.is_some()) {
+                auto revealed = document_.bring_into_view(snapshot, *target);
+                if (revealed.is_err())
+                    return Err(SessionError{SessionStage::Update, Some(revealed.unwrap_err())});
+            }
+            revealed_focus_ = input_.focus_revision();
+            if (document_.revision() != snapshot.revision()) return Ok(true);
+        }
+        return Ok(input_.release_focus_search());
     }
     auto settle_input(Size size, const FrameTiming &timing, UpdateStats &stats)
         -> Result<empty, SessionError>;

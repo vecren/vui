@@ -146,12 +146,13 @@ struct LazyAnchor {
 };
 
 struct LazySlot {
-    enum class Kind { Active, Prefetched, Spare };
+    enum class Kind { Active, Probe, Pinned, Prefetched, Spare };
     Key key;
     Option<Key> content_type;
     Index index;
     Serial id{};
     Kind kind{Kind::Active};
+    auto placed() const -> bool { return kind == Kind::Active || kind == Kind::Probe || kind == Kind::Pinned; }
 };
 
 class LazyRuntime {
@@ -176,6 +177,16 @@ class LazyRuntime {
     Scalar extent_{}, arranged_extent_{};
     Vec<Index> requested_, rendered_;
     Vec<LazySlot> slots_in_use_;
+    struct Pin {
+        Index index;
+        Option<Key> key;
+        rstd::rc::Weak<LazyPinLease> lease;
+    };
+    Vec<Pin> pins_;
+    Vec<Index> focus_items_;
+    Option<Index> focus_line_;
+    bool focus_invalidated_{};
+    Option<Binding> focus_search_;
     Serial next_slot_{1};
     Vec<Index> prefetched_;
     Option<Index> prefetch_line_;
@@ -258,17 +269,90 @@ class LazyRuntime {
         const auto item = usize(index - cursor.row.first);
         return Ok(Cell{cursor.line, cursor.lanes[item], cursor.row.spans[item]});
     }
-    auto anchor_index(const LazyContent &content) const -> Index {
-        if (!anchor_ || !content.count()) return 0;
-        const auto index = anchor_->index < content.count() ? anchor_->index : content.count() - 1;
-        if (!anchor_->key || content.describe(index).key == anchor_->key) return index;
+    auto nearby_index(const LazyContent &content, Index index, const Option<Key> &key) const -> Option<Index> {
+        if (!key) return index < content.count() ? Some(Index(index)) : None<Index>();
+        if (!content.count()) return None();
+        if (index >= content.count()) index = content.count() - 1;
+        if (content.describe(index).key == key) return Some(Index(index));
         constexpr Index neighborhood = 128;
         for (Index distance = 1; distance <= neighborhood; ++distance) {
-            if (index >= distance && content.describe(index - distance).key == anchor_->key) return index - distance;
-            if (distance < content.count() - index &&
-                content.describe(index + distance).key == anchor_->key) return index + distance;
+            if (distance <= index && content.describe(index - distance).key == key) return Some(index - distance);
+            if (distance < content.count() - index && content.describe(index + distance).key == key)
+                return Some(index + distance);
         }
-        return index;
+        return None();
+    }
+
+    auto anchor_index(const LazyContent &content) const -> Index {
+        if (!anchor_ || !content.count()) return 0;
+        auto located = nearby_index(content, anchor_->index, anchor_->key);
+        return located ? *located : rstd::cmp::min(anchor_->index, content.count() - 1);
+    }
+
+    void clear_pins() {
+        for (const auto &pin : pins_)
+            if (auto lease = pin.lease.upgrade(); lease) lease->get()->active = false;
+        pins_.clear();
+    }
+
+    auto refresh_slots() -> bool { return signal_ && signal_->set(++revision_).is_ok(); }
+
+    static auto pin_limit(const LazyOptions &options) -> usize {
+        return usize(rstd::cmp::min(Index(64), options.max_materialized / 2));
+    }
+
+    auto make_pin(const Rc<LazyRuntime> &owner, Index index) -> Result<LazyItemPin, UiError> {
+        if (!document_ || !state_) return Err(UiError::InvalidId);
+        if (index >= content_.count()) return Err(UiError::InvalidValue);
+        pins_.retain([](const Pin &pin) { return !pin.lease.expired(); });
+        if (pins_.len() >= pin_limit(options_)) return Err(UiError::Limit);
+        auto wake = Box<rstd::dyn<rstd::FnMut<void()>>>::make([weak = owner.downgrade()] {
+            if (auto live = weak.upgrade(); live) (void)live->get()->refresh_slots();
+        });
+        auto lease = rstd::rc::make_rc<LazyPinLease>(rstd::move(wake));
+        pins_.push({index, content_.describe(index).key, lease.downgrade()});
+        if (!refresh_slots()) return Err(UiError::Cancelled);
+        return Ok(LazyStateAccess::pin(rstd::move(lease)));
+    }
+
+    auto extend_focus(bool backwards) -> bool {
+        if (focus_invalidated_ || !geometry_ready_ || requested_.is_empty()) return false;
+        const auto line = focus_line_ ? *focus_line_ : backwards ? demand_begin_ : demand_end_;
+        if (backwards ? line == 0 : line + 1 >= line_count()) return false;
+        const auto next = backwards ? line - 1 : line + 1;
+        auto first = next;
+        Index count = 1;
+        if (grid_) {
+            auto row = lines_.line_at(next, span());
+            if (row.is_err() || row->spans.is_empty()) return false;
+            first = row->first;
+            count = Index(row->spans.len().to_primitive());
+        }
+        if (requested_.len() + focus_items_.len() + usize(count) >= usize(options_.max_materialized)) return false;
+        focus_line_ = Some(Index(next));
+        for (Index i{}; i < count; ++i) focus_items_.push(first + i);
+        return refresh_slots();
+    }
+
+    auto release_focus() -> bool {
+        focus_line_ = None();
+        focus_invalidated_ = false;
+        if (focus_items_.is_empty()) return false;
+        focus_items_.clear();
+        return refresh_slots();
+    }
+
+    auto focus_candidate(const InputSnapshot &snapshot, UiId target) const -> bool {
+        for (usize i{}; i < placements_.len() && i < slots_in_use_.len(); ++i) {
+            const auto &slot = slots_in_use_[i];
+            if (slot.kind == LazySlot::Kind::Active || !input_descendant(snapshot, placements_[i].node, target))
+                continue;
+            if (slot.kind == LazySlot::Kind::Pinned) return false;
+            for (const auto index : focus_items_)
+                if (index == slot.index) return true;
+            return false;
+        }
+        return true;
     }
 
     auto request_window(Index first, Scalar logical, Scalar viewport) -> Result<empty, UiError> {
@@ -605,8 +689,11 @@ class LazyRuntime {
             claimed.push(false);
         }
         const auto add = [&](Index index, LazySlot::Kind kind) -> ComposeResult<empty> {
-            for (const auto &slot : slots)
-                if (kind == LazySlot::Kind::Prefetched && slot.index == index) return Ok(empty{});
+            for (auto &slot : slots.as_mut_slice().as_mut_ref()) {
+                if (slot.index != index) continue;
+                if (kind < slot.kind) slot.kind = kind;
+                return Ok(empty{});
+            }
             auto metadata = content.describe(index);
             auto encoded = metadata.key ? rstd::format("k{}", metadata.key->encoded().as_str()) : rstd::format("p{}", index);
             Key key(encoded.as_str());
@@ -624,6 +711,17 @@ class LazyRuntime {
             slots.push({rstd::move(key), rstd::move(metadata.content_type), index, id, kind});
             return Ok(empty{});
         };
+        auto kept_pins = usize();
+        for (const auto &pin : pins_) {
+            if (kept_pins >= pin_limit(options)) break;
+            const auto lease = pin.lease.upgrade();
+            if (!lease || !(*lease)->active) continue;
+            auto index = nearby_index(content, pin.index, pin.key);
+            if (!index) continue;
+            auto added = add(*index, LazySlot::Kind::Pinned);
+            if (added.is_err()) return Err(added.unwrap_err());
+            ++kept_pins;
+        }
         for (const auto requested : requested_) {
             if (slots.len() >= usize(options.max_materialized)) break;
             const auto shifted = rstd::int64_t(requested) + shift;
@@ -631,6 +729,19 @@ class LazyRuntime {
             auto added = add(Index(shifted), LazySlot::Kind::Active);
             if (added.is_err()) return Err(added.unwrap_err());
         }
+        if (content.identity() == content_.identity()) {
+            for (const auto index : focus_items_) {
+                if (slots.len() >= usize(options.max_materialized)) break;
+                auto added = add(index, LazySlot::Kind::Probe);
+                if (added.is_err()) return Err(added.unwrap_err());
+            }
+        }
+        const auto sticky = sticky_ ? rstd::int64_t(*sticky_) + shift : -1;
+        rstd::slice_::sort_unstable_by(slots.as_mut_slice().as_mut_ref(), [sticky](const LazySlot &a, const LazySlot &b) {
+            if (a.index == sticky) return false;
+            if (b.index == sticky) return true;
+            return a.index < b.index;
+        });
         if (options.prefetch && content.identity() == content_.identity()) {
             for (const auto index : prefetched_) {
                 if (slots.len() >= usize(options.max_materialized)) break;
@@ -675,7 +786,29 @@ class LazyRuntime {
         const bool changed = content_.identity() != content.identity() || options_ != options ||
                              horizontal_ != horizontal || grid_ != grid;
         auto previous_rendered = rstd::move(rendered_);
-        if (changed) clear_prefetch();
+        if (changed) {
+            clear_prefetch();
+            if (focus_line_) {
+                focus_invalidated_ = true;
+                focus_items_.clear();
+            }
+            auto kept_pins = usize();
+            for (auto &pin : pins_.as_mut_slice().as_mut_ref()) {
+                auto lease = pin.lease.upgrade();
+                if (!lease || !(*lease)->active) continue;
+                auto located = nearby_index(content, pin.index, pin.key);
+                if (located && kept_pins < pin_limit(options)) {
+                    pin.index = *located;
+                    ++kept_pins;
+                } else {
+                    lease->get()->active = false;
+                }
+            }
+            pins_.retain([](const Pin &pin) {
+                auto lease = pin.lease.upgrade();
+                return lease && (*lease)->active;
+            });
+        }
         content_ = rstd::move(content);
         options_ = options;
         horizontal_ = horizontal;
@@ -685,7 +818,9 @@ class LazyRuntime {
         Index spares{}, prefetched{};
         for (const auto &slot : slots_in_use_) {
             switch (slot.kind) {
-            case LazySlot::Kind::Active: rendered_.push(Index(slot.index)); break;
+            case LazySlot::Kind::Active:
+            case LazySlot::Kind::Probe:
+            case LazySlot::Kind::Pinned: rendered_.push(Index(slot.index)); break;
             case LazySlot::Kind::Spare: ++spares; break;
             case LazySlot::Kind::Prefetched: ++prefetched; break;
             }
@@ -706,6 +841,12 @@ class LazyRuntime {
             state_.get()->wake = Some(Box<rstd::dyn<rstd::FnMut<void()>>>::make([weak = owner.downgrade()] {
                 if (auto live = weak.upgrade(); live) live->get()->schedule(*live);
             }));
+            state_.get()->pin = Some(Box<rstd::dyn<rstd::FnMut<Result<LazyItemPin, UiError>(Index)>>>::make(
+                [weak = owner.downgrade()](Index index) -> Result<LazyItemPin, UiError> {
+                    auto live = weak.upgrade();
+                    if (!live) return Err(UiError::Cancelled);
+                    return live->get()->make_pin(*live, index);
+                }));
         }
         state_.get()->info.item_count = content_.count();
         state_.get()->info.materialized_count = Index(rendered_.len().to_primitive());
@@ -741,6 +882,21 @@ class LazyRuntime {
             if (auto live = weak.upgrade(); live) live->get()->schedule(*live);
         });
         if (observed.is_err()) return Err(observed.unwrap_err());
+        const auto weak = owner.downgrade();
+        auto focus = session.input().on_focus_search(scroll,
+            [weak](bool backwards) {
+                auto live = weak.upgrade();
+                return live && live->get()->extend_focus(backwards);
+            },
+            [weak]() {
+                auto live = weak.upgrade();
+                return live && live->get()->release_focus();
+            },
+            [weak](const InputSnapshot &snapshot, UiId target) {
+                auto live = weak.upgrade();
+                return live && (*live)->focus_candidate(snapshot, target);
+            });
+        if (focus.is_err()) return Err(UiError::Routing);
         document_ = &document;
         session_ = &session;
         prefetch_owner_ = owner.downgrade();
@@ -748,12 +904,17 @@ class LazyRuntime {
         viewport_ = viewport;
         scroll_ = scroll;
         metrics_ = Some(observed.unwrap());
+        focus_search_ = Some(focus.unwrap());
         return Ok(empty{});
     }
     void detach() {
         ++prefetch_generation_;
         prefetch_queued_ = false;
         clear_prefetch();
+        focus_search_ = None();
+        focus_items_.clear();
+        focus_line_ = None();
+        focus_invalidated_ = false;
         session_ = nullptr;
         metrics_ = None();
         unbind_state();
@@ -771,6 +932,11 @@ class LazyRuntime {
             }
             state_.get()->owner = nullptr;
             state_.get()->wake = None();
+            state_.get()->pin = None();
+            if (!pins_.is_empty()) {
+                clear_pins();
+                if (document_ && session_) (void)refresh_slots();
+            }
         }
     }
 
@@ -964,7 +1130,7 @@ auto make_lazy_layout(LazyContent content, LazyOptions options, bool horizontal,
                     slot.kind == LazySlot::Kind::Prefetched));
                 }
                 auto wrapper = stack(rstd::move(contents), source).key(Key(slot.id));
-                if (slot.kind != LazySlot::Kind::Active)
+                if (!slot.placed())
                     wrapper = rstd::move(wrapper).style(NodeStyleBuilder{}.visible(false).hit_test_visible(false).build());
                 children.push(rstd::move(wrapper));
             }

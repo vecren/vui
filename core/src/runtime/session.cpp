@@ -187,7 +187,7 @@ auto UiSession::settle_input(Size size, const FrameTiming &timing, UpdateStats &
         if (revision == document_.revision() && document_.pending_mutations() == usize() &&
             !document_.pending_animation_callbacks() && !document_.pending_viewport_callbacks() && !document_.pending_geometry_callbacks() && !input_.pending_sync() &&
             !state_bindings_.pending() && !motion_.pending(sample_time) && !updates_.pending()) {
-            auto revealed = reveal_focus(input_.snapshot().unwrap());
+            auto revealed = settle_focus(input_.snapshot().unwrap(), iteration);
             if (revealed.is_err())
                 return Err(revealed.unwrap_err());
             if (revealed.unwrap())
@@ -270,7 +270,7 @@ auto UiSession::settle(Size size, const FrameTiming &timing, UpdateStats &stats)
             !document_.pending_animation_callbacks() && !document_.pending_viewport_callbacks() && !document_.pending_geometry_callbacks() && !input_.pending_sync() &&
             (!state_result.pending || state_result.groups >= usize(16)) &&
             !motion_.pending(sample_time) && !updates_.pending()) {
-            auto revealed = reveal_focus(*update_);
+            auto revealed = settle_focus(*update_, iteration);
             if (revealed.is_err())
                 return Err(revealed.unwrap_err());
             if (revealed.unwrap())
@@ -468,11 +468,12 @@ auto UiSession::advance_impl(slice<InputEvent> events, FrameTiming timing, Surfa
     if (published.is_err()) return failure(published.unwrap_err());
     surface_ = Some(surface);
     bool content_changed = observe_content();
-    if (!idle_work_.is_empty()) document_.bindings().wake();
+    if (!idle_work_.is_empty() || input_.focus_search_pending()) document_.bindings().wake();
     return Ok(AdvanceResult{update_->revision(), visual_.applied_revision(), stats,
                             changed || surface_changed || content_changed || frame_content_.active(), processed,
                             document_.animations_active() || motion_.active() || frame_content_.active(),
-                            state_bindings_.pending() || updates_.pending() || !idle_work_.is_empty()});
+                            state_bindings_.pending() || updates_.pending() || !idle_work_.is_empty() ||
+                            input_.focus_search_pending()});
 }
 
 auto UiSession::publish_update() -> Result<empty, SessionError> {
