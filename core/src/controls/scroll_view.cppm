@@ -18,10 +18,38 @@ class ScrollAnimation {
   public:
     auto status() const -> ScrollAnimationStatus { return status_ ? *status_ : ScrollAnimationStatus::Cancelled; }
 };
+
+class ScrollDeltaLease {
+    friend class ScrollInteraction;
+    rstd::rc::Weak<ScrollInteraction> owner_;
+    Serial gesture_{};
+    ScrollDeltaLease(rstd::rc::Weak<ScrollInteraction> owner, Serial gesture)
+        : owner_(rstd::move(owner)), gesture_(gesture) {}
+
+  public:
+    auto write(Point offset, const ViewportMetrics &metrics) const -> Result<empty, UiError>;
+};
+
+struct ScrollDeltaProgress {
+    Point consumed;
+    bool settled{}, reached_boundary{};
+};
+
+using ScrollDeltaCompletion = rstd::dyn<rstd::FnMut<ScrollDeltaProgress()>>;
+
+struct ScrollDeltaResolution {
+    Point consumed;
+    Option<Box<ScrollDeltaCompletion>> after_layout;
+};
+
+// Deltas use viewport pixels. Deferred writers keep the initiating gesture's presentation lease.
+using ScrollDeltaResolver = rstd::dyn<rstd::FnMut<Result<Option<ScrollDeltaResolution>, UiError>(
+    Point, ViewportMetrics, bool, Option<ScrollDeltaLease>)>>;
 }
 
 namespace vui {
 class ScrollInteraction {
+    friend class ScrollDeltaLease;
     enum class Mode { Idle, Pending, Drag, Animate, Programmatic } mode_{Mode::Idle};
     enum class Phase { Rest, Decay, Spring };
     struct Axis { Phase phase{Phase::Rest};ScalarMotion initial;Scalar target{};Serial started{}; } x_,y_;
@@ -34,6 +62,9 @@ class ScrollInteraction {
     UiId root_,viewport_;
     ScrollStyle &style_;
     Signal<void(UserScroll)> &changed_;
+    Option<Box<ScrollDeltaResolver>> &resolve_delta_;
+    rstd::rc::Weak<ScrollInteraction> owner_;
+    Serial gesture_{};
     ParticipantRegistration participant_;
     MotionRegistration motion_;
     Binding press_,up_,metrics_,availability_;
@@ -42,12 +73,15 @@ class ScrollInteraction {
     PresentationLease lease_;
     Option<PointerKey> pointer_;
     Option<Transform> inverse_;
-    Point anchor_,origin_,last_local_,velocity_,written_;
+    Point anchor_,origin_,last_local_,velocity_,written_,tracked_offset_;
     Size viewport_size_;
     Point maximum_;
     bool geometry_known_{},rebase_{},boundary_owned_{};
     Option<UiError> error_;
     Option<OffsetAnimation> animation_;
+    Option<Box<ScrollDeltaCompletion>> pending_delta_;
+    Point decay_position_;
+    Point pending_decay_delta_;
     auto ui() -> UiDocument & {return session_.document();}
     static auto bounded(Scalar value,Scalar maximum) -> Scalar {return value<0 ? 0 : value>maximum ? maximum : value;}
     static auto bounded(Point value,Point maximum) -> Point {return {bounded(value.x,maximum.x),bounded(value.y,maximum.y)};}
@@ -57,27 +91,38 @@ class ScrollInteraction {
     auto acquire() -> bool;
     auto local_event(const InputSnapshot &snapshot,const InputEvent &input) -> Option<InputEvent>;
     auto drag_value(Point position,const ViewportMetrics &metrics) const -> Point;
-    void track(InputEvent event,const ViewportMetrics &metrics,Point actual);
+    void track(InputEvent event,const ViewportMetrics &metrics,Point actual,bool measured);
     auto write(Point value,const ViewportMetrics &metrics) -> bool;
+    auto measured_scroll() const -> bool {
+        return resolve_delta_ && style_.motion.movement == ScrollMovement::Clamped;
+    }
+    auto resolve_delta(Point delta, const ViewportMetrics &metrics) -> Result<Option<ScrollDeltaResolution>, UiError>;
     void spring(Axis &axis,Scalar value,Scalar velocity,Scalar target,Serial started) {
         axis={Phase::Spring,{value,velocity},target,started};
     }
     void begin_axis(Axis &axis,Scalar value,Scalar velocity,Scalar maximum,bool enabled,Serial started);
     void begin_motion(const ViewportMetrics &metrics,Point velocity,Serial started);
     auto sample_axis(Axis &axis,Scalar maximum,Serial time) -> ScalarMotion;
+    auto decay_sample(const Axis &axis, Serial elapsed) const -> ScalarMotion;
+    auto sample_measured_decay(MotionContext &context, const ViewportMetrics &metrics)
+        -> Result<MotionStatus, MotionError>;
     void restart_animation(Point from, Serial time);
     auto sample_animation(MotionContext &context, const ViewportMetrics &metrics) -> Result<MotionStatus, MotionError>;
     void press(EventContext &,const RoutedEvent &event);
     void pending_up(EventContext &,const RoutedEvent &event);
   public:
-    ScrollInteraction(UiSession &session,UiId root,UiId viewport,ScrollStyle &style,Signal<void(UserScroll)> &changed)
-        :session_(session),root_(root),viewport_(viewport),style_(style),changed_(changed) {configure();}
+    ScrollInteraction(UiSession &session, UiId root, UiId viewport, ScrollStyle &style,
+                      Signal<void(UserScroll)> &changed, Option<Box<ScrollDeltaResolver>> &resolve_delta)
+        : session_(session), root_(root), viewport_(viewport), style_(style), changed_(changed),
+          resolve_delta_(resolve_delta) { configure(); }
     ~ScrollInteraction();
     void configure() {
         pan_=PanRecognizer({style_.motion.threshold,style_.axes.horizontal && style_.axes.vertical ? PanAxis::Free : style_.axes.horizontal ? PanAxis::Horizontal : PanAxis::Vertical});
         inverse_=None();
     }
-    static auto make(UiSession &session,UiId root,UiId viewport,ScrollStyle &style,Signal<void(UserScroll)> &changed) -> Result<rstd::rc::Rc<ScrollInteraction>,ControlError>;
+    static auto make(UiSession &session, UiId root, UiId viewport, ScrollStyle &style,
+                     Signal<void(UserScroll)> &changed, Option<Box<ScrollDeltaResolver>> &resolve_delta)
+        -> Result<rstd::rc::Rc<ScrollInteraction>, ControlError>;
     void stop(bool clamp=true,bool release=true,bool request=true);
     auto rebase_offset(Point value) -> Result<empty, UiError>;
     auto animate_offset(Point value, Serial duration_ns) -> Result<ScrollAnimation, UiError>;
@@ -100,6 +145,7 @@ class ScrollState {
     UiId viewport_;
     ScrollStyle style_;
     Signal<void(UserScroll)> user_scrolled_;
+    Option<Box<ScrollDeltaResolver>> resolve_delta_;
     Option<rstd::rc::Rc<ScrollInteraction>> interaction_;
     static auto shift(Scalar value, Scalar amount, Scalar step, Scalar maximum) -> Scalar;
     static auto consumed(Scalar change, Scalar step, Scalar amount) -> Scalar;
@@ -134,6 +180,8 @@ class ScrollView {
         auto state = session.document().state<ScrollState>(id);
         return state ? state->connect(session, id) : Result<empty, ControlError>(Err(ControlError{Some(UiError::InvalidId), {}}));
     }
+    static auto set_delta_resolver(UiDocument &ui, UiId id, Option<Box<ScrollDeltaResolver>> resolver)
+        -> Result<empty, UiError>;
     static auto finish_configuration(UiDocument &ui, UiId id) -> Result<empty, UiError> {
         auto state = ui.state<ScrollState>(id);
         return state ? state->finish_configuration() : Result<empty, UiError>(Err(UiError::InvalidId));

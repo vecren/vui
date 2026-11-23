@@ -3,16 +3,31 @@ import :input.router;
 using namespace rstd::prelude;
 
 namespace vui {
-auto EventContext::consume_scroll(Point amount) -> Result<empty, InputError> {
-    auto valid = [](Scalar value, Scalar remaining) {
-        return finite(value) && (remaining >= 0 ? value >= 0 && value <= remaining
-                                                : value <= 0 && value >= remaining);
+namespace {
+auto valid_scroll_amount(Point amount, Point remaining) -> bool {
+    auto valid = [](Scalar value, Scalar available) {
+        return finite(value) && (available >= 0 ? value >= 0 && value <= available
+                                                : value <= 0 && value >= available);
     };
-    if (event_.input.type != EventType::Wheel || !valid(amount.x, remaining_scroll_.x) ||
-        !valid(amount.y, remaining_scroll_.y))
+    return valid(amount.x, remaining.x) && valid(amount.y, remaining.y);
+}
+}
+
+auto EventContext::consume_scroll(Point amount) -> Result<empty, InputError> {
+    if (event_.input.type != EventType::Wheel || !valid_scroll_amount(amount, remaining_scroll_))
         return Err(InputError::InvalidEvent);
     remaining_scroll_.x -= amount.x;
     remaining_scroll_.y -= amount.y;
+    return Ok(empty{});
+}
+
+auto EventContext::can_defer_scroll() const -> bool {
+    return scroll_behavior_ && !router_.wheel_completion_ && !default_prevented() && remaining_scroll_ != Point{};
+}
+
+auto EventContext::defer_scroll_completion(Box<ScrollCompletion> completion) -> Result<empty, InputError> {
+    auto guard = *scroll_behavior_ ? Some(BindingGuard(**scroll_behavior_)) : None<BindingGuard>();
+    router_.wheel_completion_ = Some(EventRouter::WheelCompletion{rstd::move(completion), rstd::move(guard)});
     return Ok(empty{});
 }
 
@@ -119,30 +134,40 @@ void EventRouter::behavior(EventContext &context, const RoutedEvent &event, bool
                    type == EventType::PointerEnter || type == EventType::PointerLeave;
     if (event.phase != RoutePhase::Capture && (!prevented || cleanup)) {
         auto row = node_routes(event.current);
-        if (row)
+        if (row) {
+            const BehaviorEntry *last = nullptr;
+            if (type == EventType::Wheel && wheel_deferral_)
+                for (auto index : row->behaviors) {
+                    auto &item = behaviors_[index];
+                    if (item->target == event.current && (item->binding.is_none() || item->binding->alive()))
+                        last = item.get();
+                }
             for (auto index : row->behaviors) {
                 auto &item = behaviors_[index];
                 ++work_.behaviors_examined;
                 if (item->target == event.current &&
                     (item->binding.is_none() || item->binding->alive())) {
                     if (context.default_prevented() && !cleanup) break;
+                    if (item.get() == last) context.scroll_behavior_ = &item->binding;
                     item->invoke(context, event);
+                    context.scroll_behavior_ = nullptr;
                 }
             }
+        }
     }
 }
 
-void EventRouter::invoke(const InputSnapshot &update, slice<UiId> route, usize index, UiId target,
-            const InputEvent &input, RoutePhase phase, Serial cutoff, bool &stopped,
-            bool &prevented, Point &remaining) {
+void EventRouter::invoke(const InputSnapshot &update, slice<UiId> nodes, usize index,
+                         RoutePhase phase, RouteState &route) {
     ++work_.routes;
+    const auto &input = route.input;
     RoutedEvent event{input,
-                      target,
-                      route[index],
+                      route.target,
+                      nodes[index],
                       phase,
-                      local(update, route, index, input.position),
+                      local(update, nodes, index, input.position),
                       update.revision()};
-    EventContext context(*this, event, stopped, prevented, remaining);
+    EventContext context(*this, event, route.stopped, route.prevented, route.remaining);
     bool cleanup = input.type == EventType::PointerCancel ||
                    input.type == EventType::CaptureLost || input.type == EventType::FocusLost ||
                    input.type == EventType::PointerLeave || input.type == EventType::TextInputCancelled;
@@ -161,13 +186,24 @@ void EventRouter::invoke(const InputSnapshot &update, slice<UiId> route, usize i
             auto *handler = &*handlers_[index];
             ++work_.handlers_examined;
             if (handler->active && (handler->binding.is_none() || handler->binding->alive()) &&
-                handler->id.value < cutoff && handler->target == event.current &&
+                handler->id.value < route.cutoff && handler->target == event.current &&
                 handler->type == input.type && handler->phase == phase &&
                 (allowed || handler->access == ScopeAccess::Global))
                 handler->invoke(context, event);
         }
     if (allowed)
-        behavior(context, event, prevented);
+        behavior(context, event, route.prevented);
+}
+
+void EventRouter::bubble(const InputSnapshot &update, Vec<UiId> &nodes, usize cursor, RouteState &route) {
+    while (cursor > usize() && !route.stopped && !wheel_completion_)
+        invoke(update, nodes.as_slice(), --cursor, RoutePhase::Bubble, route);
+    if (wheel_completion_) {
+        auto completion = wheel_completion_.unwrap();
+        wheel_completion_ = None();
+        deferred_wheel_ = Some(DeferredWheel{InputSnapshot(update), rstd::move(nodes), cursor,
+                                             rstd::move(route), rstd::move(completion)});
+    }
 }
 
 auto EventRouter::route(const InputSnapshot &update, UiId target, InputEvent input, bool direct)
@@ -176,17 +212,13 @@ auto EventRouter::route(const InputSnapshot &update, UiId target, InputEvent inp
     auto &nodes = route_nodes_;
     if (nodes.is_empty())
         return false;
-    auto cutoff = next_handler_;
-    bool stopped{}, prevented{};
-    auto remaining = input.scroll_delta;
+    RouteState route{input, target, next_handler_, input.scroll_delta};
     auto last = nodes.len() - usize(1);
     if (!direct)
-        for (usize i{}; i < last && !stopped; ++i)
-            invoke(update, nodes.as_slice(), i, target, input, RoutePhase::Capture, cutoff,
-                   stopped, prevented, remaining);
-    if (!stopped)
-        invoke(update, nodes.as_slice(), last, target, input, RoutePhase::Target, cutoff,
-               stopped, prevented, remaining);
+        for (usize i{}; i < last && !route.stopped; ++i)
+            invoke(update, nodes.as_slice(), i, RoutePhase::Capture, route);
+    if (!route.stopped)
+        invoke(update, nodes.as_slice(), last, RoutePhase::Target, route);
     else if (input.type == EventType::KeyUp || input.type == EventType::PointerUp ||
              input.type == EventType::PointerCancel) {
         bool suppressed = true;
@@ -196,14 +228,49 @@ auto EventRouter::route(const InputSnapshot &update, UiId target, InputEvent inp
                           RoutePhase::Target,
                           local(update, nodes.as_slice(), last, input.position),
                           update.revision()};
-        EventContext context(*this, event, stopped, suppressed, remaining);
+        EventContext context(*this, event, route.stopped, suppressed, route.remaining);
         behavior(context, event, true);
     }
     if (!direct)
-        for (auto i = last; i > usize() && !stopped; --i)
-            invoke(update, nodes.as_slice(), i - usize(1), target, input, RoutePhase::Bubble,
-                   cutoff, stopped, prevented, remaining);
-    return prevented;
+        bubble(update, nodes, last, route);
+    return route.prevented;
+}
+
+auto EventRouter::dispatch_for_session(InputEvent input) -> Result<empty, InputError> {
+    wheel_deferral_ = input.type == EventType::Wheel;
+    auto result = dispatch(rstd::move(input));
+    wheel_deferral_ = false;
+    return result;
+}
+
+auto EventRouter::resume_wheel() -> Result<empty, InputError> {
+    auto deferred = deferred_wheel_.unwrap();
+    deferred_wheel_ = None();
+    const auto &owner = deferred.nodes[deferred.cursor];
+    if (!update_ || !window_focused_ || !eligible(*update_, owner, true) ||
+        (deferred.completion.guard && !deferred.completion.guard->alive()))
+        return Ok(empty{});
+    for (usize i{}; i <= deferred.cursor; ++i) {
+        const auto id = deferred.nodes[i];
+        const auto *before = deferred.snapshot.get(id);
+        const auto *current = update_->get(id);
+        if (!current || current->mount_generation != before->mount_generation || current->parent != before->parent)
+            return Ok(empty{});
+    }
+    begin();
+    auto &route = deferred.route;
+    const auto consumed = deferred.completion.complete->operator()();
+    if (valid_scroll_amount(consumed, route.remaining)) {
+        route.remaining.x -= consumed.x;
+        route.remaining.y -= consumed.y;
+        route.prevented |= route.remaining == Point{};
+        wheel_deferral_ = true;
+        bubble(deferred.snapshot, deferred.nodes, deferred.cursor, route);
+        wheel_deferral_ = false;
+    } else {
+        failure_ = Some(InputError::InvalidEvent);
+    }
+    return end();
 }
 
 auto EventRouter::event(EventType type, const Pointer &pointer) -> InputEvent {

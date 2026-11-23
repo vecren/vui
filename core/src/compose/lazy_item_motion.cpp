@@ -184,6 +184,11 @@ auto LazyItemAnimator::update(UiDocument &doc, const LazyContent &content, Vec<L
     auto same = [](const LazyAnimatedItem &a, const LazyAnimatedItem &b) {
         return a.node == b.node && same_item(a.index, a.key, b.index, b.key);
     };
+    auto is_visible = [&](Index index, const Option<Key> &key) {
+        for (const auto &item : visible)
+            if (same_item(index, key, item.index, item.key)) return true;
+        return false;
+    };
     const bool changed = content_ && content_->identity() != content.identity();
     const bool same_direction = viewport.horizontal == viewport_.horizontal && viewport.reverse == viewport_.reverse;
     for (const auto &old : items_) {
@@ -275,13 +280,9 @@ auto LazyItemAnimator::update(UiDocument &doc, const LazyContent &content, Vec<L
         item.move = Some(animated.unwrap());
     }
     for (const auto &entry : exiting_) {
-        if (!doc.valid(entry.node)) continue;
-        for (const auto &item : visible) {
-            if (!same_item(entry.index, entry.key, item.index, item.key)) continue;
-            auto destroyed = doc.destroy(entry.node);
-            if (destroyed.is_err()) return destroyed;
-            break;
-        }
+        if (!doc.valid(entry.node) || !is_visible(entry.index, entry.key)) continue;
+        auto destroyed = doc.destroy(entry.node);
+        if (destroyed.is_err()) return destroyed;
     }
     exiting_.retain([&](const Exiting &entry) { return doc.valid(entry.node); });
     if (layer_->id && (!pending_.is_empty() || !exiting_.is_empty())) {
@@ -291,13 +292,11 @@ auto LazyItemAnimator::update(UiDocument &doc, const LazyContent &content, Vec<L
         Vec<BoundaryItem> leaving;
         for (usize i{}; i < pending_.len(); ++i) {
             auto &ghost = pending_[i];
+            if (is_visible(ghost.index, ghost.key)) continue;
             if (!ghost.destination) {
                 auto result = start_exiting(doc, rstd::move(ghost), offset, {}, viewport.horizontal);
                 if (result.is_err()) return result;
             } else if (same_direction) {
-                bool still_visible{};
-                for (const auto &item : visible) still_visible |= item.index == *ghost.destination;
-                if (still_visible) continue;
                 const auto edge = outside(viewport, *ghost.destination);
                 if (edge) leaving.push({i, *ghost.destination, ghost.bounds, *edge});
             }

@@ -101,6 +101,13 @@ class VelocityTracker {
         return None();
     }
     auto rejected_samples() const -> Serial { return rejected_; }
+    void translate(PointerKey key, Point delta) {
+        if (auto value = track(key))
+            for (auto &sample : value->samples) {
+                sample.position.x += delta.x;
+                sample.position.y += delta.y;
+            }
+    }
     void remove(PointerKey key) {
         tracks_.retain([&](const Track &value) { return value.key != key; });
     }

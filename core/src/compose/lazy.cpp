@@ -33,7 +33,16 @@ struct LazyItemParameters final : ComponentParameters {
 struct MeasuredLine {
     Index index;
     Scalar extent;
+    Index measured_items, item_count;
+    auto complete() const -> bool { return measured_items == item_count; }
 };
+
+struct LazyScrollStep {
+    Scalar consumed{};
+    Option<Index> measure;
+};
+
+constexpr unsigned max_scroll_probes = 8;
 
 class LazyGeometry {
     struct Node {
@@ -211,6 +220,16 @@ class LazyRuntime {
         UiId node;
     };
     Vec<Placement> placements_;
+    Vec<MeasuredLine> measured_lines_;
+    Index retained_count_{}, prefetched_count_{};
+    struct ScrollRequest {
+        Scalar remaining;
+        rstd::rc::Weak<ScrollDeltaProgress> progress;
+        Option<ScrollDeltaLease> lease;
+        Option<Index> measure;
+        unsigned probes{};
+    };
+    Option<ScrollRequest> scroll_delta_;
     Option<Index> sticky_, next_sticky_line_;
     Scalar sticky_offset_{};
     LazyItemAnimator item_animator_;
@@ -228,6 +247,7 @@ class LazyRuntime {
     auto physical_offset(Scalar logical, Scalar maximum) const -> Point {
         return point(options_.reverse_layout ? maximum - logical : logical);
     }
+    auto oriented(Scalar value) const -> Scalar { return options_.reverse_layout ? -value : value; }
     auto start_padding() const -> Scalar {
         auto padding = options_.padding;
         return options_.reverse_layout ? (horizontal_ ? padding.right : padding.bottom)
@@ -349,7 +369,7 @@ class LazyRuntime {
         return true;
     }
 
-    auto request_window(Index first, Scalar logical, Scalar viewport) -> Result<empty, UiError> {
+    auto request_window(Index first, Scalar logical, Scalar viewport, Option<Index> measure = {}) -> Result<empty, UiError> {
         Vec<Index> wanted;
         const auto visible_begin = geometry_.line_at(larger(0, logical - start_padding()), line_count());
         const auto begin = visible_begin > options_.overscan ? visible_begin - options_.overscan : 0;
@@ -381,6 +401,10 @@ class LazyRuntime {
         for (auto line = visible_begin; line < line_count() && Serial(line) <= overscan_end && wanted.len() < regular_limit; ++line) {
             auto added = add_line(line);
             if (added.is_err()) return Err(added.unwrap_err());
+        }
+        if (measure && (*measure < begin || Serial(*measure) > overscan_end) && wanted.len() < regular_limit) {
+            auto added = add_line(*measure);
+            if (added.is_err()) return added;
         }
         for (auto line = visible_begin; line > begin && wanted.len() < regular_limit;) {
             auto added = add_line(--line);
@@ -506,6 +530,7 @@ class LazyRuntime {
     }
 
     auto publish_geometry(Size viewport, Scalar physical, Scalar maximum) -> Result<empty, UiError> {
+        if (item_window_revision_) return Ok(empty{});
         auto visible = rstd::rc::make_rc<Vec<LazyVisibleItemInfo>>();
         Vec<LazyAnimatedItem> animated;
         LazyItemViewport animation_viewport{viewport, point(-physical), {}, {}, horizontal_, options_.reverse_layout};
@@ -519,30 +544,127 @@ class LazyRuntime {
             const auto &placement = placements_[child];
             auto metadata = content_.describe(index);
             const bool sticky = sticky_ == Some(index);
-            if (!item_window_revision_) {
-                if (metadata.animation)
-                    animated.push({placement.node, index, bounds, copy_key(metadata.key), *metadata.animation, sticky});
-                if (!sticky) {
-                    if (!animation_viewport.first || index < *animation_viewport.first)
-                        animation_viewport.first = Some(Index(index));
-                    if (!animation_viewport.last || index > *animation_viewport.last)
-                        animation_viewport.last = Some(Index(index));
-                }
+            if (metadata.animation)
+                animated.push({placement.node, index, bounds, copy_key(metadata.key), *metadata.animation, sticky});
+            if (!sticky) {
+                if (!animation_viewport.first || index < *animation_viewport.first)
+                    animation_viewport.first = Some(Index(index));
+                if (!animation_viewport.last || index > *animation_viewport.last)
+                    animation_viewport.last = Some(Index(index));
             }
             const auto cell = placement.cell;
             visible.get()->push({index, cell.line, cell.lane, cell.span, rstd::move(metadata.key), bounds});
         }
-        state_.get()->info = {
+        auto layout = state_.get()->publish_layout({
             anchor_ ? anchor_->index : Index(), anchor_ ? anchor_->offset : 0, content_.count(),
             Index(rendered_.len().to_primitive()), viewport, start_padding(), end_padding(),
             options_.reverse_layout, visible.to_const(),
             options_.reverse_layout ? physical > 0 : physical < maximum,
             options_.reverse_layout ? physical < maximum : physical > 0,
-            state_->info.prefetched_count, state_->info.retained_slot_count
-        };
-        if (item_window_revision_) return Ok(empty{});
+            prefetched_count_, retained_count_
+        });
+        if (layout.is_err()) return layout;
         return item_animator_.update(*document_, content_, rstd::move(animated), *visible, animation_viewport,
                                      point(rstd::exchange(item_rebase_delta_, 0)));
+    }
+
+    auto scroll_step(Scalar logical, Scalar delta, Scalar viewport) const -> LazyScrollStep {
+        if (!delta || !line_count()) return {};
+        const auto first_visible = geometry_.line_at(larger(0, logical - start_padding()), line_count());
+        auto line = usize();
+        while (line < measured_lines_.len() && measured_lines_[line].index < first_visible) ++line;
+        if (line == measured_lines_.len() || measured_lines_[line].index != first_visible ||
+            !measured_lines_[line].complete())
+            return {0, Some(Index(first_visible))};
+        auto edge = first_visible;
+        if (delta < 0) {
+            while (line != usize() && measured_lines_[line - usize(1)].index + 1 == edge &&
+                   measured_lines_[line - usize(1)].complete()) {
+                --line;
+                --edge;
+            }
+            const auto bound = edge ? smaller(logical, start_padding() + geometry_.position(edge)) : 0;
+            return {larger(delta, bound - logical),
+                    edge && delta < bound - logical ? Some(Index(edge - 1)) : None<Index>()};
+        }
+        while (line + usize(1) < measured_lines_.len() &&
+               measured_lines_[line + usize(1)].index == edge + 1 &&
+               measured_lines_[line + usize(1)].complete()) {
+            ++line;
+            ++edge;
+        }
+        const bool terminal = edge + 1 == line_count();
+        const auto end = terminal ? extent_ : start_padding() + geometry_.position(edge + 1);
+        const auto bound = larger(logical, end - viewport);
+        return {smaller(delta, bound - logical),
+                !terminal && delta > bound - logical ? Some(Index(edge + 1)) : None<Index>()};
+    }
+
+    auto resolve_delta(const Rc<LazyRuntime> &owner, Point delta, ViewportMetrics metrics, bool can_defer,
+                       Option<ScrollDeltaLease> lease)
+        -> Result<Option<ScrollDeltaResolution>, UiError> {
+        if (!document_ || !geometry_ready_ || item_window_revision_) return Ok(None<ScrollDeltaResolution>());
+        const auto amount = oriented(axis(delta));
+        const auto viewport = main(metrics.viewport);
+        if (!finite(amount) || viewport <= 0) return Ok(None<ScrollDeltaResolution>());
+        const auto maximum = axis(metrics.maximum);
+        const auto logical = options_.reverse_layout ? maximum - axis(metrics.offset) : axis(metrics.offset);
+        auto step = scroll_step(logical, amount, viewport);
+        if (!step.measure) return Ok(Some(ScrollDeltaResolution{point(oriented(step.consumed)), {}}));
+        if (scroll_delta_ && scroll_delta_->progress.expired()) scroll_delta_ = None();
+        if (!can_defer || scroll_delta_) return Ok(None<ScrollDeltaResolution>());
+        auto progress = rstd::rc::make_rc<ScrollDeltaProgress>();
+        auto completion = Box<ScrollDeltaCompletion>::make([progress] { return *progress; });
+        scroll_delta_ = Some(ScrollRequest{amount, progress.downgrade(), rstd::move(lease), {}, 0});
+        schedule(owner);
+        if (!pending_) {
+            scroll_delta_ = None();
+            return Err(UiError::Limit);
+        }
+        return Ok(Some(ScrollDeltaResolution{{}, Some(rstd::move(completion))}));
+    }
+
+    void finish_scroll_delta(bool reached_boundary = false) {
+        if (auto progress = scroll_delta_->progress.upgrade(); progress) {
+            progress->get()->settled = true;
+            progress->get()->reached_boundary = reached_boundary;
+        }
+        scroll_delta_ = None();
+    }
+
+    auto consume_pending_scroll(Scalar &logical, Scalar viewport, ViewportMetrics metrics) -> Result<empty, UiError> {
+        if (!scroll_delta_ || item_window_revision_) return Ok(empty{});
+        auto progress = scroll_delta_->progress.upgrade();
+        if (!progress) {
+            scroll_delta_ = None();
+            return Ok(empty{});
+        }
+        auto step = scroll_step(logical, scroll_delta_->remaining, viewport);
+        if (step.consumed) {
+            const auto target = physical_offset(logical + step.consumed, axis(metrics.maximum));
+            metrics.offset = physical_offset(logical, axis(metrics.maximum));
+            auto moved = scroll_delta_->lease ? scroll_delta_->lease->write(target, metrics)
+                                              : ScrollView::set_offset(*document_, scroll_, target);
+            if (moved.is_err()) {
+                if (moved.unwrap_err() != UiError::Cancelled) return moved;
+                finish_scroll_delta();
+                return Ok(empty{});
+            }
+            logical += step.consumed;
+            scroll_delta_->remaining -= step.consumed;
+            const auto amount = point(oriented(step.consumed));
+            progress->get()->consumed.x += amount.x;
+            progress->get()->consumed.y += amount.y;
+        }
+        if (!step.measure) {
+            finish_scroll_delta(__builtin_fabs(scroll_delta_->remaining) > 1e-6);
+        } else if ((!step.consumed && step.measure == scroll_delta_->measure) || scroll_delta_->probes == max_scroll_probes) {
+            finish_scroll_delta();
+        } else {
+            scroll_delta_->measure = step.measure;
+            ++scroll_delta_->probes;
+        }
+        return Ok(empty{});
     }
 
     auto scroll_to(Scalar target, Scalar maximum, Scalar viewport, Scalar &logical) -> Result<empty, UiError> {
@@ -637,15 +759,19 @@ class LazyRuntime {
             logical = adjusted;
         }
         rebase_ = false;
+        auto consumed = consume_pending_scroll(logical, viewport, *metrics);
+        if (consumed.is_err()) return consumed;
         const auto first = geometry_.line_at(larger(0, logical), line_count());
-        auto window = request_window(first, logical, viewport);
+        auto window = request_window(first, logical, viewport, scroll_delta_ ? scroll_delta_->measure : None<Index>());
         if (window.is_err()) return window;
+        if (scroll_delta_ && !item_window_revision_) finish_scroll_delta();
         item_rebase_delta_ += rebase_delta;
+        if (old_line_count != line_count()) return document_->invalidate_layout(node_);
         auto published = publish_geometry(metrics->viewport, axis(physical_offset(logical, maximum)), maximum);
         if (published.is_err()) return published;
         auto prefetch = update_prefetch(logical);
         if (prefetch.is_err()) return prefetch;
-        return old_line_count != line_count() ? document_->invalidate_layout(node_) : Result<empty, UiError>(Ok(empty{}));
+        return Ok(empty{});
     }
 
   public:
@@ -865,10 +991,9 @@ class LazyRuntime {
                     return live->get()->make_pin(*live, index);
                 }));
         }
-        state_.get()->info.item_count = content_.count();
-        state_.get()->info.materialized_count = Index(rendered_.len().to_primitive());
-        state_.get()->info.prefetched_count = prefetched;
-        state_.get()->info.retained_slot_count = spares;
+        const bool slot_counts_changed = prefetched_count_ != prefetched || retained_count_ != spares;
+        prefetched_count_ = prefetched;
+        retained_count_ = spares;
         if (changed) {
             geometry_.reset(options.estimated_extent, options.spacing);
             geometry_ready_ = false;
@@ -876,7 +1001,7 @@ class LazyRuntime {
             lines_.reset(content_.count(), slots_.count(), content_.has_spans());
             if (document_) return document_->invalidate_layout(node_);
         }
-        return document_ && (rebase_ || placed_changed || window_committed)
+        return document_ && (rebase_ || placed_changed || window_committed || slot_counts_changed)
             ? document_->invalidate_viewport_observation(viewport_) : Result<empty, UiError>(Ok(empty{}));
     }
 
@@ -914,6 +1039,15 @@ class LazyRuntime {
                 return live && (*live)->focus_candidate(snapshot, target);
             });
         if (focus.is_err()) return Err(UiError::Routing);
+        auto delta_resolver = Box<ScrollDeltaResolver>::make([weak](Point delta, ViewportMetrics metrics, bool can_defer,
+                                                                   Option<ScrollDeltaLease> lease)
+                -> Result<Option<ScrollDeltaResolution>, UiError> {
+            if (auto live = weak.upgrade(); live)
+                return live->get()->resolve_delta(*live, delta, metrics, can_defer, rstd::move(lease));
+            return Ok(None<ScrollDeltaResolution>());
+        });
+        auto resolved = ScrollView::set_delta_resolver(document, scroll, Some(rstd::move(delta_resolver)));
+        if (resolved.is_err()) return resolved;
         document_ = &document;
         session_ = &session;
         prefetch_owner_ = owner.downgrade();
@@ -934,6 +1068,8 @@ class LazyRuntime {
         focus_invalidated_ = false;
         session_ = nullptr;
         metrics_ = None();
+        if (scroll_delta_) finish_scroll_delta();
+        if (document_) (void)ScrollView::set_delta_resolver(*document_, scroll_, {});
         unbind_state();
         state_.reset();
         item_animator_.reset();
@@ -1024,7 +1160,7 @@ class LazyRuntime {
         }
 
         placements_.clear();
-        Vec<MeasuredLine> lines;
+        measured_lines_.clear();
         GridMeasureCursor cursor;
         for (usize child{}; child < rendered_.len(); ++child) {
             auto cell = cell_for(rendered_[child], cursor);
@@ -1037,17 +1173,22 @@ class LazyRuntime {
             if (child_id.is_err()) return Err(child_id.unwrap_err());
             const auto extent = main(*child_size);
             placements_.push({*cell, extent, cross(*child_size), *child_id});
-            auto position = lines.len();
-            while (position != usize() && lines[position - usize(1)].index >= cell->line) --position;
-            if (position < lines.len() && lines[position].index == cell->line)
-                lines[position].extent = larger(lines[position].extent, extent);
-            else lines.push({cell->line, extent});
+            auto position = measured_lines_.len();
+            while (position != usize() && measured_lines_[position - usize(1)].index >= cell->line) --position;
+            if (position < measured_lines_.len() && measured_lines_[position].index == cell->line) {
+                auto &line = measured_lines_[position];
+                line.extent = larger(line.extent, extent);
+                ++line.measured_items;
+            } else {
+                const auto line_items = grid_ ? Index(cursor.row.spans.len().to_primitive()) : Index(1);
+                measured_lines_.insert(position, {cell->line, extent, 1, line_items});
+            }
         }
         for (auto child = rendered_.len(); child < context.child_count(); ++child) {
             auto measured = context.measure_child(child, {Some(Scalar(0)), Some(Scalar(0))});
             if (measured.is_err()) return Err(measured.unwrap_err());
         }
-        rebase_ = geometry_.record(lines) || rebase_;
+        rebase_ = geometry_.record(measured_lines_) || rebase_;
         extent_ = geometry_.extent(line_count()) + start_padding() + end_padding();
         if (!finite(extent_)) return Err(UiError::InvalidValue);
         if (rebase_ && document_) {

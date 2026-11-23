@@ -8,6 +8,7 @@ struct LazyVisibleItemInfo {
     Index index{}, line{}, lane{}, span{1};
     Option<Key> key;
     Rect bounds;
+    friend auto operator==(const LazyVisibleItemInfo &, const LazyVisibleItemInfo &) -> bool = default;
 };
 
 struct LazyLayoutInfo {
@@ -44,8 +45,15 @@ struct LazyPinLease {
     ~LazyPinLease() { if (active) (*wake)(); }
 };
 
+struct LazyStateObservation {
+    state::Graph graph;
+    Option<state::Cell<LazyLayoutInfo>> layout;
+    Option<state::Cell<Index>> first_index;
+};
+
 struct LazyStateData {
     LazyLayoutInfo info;
+    rstd::rc::Rc<LazyStateObservation> observation;
     Option<Key> anchor_key;
     const void *owner{};
     Option<Index> requested;
@@ -56,6 +64,7 @@ struct LazyStateData {
     Option<Box<rstd::dyn<rstd::FnMut<void()>>>> wake;
     Option<Box<rstd::dyn<rstd::FnMut<Result<LazyItemPin, UiError>(Index)>>>> pin;
     auto request(Index index, Scalar offset, Serial duration) -> Result<empty, UiError>;
+    auto publish_layout(LazyLayoutInfo next) -> Result<empty, UiError>;
 };
 
 struct LazyStateAccess;
@@ -81,6 +90,8 @@ class LazyState {
 
   public:
     auto layout_info() const -> LazyLayoutInfo { return data_->info; }
+    auto layout_info_value() const -> Result<state::Value<LazyLayoutInfo>, state::StateError>;
+    auto first_visible_index_value() const -> Result<state::Value<Index>, state::StateError>;
     auto scroll_position() const -> LazyScrollPosition {
         return {data_->info.first_visible_index, data_->info.first_visible_offset};
     }

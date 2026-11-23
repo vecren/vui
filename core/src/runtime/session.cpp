@@ -366,6 +366,7 @@ auto UiSession::advance_impl(slice<InputEvent> events, FrameTiming timing, Surfa
     -> Result<AdvanceResult, SessionError> {
     usize processed{};
     auto failure = [&](SessionError error) -> Result<AdvanceResult, SessionError> {
+        input_.deferred_wheel_ = None();
         error.processed_events = processed;
         return Err(rstd::move(error));
     };
@@ -425,30 +426,48 @@ auto UiSession::advance_impl(slice<InputEvent> events, FrameTiming timing, Surfa
                 dispatch_started = Some(rstd::time::Instant::now());
         }
         CpuTimer input_time(active_timings_ ? &active_timings_->input : nullptr);
-        auto dispatched = input_.dispatch(event);
+        auto dispatched = input_.dispatch_for_session(event);
         input_time.pause();
-        if (dispatch_started.is_some()) {
+        auto record_dispatch = [&](bool success) {
+            if (!dispatch_started) return;
             auto finished = rstd::time::Instant::now();
             for (auto i = sample_begin; i < input_cursor_; ++i) {
                 auto &sample = active_inputs_->samples[i];
                 sample.dispatch_started = dispatch_started;
                 sample.dispatch_finished = Some(rstd::time::Instant(finished));
-                sample.dispatched = dispatched.is_ok();
+                sample.dispatched = success;
                 sample.coalesced = sample.index != last;
                 if (sample.index == last)
                     sample.work = input_.work();
             }
-        }
+        };
         processed += count;
         event_index = last + usize(1);
         if (active_timings_)
             active_timings_->processed_events = processed;
-        if (dispatched.is_err())
+        if (dispatched.is_err()) {
+            record_dispatch(false);
             return failure(
                 SessionError{SessionStage::Input, {}, Some(dispatched.unwrap_err())});
-        settled = settle_input(surface.logical_size, timing, stats);
-        if (settled.is_err())
-            return failure(settled.unwrap_err());
+        }
+        const bool deferred_wheel = input_.deferred_wheel_.is_some();
+        if (!deferred_wheel) record_dispatch(true);
+        for (;;) {
+            settled = settle_input(surface.logical_size, timing, stats);
+            if (settled.is_err()) {
+                if (deferred_wheel) record_dispatch(false);
+                return failure(settled.unwrap_err());
+            }
+            if (!input_.deferred_wheel_) break;
+            CpuTimer resume_time(active_timings_ ? &active_timings_->input : nullptr);
+            auto resumed = input_.resume_wheel();
+            resume_time.pause();
+            if (resumed.is_err()) {
+                record_dispatch(false);
+                return failure(SessionError{SessionStage::Input, {}, Some(resumed.unwrap_err())});
+            }
+        }
+        if (deferred_wheel) record_dispatch(true);
     }
     if (!events.is_empty()) {
         settled = settle(surface.logical_size, timing, stats);

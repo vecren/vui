@@ -4,6 +4,14 @@ using namespace rstd::prelude;
 using namespace rstd::literals;
 
 namespace vui {
+auto ScrollDeltaLease::write(Point offset, const ViewportMetrics &metrics) const -> Result<empty, UiError> {
+    auto owner = owner_.upgrade();
+    if (!owner || (*owner)->gesture_ != gesture_ || !(*owner)->lease_.active())
+        return Err(UiError::Cancelled);
+    if (!owner->get()->write(offset, metrics)) return Err(owner->get()->error_.unwrap_or(UiError::PropertyOwned));
+    return Ok(empty{});
+}
+
 ScrollInteraction::~ScrollInteraction() {
     if (animation_) *animation_->status.get() = ScrollAnimationStatus::Cancelled;
 }
@@ -22,7 +30,7 @@ auto ScrollInteraction::local_event(const InputSnapshot &snapshot,const InputEve
     bool reset=inverse_.is_some() && *inverse_!=*inverse;
     if (reset && (mode_==Mode::Drag || mode_==Mode::Pending)) {
         auto metrics=ui().viewport_metrics(viewport_);
-        if (metrics.is_ok()) {origin_=metrics->offset;anchor_=local;}
+        if (metrics.is_ok()) {origin_=metrics->offset;anchor_=last_local_=local;}
         tracker_.remove({input.device,input.pointer});
         if (mode_==Mode::Pending) {
             pan_=PanRecognizer({style_.motion.threshold,style_.axes.horizontal && style_.axes.vertical ? PanAxis::Free : style_.axes.horizontal ? PanAxis::Horizontal : PanAxis::Vertical});
@@ -49,16 +57,29 @@ auto ScrollInteraction::drag_value(Point position,const ViewportMetrics &metrics
     return masked(result);
 }
 
-void ScrollInteraction::track(InputEvent event,const ViewportMetrics &metrics,Point actual) {
+void ScrollInteraction::track(InputEvent event,const ViewportMetrics &metrics,Point actual,bool measured) {
     Vec<PointerSample> history;
-    for (auto sample:event.history) {sample.position=drag_value(inverse_->map(sample.position),metrics);history.push(rstd::move(sample));}
-    event.history=history.as_slice();event.position=actual;tracker_.add(event);
+    for (auto sample : event.history) {
+        const auto local = inverse_->map(sample.position);
+        sample.position = measured ? Point{-local.x, -local.y} : drag_value(local, metrics);
+        history.push(rstd::move(sample));
+    }
+    event.history = history.as_slice();
+    event.position = measured ? Point{-event.position.x, -event.position.y} : actual;
+    tracker_.add(event);
+    tracked_offset_ = actual;
 }
 
 auto ScrollInteraction::write(Point value,const ViewportMetrics &metrics) -> bool {
     PresentationBatch batch;batch.viewport_offset(viewport_,value);auto result=ui().write_presentation(lease_,batch);
     if (result.is_err()) {error_=Some(result.unwrap_err());return false;}
     written_=value;if (value!=metrics.offset) changed_.emit({value,metrics.maximum}).unwrap();return true;
+}
+
+auto ScrollInteraction::resolve_delta(Point delta, const ViewportMetrics &metrics)
+    -> Result<Option<ScrollDeltaResolution>, UiError> {
+    if (!measured_scroll()) return Ok(None<ScrollDeltaResolution>());
+    return (**resolve_delta_)(masked(delta), metrics, true, Some(ScrollDeltaLease(owner_, gesture_)));
 }
 
 auto ScrollInteraction::rebase_offset(Point value) -> Result<empty, UiError> {
@@ -167,14 +188,23 @@ void ScrollInteraction::begin_motion(const ViewportMetrics &metrics,Point veloci
     velocity_=style_.motion.inertia ? masked(velocity) : Point{};begin_axis(x_,metrics.offset.x,velocity_.x,metrics.maximum.x,style_.axes.horizontal,started);
     begin_axis(y_,metrics.offset.y,velocity_.y,metrics.maximum.y,style_.axes.vertical,started);
     if (x_.phase==Phase::Rest && y_.phase==Phase::Rest) {stop(true,false);return;}
-    if (!acquire()) {stop(true,false);return;}mode_=Mode::Animate;rebase_=false;wake();
+    if (!acquire()) {stop(true,false);return;}mode_=Mode::Animate;rebase_=false;
+    decay_position_ = metrics.offset;
+    wake();
+}
+
+auto ScrollInteraction::decay_sample(const Axis &axis, Serial elapsed) const -> ScalarMotion {
+    if (axis.phase != Phase::Decay) return axis.initial;
+    const auto drag = -__builtin_log(style_.motion.deceleration_rate);
+    if (drag > 0) return Decay{axis.initial, drag}.sample(elapsed);
+    return {axis.initial.value + axis.initial.velocity * Scalar(elapsed) / 1e9, axis.initial.velocity};
 }
 
 auto ScrollInteraction::sample_axis(Axis &axis,Scalar maximum,Serial time) -> ScalarMotion {
     auto elapsed=time>=axis.started ? time-axis.started : 0;
     if (axis.phase==Phase::Decay) {
         auto drag=-__builtin_log(style_.motion.deceleration_rate);
-        auto result=drag>0 ? Decay{axis.initial,drag}.sample(elapsed) : ScalarMotion{axis.initial.value+axis.initial.velocity*Scalar(elapsed)/1e9,axis.initial.velocity};
+        auto result = decay_sample(axis, elapsed);
         if (result.value<0 || result.value>maximum) {
             auto target=bounded(result.value,maximum);
             if (style_.motion.movement==ScrollMovement::Clamped) {axis={Phase::Rest,{target,0},target,time};return axis.initial;}
@@ -196,6 +226,54 @@ auto ScrollInteraction::sample_axis(Axis &axis,Scalar maximum,Serial time) -> Sc
     return axis.initial;
 }
 
+auto ScrollInteraction::sample_measured_decay(MotionContext &context, const ViewportMetrics &metrics)
+    -> Result<MotionStatus, MotionError> {
+    const auto time = context.now_ns();
+    const auto tick = [&] {
+        context.request_tick(time + rstd::cmp::min(Serial(8'333'333), ~Serial{} - time)).unwrap();
+        return Ok(MotionStatus::Running);
+    };
+    const auto finish = [&] {
+        stop(true, false, false);
+        return Ok(MotionStatus::Idle);
+    };
+    if (pending_delta_) {
+        const auto progress = (**pending_delta_)();
+        if (!progress.settled) return tick();
+        pending_delta_ = None();
+        if (progress.reached_boundary) return finish();
+        decay_position_.x -= pending_decay_delta_.x - progress.consumed.x;
+        decay_position_.y -= pending_decay_delta_.y - progress.consumed.y;
+    }
+    const auto x = decay_sample(x_, time >= x_.started ? time - x_.started : 0);
+    const auto y = decay_sample(y_, time >= y_.started ? time - y_.started : 0);
+    const auto value = masked({x.value, y.value});
+    velocity_ = masked({x.velocity, y.velocity});
+    const Point delta{value.x - decay_position_.x, value.y - decay_position_.y};
+    decay_position_ = value;
+    auto resolution = resolve_delta(delta, metrics);
+    if (resolution.is_err()) {
+        error_ = Some(resolution.unwrap_err());
+        return finish();
+    }
+    if (auto resolved = resolution.unwrap(); resolved) {
+        if (resolved->after_layout) {
+            pending_delta_ = rstd::move(resolved->after_layout);
+            pending_decay_delta_ = delta;
+            return tick();
+        }
+        const auto moved = resolved->consumed;
+        const Point offset{metrics.offset.x + moved.x, metrics.offset.y + moved.y};
+        if (moved != Point{} && !write(offset, metrics)) return finish();
+        if (moved != delta) return finish();
+    } else {
+        const auto offset = bounded({metrics.offset.x + delta.x, metrics.offset.y + delta.y}, metrics.maximum);
+        if (offset != metrics.offset && !write(offset, metrics)) return finish();
+    }
+    if (__builtin_fabs(x.velocity) < 1 && __builtin_fabs(y.velocity) < 1) return finish();
+    return tick();
+}
+
 void ScrollInteraction::press(EventContext &,const RoutedEvent &event) {
     if (!style_.user_scroll_enabled || (!style_.motion.enabled && mode_ != Mode::Programmatic) ||
         (event.input.pointer_kind != PointerKind::Touch && event.input.button != PointerButton::Primary) ||
@@ -210,8 +288,12 @@ void ScrollInteraction::pending_up(EventContext &,const RoutedEvent &event) {
     pointer_=None();auto metrics=ui().viewport_metrics(viewport_);if (metrics.is_ok()) begin_motion(*metrics,{},now());else stop(true,false);
 }
 
-auto ScrollInteraction::make(UiSession &session,UiId root,UiId viewport,ScrollStyle &style,Signal<void(UserScroll)> &changed) -> Result<rstd::rc::Rc<ScrollInteraction>,ControlError> {
-    auto owner=rstd::rc::make_rc<ScrollInteraction>(session,root,viewport,style,changed);auto self=owner.downgrade();
+auto ScrollInteraction::make(UiSession &session, UiId root, UiId viewport, ScrollStyle &style,
+                             Signal<void(UserScroll)> &changed, Option<Box<ScrollDeltaResolver>> &resolve_delta)
+    -> Result<rstd::rc::Rc<ScrollInteraction>, ControlError> {
+    auto owner = rstd::rc::make_rc<ScrollInteraction>(session, root, viewport, style, changed, resolve_delta);
+    auto self = owner.downgrade();
+    owner.get()->owner_ = self;
     auto participant=session.input().arena().bind(root,self);if (participant.is_err()) return Err(ControlError{{},Some(participant.unwrap_err())});
     owner.get()->participant_=rstd::move(participant).unwrap();
     auto motion=session.motion().bind(self);if (motion.is_err()) return Err(ControlError{Some(UiError::Limit),{}});owner.get()->motion_=rstd::move(motion).unwrap();
@@ -242,6 +324,8 @@ auto ScrollInteraction::make(UiSession &session,UiId root,UiId viewport,ScrollSt
 void ScrollInteraction::stop(bool clamp,bool release,bool request) {
     bool owned=mode_!=Mode::Idle || lease_.active() || boundary_owned_;auto pointer=pointer_;pointer_=None();mode_=Mode::Idle;velocity_={};
     if (lease_.active()) ui().release_presentation(lease_);else lease_.revoke();
+    pending_delta_ = None();
+    ++gesture_;
     if (clamp && owned && ui().valid(viewport_)) {ui().set_viewport_boundary(viewport_,ViewportBoundary::Clamped);boundary_owned_=false;}
     if (release && pointer.is_some()) {auto key=*pointer;session_.input().release_input(slice<PointerKey>::from_raw_parts(&key,usize(1)));}
     if (animation_) {
@@ -270,6 +354,7 @@ auto ScrollInteraction::handle(EventContext &context,const RoutedEvent &event) -
         if (mode_ == Mode::Programmatic) stop(false, false);
         if (!acquire()) return true;
         pointer_=Some(PointerKey{event.input.device,event.input.pointer});mode_=Mode::Drag;anchor_=last_local_=local->position;origin_=metrics->offset;rebase_=false;
+        tracked_offset_ = metrics->offset;
         tracker_.remove(*pointer_);
         if (style_.motion.movement==ScrollMovement::Elastic) {ui().set_viewport_boundary(viewport_,ViewportBoundary::Unclamped).unwrap();boundary_owned_=true;}
         context.focus();return true;
@@ -279,12 +364,34 @@ auto ScrollInteraction::handle(EventContext &context,const RoutedEvent &event) -
     if (mode_!=Mode::Drag || (event.input.type!=EventType::PointerMove && event.input.type!=EventType::PointerUp)) return false;
     auto snapshot=session_.input().snapshot();auto metrics=ui().viewport_metrics(viewport_);if (snapshot.is_none() || metrics.is_err()) return true;
     auto local=local_event(*snapshot,event.input);if (local.is_none()) {error_=Some(UiError::InvalidValue);stop(true,false);return true;}
-    if (rebase_) {origin_=metrics->offset;anchor_=last_local_;rebase_=false;tracker_.remove(key);}
+    const bool measured = measured_scroll();
+    if (rebase_) {
+        if (!measured)
+            tracker_.translate(key, {metrics->offset.x - tracked_offset_.x, metrics->offset.y - tracked_offset_.y});
+        origin_ = tracked_offset_ = metrics->offset;
+        anchor_ = last_local_;
+        rebase_ = false;
+    }
     if (event.input.type==EventType::PointerMove) {
-        auto value=drag_value(local->position,*metrics);if (!write(value,*metrics)) {stop(true,false);return true;}
-        track(rstd::move(local).unwrap(),*metrics,value);last_local_=inverse_->map(event.input.position);
+        auto value = drag_value(local->position, *metrics);
+        if (measured) {
+            const Point delta{last_local_.x - local->position.x, last_local_.y - local->position.y};
+            pending_delta_ = None();
+            auto result = resolve_delta(delta, *metrics);
+            if (result.is_err()) { error_ = Some(result.unwrap_err()); stop(true, false); return true; }
+            if (auto resolved = result.unwrap(); resolved) {
+                value = {metrics->offset.x + resolved->consumed.x, metrics->offset.y + resolved->consumed.y};
+                pending_delta_ = rstd::move(resolved->after_layout);
+            } else {
+                value = bounded(masked({metrics->offset.x + delta.x, metrics->offset.y + delta.y}), metrics->maximum);
+            }
+        }
+        if (value != metrics->offset && !write(value, *metrics)) { stop(true, false); return true; }
+        track(rstd::move(local).unwrap(), *metrics, value, measured);
+        last_local_ = inverse_->map(event.input.position);
     } else {
-        track(rstd::move(local).unwrap(),*metrics,metrics->offset);auto velocity=tracker_.velocity(key);tracker_.remove(key);pointer_=None();
+        pending_delta_ = None();
+        track(rstd::move(local).unwrap(), *metrics, metrics->offset, measured);auto velocity=tracker_.velocity(key);tracker_.remove(key);pointer_=None();
         begin_motion(*metrics,velocity.is_some() ? *velocity : Point{},now());
     }
     context.prevent_default();return true;
@@ -298,6 +405,7 @@ auto ScrollInteraction::sample(MotionContext &context,FrameTiming) -> Result<Mot
     auto metrics=ui().viewport_metrics(viewport_);
     if (metrics.is_err()) {context.request_tick(context.now_ns()+8'333'333).unwrap();return Ok(MotionStatus::Running);}
     if (mode_ == Mode::Programmatic) return sample_animation(context, *metrics);
+    if (measured_scroll()) return sample_measured_decay(context, *metrics);
     if (rebase_) {
         begin_axis(x_,metrics->offset.x,velocity_.x,metrics->maximum.x,style_.axes.horizontal,context.now_ns());
         begin_axis(y_,metrics->offset.y,velocity_.y,metrics->maximum.y,style_.axes.vertical,context.now_ns());rebase_=false;
@@ -345,7 +453,7 @@ auto ScrollState::finish_configuration() -> Result<empty, UiError> {
 }
 
 auto ScrollState::connect(UiSession &session, UiId root) -> Result<empty, ControlError> {
-    auto value = ScrollInteraction::make(session, root, viewport_, style_, user_scrolled_);
+    auto value = ScrollInteraction::make(session, root, viewport_, style_, user_scrolled_, resolve_delta_);
     if (value.is_err()) return Err(value.unwrap_err());
     auto described = (*value)->describe_semantics();
     if (described.is_err()) return Err(ControlError{Some(described.unwrap_err()), {}});
@@ -376,14 +484,49 @@ void ScrollState::handle(EventContext &context, const RoutedEvent &event) {
         bool vertical=style_.wheel_mode==ScrollWheelMode::SingleAxis && style_.axes.vertical && !style_.axes.horizontal && __builtin_fabs(remaining.x)>__builtin_fabs(remaining.y);
         auto amount=horizontal ? Point{remaining.y,0} : vertical ? Point{0,remaining.x} : remaining;
         auto step = event.input.scroll_unit == ScrollUnit::Lines ? style_.line_step : Scalar(1);
-        next = {shift(next.x, amount.x*style_.wheel_direction.x, step, metrics.maximum.x),
-                shift(next.y, amount.y*style_.wheel_direction.y, step, metrics.maximum.y)};
+        auto direction = style_.wheel_direction;
+        auto to_input = [direction, amount, step, horizontal, vertical](Point delta) {
+            Point used{consumed(delta.x * direction.x, step, amount.x),
+                       consumed(delta.y * direction.y, step, amount.y)};
+            return horizontal ? Point{0, used.x} : vertical ? Point{used.y, 0} : used;
+        };
+        const Point delta{style_.axes.horizontal ? amount.x * direction.x * step : 0,
+                          style_.axes.vertical ? amount.y * direction.y * step : 0};
+        if (resolve_delta_) {
+            auto result = (**resolve_delta_)(delta, metrics, context.can_defer_scroll(), {});
+            if (result.is_err()) return;
+            if (auto resolved = result.unwrap(); resolved) {
+                if (resolved->after_layout) {
+                    auto *document = &context.document();
+                    auto id = event.current;
+                    auto deferred = context.defer_scroll([document, id, to_input,
+                            complete = resolved->after_layout.unwrap()]() mutable -> Point {
+                        const auto moved = (*complete)().consumed;
+                        if (moved != Point{})
+                            if (auto state = document->state<ScrollState>(id)) {
+                                auto settled = document->viewport_metrics(state->viewport_);
+                                if (settled.is_ok()) state->user_scrolled_.emit({settled->offset, settled->maximum}).unwrap();
+                            }
+                        return to_input(moved);
+                    });
+                    if (deferred.is_ok()) return;
+                } else {
+                    next = {next.x + resolved->consumed.x, next.y + resolved->consumed.y};
+                    if (next == metrics.offset || context.document().set_viewport_offset(viewport_, next).is_err()) return;
+                    context.consume_scroll(to_input(resolved->consumed));
+                    if (context.scroll_remaining() == Point{}) context.prevent_default();
+                    user_scrolled_.emit({next, metrics.maximum}).unwrap();
+                    return;
+                }
+            }
+        }
+        next = {shift(next.x, amount.x * direction.x, step, metrics.maximum.x),
+                shift(next.y, amount.y * direction.y, step, metrics.maximum.y)};
         if (next == metrics.offset)
             return;
         if (context.document().set_viewport_offset(viewport_, next).is_err())
             return;
-        Point used{consumed((next.x-metrics.offset.x)*style_.wheel_direction.x,step,amount.x),consumed((next.y-metrics.offset.y)*style_.wheel_direction.y,step,amount.y)};
-        context.consume_scroll(horizontal ? Point{0,used.x} : vertical ? Point{used.y,0} : used);
+        context.consume_scroll(to_input({next.x - metrics.offset.x, next.y - metrics.offset.y}));
         if (context.scroll_remaining() == Point{})
             context.prevent_default();
         user_scrolled_.emit({next, metrics.maximum}).unwrap();
@@ -534,6 +677,14 @@ auto ScrollView::set_offset(UiDocument &ui, UiId id, Point value) -> Result<empt
     if (state) state->stop();
     return state ? ui.set_viewport_offset(state->viewport(), value)
                  : Result<empty, UiError>(Err(UiError::InvalidId));
+}
+
+auto ScrollView::set_delta_resolver(UiDocument &ui, UiId id, Option<Box<ScrollDeltaResolver>> resolver)
+    -> Result<empty, UiError> {
+    auto state = ui.state<ScrollState>(id);
+    if (!state) return Err(UiError::InvalidId);
+    state->resolve_delta_ = rstd::move(resolver);
+    return Ok(empty{});
 }
 
 auto ScrollView::metrics(UiDocument &ui, UiId id) -> Result<ViewportMetrics, UiError> {

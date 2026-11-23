@@ -33,6 +33,9 @@ class EventContext {
     bool &stopped_;
     bool &prevented_;
     Point &remaining_scroll_;
+    const Option<BindingGuard> *scroll_behavior_{};
+    using ScrollCompletion = rstd::dyn<rstd::FnMut<Point()>>;
+    auto defer_scroll_completion(Box<ScrollCompletion> completion) -> Result<empty, InputError>;
     friend class EventRouter;
     EventContext(EventRouter &router, const RoutedEvent &event, bool &stopped, bool &prevented,
                  Point &remaining_scroll)
@@ -47,6 +50,12 @@ class EventContext {
     auto completed_image(UiId id, Serial image_id) const -> Result<Option<FrameImage>, FrameError>;
     auto scroll_remaining() const -> Point { return remaining_scroll_; }
     auto consume_scroll(Point amount) -> Result<empty, InputError>;
+    // The final wheel behavior at a node may settle its layout before reporting consumption.
+    auto can_defer_scroll() const -> bool;
+    template <class F> auto defer_scroll(F completion) -> Result<empty, InputError> {
+        if (!can_defer_scroll()) return Err(InputError::Unavailable);
+        return defer_scroll_completion(Box<ScrollCompletion>::make(rstd::move(completion)));
+    }
     void stop_propagation() { stopped_ = true; }
     void prevent_default() { prevented_ = true; }
     auto default_prevented() const -> bool { return prevented_; }
@@ -174,6 +183,27 @@ class EventRouter {
     bool sharing_{};
     Vec<UiId> shared_targets_;
     Vec<UiId> route_nodes_, owner_targets_;
+    struct RouteState {
+        InputEvent input;
+        UiId target;
+        Serial cutoff;
+        Point remaining;
+        bool stopped{}, prevented{};
+    };
+    struct WheelCompletion {
+        Box<EventContext::ScrollCompletion> complete;
+        Option<BindingGuard> guard;
+    };
+    struct DeferredWheel {
+        InputSnapshot snapshot;
+        Vec<UiId> nodes;
+        usize cursor;
+        RouteState route;
+        WheelCompletion completion;
+    };
+    bool wheel_deferral_{};
+    Option<WheelCompletion> wheel_completion_;
+    Option<DeferredWheel> deferred_wheel_;
     bool busy_{}, controls_{true}, window_focused_{true}, closed_{};
     Option<InputError> failure_;
     InputWork work_;
@@ -224,11 +254,12 @@ class EventRouter {
     void refresh_contacts();
     auto pointer(Index id, DeviceId device = 0) -> Pointer *;
     void behavior(EventContext &context, const RoutedEvent &event, bool prevented);
-    void invoke(const InputSnapshot &update, slice<UiId> route, usize index, UiId target,
-                const InputEvent &input, RoutePhase phase, Serial cutoff, bool &stopped,
-                bool &prevented, Point &remaining);
+    void invoke(const InputSnapshot &update, slice<UiId> nodes, usize index, RoutePhase phase, RouteState &route);
+    void bubble(const InputSnapshot &update, Vec<UiId> &nodes, usize cursor, RouteState &route);
     auto route(const InputSnapshot &update, UiId target, InputEvent input, bool direct = false)
         -> bool;
+    auto dispatch_for_session(InputEvent input) -> Result<empty, InputError>;
+    auto resume_wheel() -> Result<empty, InputError>;
     auto allows_semantics(const InputSnapshot &snapshot, UiId target) const -> bool;
     auto focus_neighbor(bool backwards, bool wrap) -> Option<UiId>;
     auto focus_provider(UiId root) -> FocusSearchProvider *;
