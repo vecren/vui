@@ -336,23 +336,29 @@ auto UiExecutor::prepare(const rg::PassExecutionInfo &pass, const vk::GraphBindi
     VkSampler previous_sampler{};
     Index instance = frame.first;
     usize paint_index{};
-    auto sampled_view = [&](vrento::fg::ResourceVersion source)
-        -> Result<VkImageView, vk::GraphExecutionError> {
-        bool declared{};
-        for (const auto &use : pass.uses)
-            declared |= use.resource == source.resource && use.version == source.version &&
-                        use.access == rg::GraphAccess::Read && use.usage == rg::PassUsage::Sampled;
-        auto bound = bindings.resolve(source.resource, source.version);
-        if (!declared || bound.is_none() || (*bound)->Texture().is_none())
-            return Err(vk::GraphExecutionError{vk::GraphExecutionStage::Prepare});
-        auto native = vk::native_view(*(*bound)->Texture());
+    rstd::collections::HashMap<vrento::fg::ResourceVersion, VkImageView> sampled_views;
+    for (const auto &use : pass.uses) {
+        if (use.access != rg::GraphAccess::Read || use.usage != rg::PassUsage::Sampled)
+            continue;
+        auto bound = bindings.resolve(use.binding);
+        auto texture = bound ? (*bound)->Texture() : None<tex::TextureViewRef>();
+        if (!texture)
+            return Err(vk::GraphExecutionError{vk::GraphExecutionStage::Prepare, pass.id, use.resource});
+        auto native = vk::native_view(*texture);
         if (native.is_err())
             return Err(vk::GraphExecutionError{
                 vk::GraphExecutionStage::Prepare,
-                {},
-                source.resource,
+                pass.id,
+                use.resource,
                 vrento::vulkan::GraphExecutionCause::Texture(native.unwrap_err())});
-        return Ok(native.unwrap());
+        (void)sampled_views.insert({use.resource, use.version}, native.unwrap());
+    }
+    auto sampled_view = [&](vrento::fg::ResourceVersion source)
+        -> Result<VkImageView, vk::GraphExecutionError> {
+        auto view = sampled_views.get(source);
+        if (!view)
+            return Err(vk::GraphExecutionError{vk::GraphExecutionStage::Prepare, pass.id, source.resource});
+        return Ok(VkImageView(**view));
     };
     for (const auto &paint : frame.items) {
         PreparedDraw item{{}, paint.kind, instance++, 1, paint.blend};
@@ -1878,29 +1884,29 @@ auto Renderer::prepare_impl(FramePlan plan, DrawOptions options,
     }
     Impl::GraphShape graph;
     constexpr Serial graph_scope = 1;
-    vk::GraphBindings bindings(graph_scope);
+    Vec<rstd::sync::Arc<dyn<vk::GraphBinding>>> binding_sources;
+    auto add_resource = [&](Impl::GraphShape::Resource resource,
+                            rstd::sync::Arc<dyn<vk::GraphBinding>> binding) -> rg::ResourceId {
+        const rg::ResourceId id{binding_sources.len().to_primitive() + 1, 1};
+        resource.id = id;
+        graph.resources.push(rstd::move(resource));
+        binding_sources.push(rstd::move(binding));
+        return id;
+    };
     auto texture = [&](tex::TextureViewRef view, bool imported) -> rg::ResourceId {
-        rg::ResourceId id{graph.resources.len().to_primitive() + 1, 1};
         const auto &range = view.description().range;
         const auto &desc = view.texture().description();
         auto extent = tex::mip_extent(desc, range.first_mip);
-        graph.resources.push({id, rg::GraphResourceKind::Texture, 0, range.mip_count,
-                              range.layer_count, imported, vk::ToVkType(desc.format), extent.width,
-                              extent.height});
-        bindings
-            .bind(id, rstd::sync::Arc<dyn<vk::GraphBinding>>::make(
-                          vk::GraphTextureBinding(rstd::move(view))))
-            .unwrap();
-        return id;
+        const Impl::GraphShape::Resource resource{{}, rg::GraphResourceKind::Texture, 0,
+            range.mip_count, range.layer_count, imported, vk::ToVkType(desc.format), extent.width, extent.height};
+        return add_resource(resource,
+                            rstd::sync::Arc<dyn<vk::GraphBinding>>::make(
+                                vk::GraphTextureBinding(rstd::move(view))));
     };
     auto host_buffer = [&](const FrameBuffer &buffer) -> rg::ResourceId {
-        rg::ResourceId id{graph.resources.len().to_primitive() + 1, 1};
-        graph.resources.push({id, rg::GraphResourceKind::Buffer, buffer.capacity, 1, 1, true});
-        bindings
-            .bind(id, rstd::sync::Arc<dyn<vk::GraphBinding>>::make(vk::GraphHostBufferBinding{
-                          *self.session, buffer.buffer.clone(), buffer.capacity}))
-            .unwrap();
-        return id;
+        return add_resource({{}, rg::GraphResourceKind::Buffer, buffer.capacity, 1, 1, true},
+                            rstd::sync::Arc<dyn<vk::GraphBinding>>::make(vk::GraphHostBufferBinding{
+                                *self.session, buffer.buffer.clone(), buffer.capacity}));
     };
     auto buffer_read = [&](rg::ResourceId id, Serial bytes, rg::PassUsage usage,
                            rg::PassStages stages) {
@@ -2052,6 +2058,21 @@ auto Renderer::prepare_impl(FramePlan plan, DrawOptions options,
             return Err(Error{Stage::Pending, VK_NOT_READY});
     }
     auto compiled = self.compiler->compiled().unwrap();
+    auto bindings = compiled.make_bindings();
+    const auto versions = compiled.description().binding_layout().versions();
+    for (usize index{}; index < versions.len(); ++index) {
+        const auto &version = versions[index];
+        if (!version.used)
+            continue;
+        const auto id = version.version.resource;
+        if (!id.valid() || id.value > binding_sources.len().to_primitive())
+            return Err(Error::graph(vk::GraphExecutionError{
+                vk::GraphExecutionStage::Binding, version.first_pass, id}));
+        auto bound = bindings.bind({rg::GraphIndex(index.to_primitive())},
+                                   binding_sources[usize(id.value - 1)].clone());
+        if (bound.is_err())
+            return Err(Error::graph(bound.unwrap_err()));
+    }
     Vec<vk::PassFrameBinding> inputs;
     Option<rstd::sync::Arc<ClipScissors>> scissors;
     if (options.scissor && !coverage.is_empty())
@@ -2126,7 +2147,7 @@ auto Renderer::prepare_impl(FramePlan plan, DrawOptions options,
             return Err(Error::texture(Stage::Record, uploaded.unwrap_err()));
     }
     auto program = compiled.instantiate(
-        bindings, inputs.as_slice(),
+        rstd::move(bindings), inputs.as_slice(),
         Box<dyn<vk::GraphicsScopeBackend>>::make(ScopeBackend{self.scopes}), true, &work);
     if (program.is_err())
         return Err(Error::graph(program.unwrap_err()));
