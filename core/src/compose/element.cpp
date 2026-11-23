@@ -33,6 +33,7 @@ ElementData::ElementData(const ElementData &other)
       text(other.text.is_some() ? Some(UiTextValue(*other.text)) : None<UiTextValue>()),
       component_type(other.component_type), view(other.view), movable(other.movable), parameters(other.parameters), adapter(other.adapter),
       reference(other.reference.is_some() ? Some(NodeRef(*other.reference)) : None<NodeRef>()),
+      premeasure(other.premeasure), retain_native(other.retain_native),
       precompose(other.precompose), invalid(other.invalid), source(other.source) {
     if (other.image.is_some()) {
         const auto &source = *other.image;

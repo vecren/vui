@@ -118,6 +118,8 @@ struct ElementData {
     rstd::rc::Rc<ComponentParameters> parameters;
     rstd::rc::Rc<AdapterFunction> adapter;
     Option<NodeRef> reference;
+    Option<LayoutConstraints> premeasure;
+    bool retain_native{};
     bool precompose{};
     bool invalid{};
     rstd::source_location source;

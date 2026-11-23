@@ -361,6 +361,46 @@ auto UiDocument::measure_content(UiId id, LayoutConstraints inner, Index depth) 
     return Ok(desired);
 }
 
+auto UiDocument::premeasure_detached(UiId id, LayoutConstraints constraints) -> Result<Size, UiError> {
+    if (!can_route() || phase_transaction_) return Err(UiError::Routing);
+    auto root = resolve(id);
+    if (!root) return Err(UiError::InvalidId);
+    if (root->parent || root_ == Some(id) || !constraints.valid()) return Err(UiError::InvalidValue);
+    Vec<UiId> nodes;
+    nodes.push(UiId(id));
+    for (usize i{}; i < nodes.len(); ++i) {
+        const auto &node = *resolve(nodes[i]);
+        if (node.kind == LayoutKind::Custom || node.viewport || node.scene || node.layout_strategy ||
+            !node.modifiers.is_empty() || !node.subcomposition.expired())
+            return Err(UiError::InvalidValue);
+        if (nodes.len() + node.children.len() > usize(128)) return Err(UiError::Limit);
+        for (auto child : node.children) nodes.push(UiId(child));
+    }
+    const auto diagnostics = layout_diagnostics_.len();
+    const auto old_stats = stats_;
+    const auto work = layout_work_;
+    Vec<UiPhaseDiagnostic> phase_diagnostics;
+    DocumentPhaseTransaction phase_transaction(phase_diagnostics);
+    phase_transaction_ = &phase_transaction;
+    layout_work_ = 0;
+    layout_active_ = true;
+    auto error = measure(id, constraints, 0);
+    phase_transaction_ = nullptr;
+    layout_active_ = false;
+    layout_work_ = work;
+    stats_ = old_stats;
+    while (layout_diagnostics_.len() > diagnostics) (void)layout_diagnostics_.pop();
+    if (!phase_transaction.candidates.is_empty()) {
+        const auto dirty = layout_dirty_;
+        discard_phase_reads(phase_transaction);
+        layout_dirty_ = dirty;
+        return Err(error ? *error : UiError::InvalidValue);
+    }
+    if (error) return Err(*error);
+    for (auto node : nodes) resolve(node)->premeasured = true;
+    return Ok(Size(root->desired));
+}
+
 auto UiDocument::measure(UiId id, LayoutConstraints available, Index depth) -> Option<UiError> {
     if (depth >= depth_limit_ || ++layout_work_ > 1'000'000)
         return layout_failure(id, LayoutIssue::Limit, UiError::Limit);

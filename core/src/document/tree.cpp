@@ -62,7 +62,8 @@ void UiDocument::remount(UiId id, slice<UiId> preserved) {
         observation = {};
     }
     node.paint_dirty = true;
-    node.measure_dirty = true;
+    if (!node.premeasured) node.measure_dirty = true;
+    node.premeasured = false;
     node.arrange_dirty = true;
     node.subtree_arrange_dirty = true;
     if (node.mount_generation == ~Serial{})

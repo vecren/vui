@@ -42,6 +42,7 @@ struct DocumentNode {
     bool layout_has_text_input_area{};
     Option<Rect> layout_text_input_area;
     bool paint_dirty{true};
+    bool premeasured{};
     rstd::rc::Rc<DocumentPhaseObservation> phase_observations[3];
     DisplayList content;
     Option<Box<RenderProperties>> frozen_paint;

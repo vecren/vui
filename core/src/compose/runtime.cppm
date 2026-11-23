@@ -232,6 +232,7 @@ class ComposeBuild {
     auto retired_roots() const -> Vec<UiId>;
     static auto dirty(const ComposeInstance &instance, const CompositionEnvironment &environment) -> bool;
     static void committed_roots(const ComposeInstance &instance, Vec<ComposeRoot> &roots) {
+        if (instance.element.data().precompose) return;
         if (instance.id.is_some()) roots.push({{}, instance.id});
         else for (const auto &child : instance.children) committed_roots(*child.get(), roots);
     }
@@ -425,9 +426,13 @@ class CompositionRuntime {
     Option<CommitReport> last_;
     static void cleanup(const rstd::rc::Rc<ComposeInstance> &instance, const ComposeBuild *retained = nullptr);
     static void invalidate_links(const rstd::rc::Rc<ComposeInstance> &instance, const ComposeBuild *retained = nullptr);
-    static void native_roots(const ComposeInstance &instance, Vec<UiId> &result) {
-        if (instance.id.is_some()) { result.push(UiId(*instance.id)); return; }
-        for (const auto &child : instance.children) native_roots(*child.get(), result);
+    static void native_roots(const ComposeInstance &instance, Vec<UiId> &result, bool covered = false) {
+        if (instance.element.data().precompose) covered = false;
+        if (!covered && instance.id) {
+            result.push(UiId(*instance.id));
+            covered = true;
+        }
+        for (const auto &child : instance.children) native_roots(*child.get(), result, covered);
     }
     struct OldScope {
         rstd::rc::Rc<ScopeState> scope;
@@ -440,6 +445,7 @@ class CompositionRuntime {
     static auto resolve(ComposeDraft &draft, UiDocument &document, const UiDocument::PreparedEdit &prepared,
                         Vec<Element> &old_elements, Vec<NodeLink *> &references, usize &scopes) -> ComposeResult<empty>;
     static void commit(ComposeDraft &draft, Vec<OldScope> &old);
+    void prepare_native(ComposeDraft &draft, UiSession &session, UiCommitReport &report);
     void activate(ComposeDraft &draft, CommittedContext &context);
     static auto locate(ComposeDraft &draft, UiNodeRef ref, ComposeError &error) -> bool;
     auto perform(UiSession &session) -> ComposeResult<CommitReport>;

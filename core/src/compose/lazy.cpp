@@ -152,6 +152,7 @@ struct LazySlot {
     Index index;
     Serial id{};
     Kind kind{Kind::Active};
+    Option<LayoutConstraints> premeasure;
     auto placed() const -> bool { return kind == Kind::Active || kind == Kind::Probe || kind == Kind::Pinned; }
 };
 
@@ -169,6 +170,7 @@ class LazyRuntime {
     LazyGridSlots slots_;
     LazyGridLines lines_;
     Scalar cross_{};
+    bool cross_bounded_{};
     Option<LayoutConstraints> parent_bounds_;
     bool geometry_ready_{}, pending_{}, rebase_{true};
     Option<LazyAnchor> anchor_;
@@ -188,7 +190,11 @@ class LazyRuntime {
     bool focus_invalidated_{};
     Option<Binding> focus_search_;
     Serial next_slot_{1};
-    Vec<Index> prefetched_;
+    struct Prefetch {
+        Index index;
+        Option<LayoutConstraints> constraints;
+    };
+    Vec<Prefetch> prefetched_;
     Option<Index> prefetch_line_;
     Option<Scalar> prefetch_offset_;
     Option<bool> prefetch_forward_;
@@ -454,7 +460,8 @@ class LazyRuntime {
                 prefetch_item_count_ = 1;
             }
         }
-        prefetched_.push(Index(prefetch_item_start_ + prefetched_.len().to_primitive()));
+        const auto index = prefetch_item_start_ + Index(prefetched_.len().to_primitive());
+        prefetched_.push({index, premeasure_constraints(index)});
         if (prefetched_.len() < usize(prefetch_item_count_)) queue_prefetch();
         return signal_->set(++revision_).is_ok();
     }
@@ -688,7 +695,7 @@ class LazyRuntime {
             (void)slot;
             claimed.push(false);
         }
-        const auto add = [&](Index index, LazySlot::Kind kind) -> ComposeResult<empty> {
+        const auto add = [&](Index index, LazySlot::Kind kind, Option<LayoutConstraints> limits = {}) -> ComposeResult<empty> {
             for (auto &slot : slots.as_mut_slice().as_mut_ref()) {
                 if (slot.index != index) continue;
                 if (kind < slot.kind) slot.kind = kind;
@@ -708,7 +715,7 @@ class LazyRuntime {
                 claimed[i] = true;
                 break;
             }
-            slots.push({rstd::move(key), rstd::move(metadata.content_type), index, id, kind});
+            slots.push({rstd::move(key), rstd::move(metadata.content_type), index, id, kind, limits});
             return Ok(empty{});
         };
         auto kept_pins = usize();
@@ -743,9 +750,9 @@ class LazyRuntime {
             return a.index < b.index;
         });
         if (options.prefetch && content.identity() == content_.identity()) {
-            for (const auto index : prefetched_) {
+            for (const auto &item : prefetched_) {
                 if (slots.len() >= usize(options.max_materialized)) break;
-                auto added = add(index, LazySlot::Kind::Prefetched);
+                auto added = add(item.index, LazySlot::Kind::Prefetched, item.constraints);
                 if (added.is_err()) continue;
             }
         }
@@ -755,7 +762,8 @@ class LazyRuntime {
             if (slot.id) continue;
             for (usize i{}; i < slots_in_use_.len(); ++i) {
                 const auto &previous = slots_in_use_[i];
-                if (claimed[i] || previous.content_type != slot.content_type) continue;
+                if (claimed[i] || previous.kind != LazySlot::Kind::Spare ||
+                    previous.content_type != slot.content_type) continue;
                 slot.id = previous.id;
                 claimed[i] = true;
                 break;
@@ -940,13 +948,52 @@ class LazyRuntime {
         }
     }
 
+    auto item_constraints(Index index, Cell cell) const -> Result<LayoutConstraints, UiError> {
+        const auto span_size = grid_ ? Some(slots_.extent(cell.lane, cell.span)) :
+                                      cross_bounded_ ? Some(Scalar(cross_)) : None<Scalar>();
+        const auto span_min = span_size && (grid_ || options_.cross_alignment == Alignment::Stretch) ? *span_size : 0;
+        auto constraints = horizontal_ ? LayoutConstraints{{}, span_size, 0, span_min}
+                                       : LayoutConstraints{span_size, {}, span_min, 0};
+        if (grid_) return Ok(constraints);
+        const auto metadata = content_.describe(index);
+        auto fill = [](Option<Scalar> fraction, Option<Scalar> bound, Scalar padding,
+                       Scalar &min, Option<Scalar> &max) -> bool {
+            if (!fraction) return true;
+            if (!finite(*fraction) || *fraction < 0 || *fraction > 1) return false;
+            if (bound) {
+                min = larger(0, *bound - padding) * *fraction;
+                max = Some(Scalar(min));
+            }
+            return true;
+        };
+        const auto width = parent_bounds_ ? parent_bounds_->max_width : None<Scalar>();
+        const auto height = parent_bounds_ ? parent_bounds_->max_height : None<Scalar>();
+        if (!fill(metadata.fill_parent_max_width, width, options_.padding.left + options_.padding.right,
+                  constraints.min_width, constraints.max_width) ||
+            !fill(metadata.fill_parent_max_height, height, options_.padding.top + options_.padding.bottom,
+                  constraints.min_height, constraints.max_height))
+            return Err(UiError::InvalidValue);
+        return Ok(constraints);
+    }
+
+    auto premeasure_constraints(Index index) -> Option<LayoutConstraints> {
+        if (!geometry_ready_) return None();
+        GridMeasureCursor cursor;
+        auto cell = cell_for(index, cursor);
+        if (cell.is_err()) return None();
+        auto constraints = item_constraints(index, *cell);
+        if (constraints.is_err()) return None();
+        return Some(LayoutConstraints{constraints->max_width, constraints->max_height});
+    }
+
     auto measure(LayoutMeasureContext &context, LayoutConstraints limits) -> Result<Size, UiError> {
         const auto cross_limit = horizontal_ ? limits.max_height : limits.max_width;
         const auto minimum = horizontal_ ? limits.min_height : limits.min_width;
         const auto requested_cross = cross_limit ? *cross_limit : minimum;
         const auto available = larger(0, requested_cross - cross_start() - cross_end());
         const auto parent_bounds = grid_ ? None<LayoutConstraints>() : context.parent_viewport_constraints();
-        if (!geometry_ready_ || cross_ != available || parent_bounds_ != parent_bounds) {
+        if (!geometry_ready_ || cross_ != available || cross_bounded_ != cross_limit.is_some() ||
+            parent_bounds_ != parent_bounds) {
             prefetch_constraints_changed_ = geometry_ready_;
             if (grid_) {
                 if (!cross_limit) return Err(UiError::InvalidValue);
@@ -958,6 +1005,7 @@ class LazyRuntime {
                 slots_ = slots.unwrap();
             }
             cross_ = available;
+            cross_bounded_ = cross_limit.is_some();
             parent_bounds_ = parent_bounds;
             geometry_.reset(options_.estimated_extent, options_.spacing);
             geometry_ready_ = true;
@@ -970,32 +1018,9 @@ class LazyRuntime {
         for (usize child{}; child < rendered_.len(); ++child) {
             auto cell = cell_for(rendered_[child], cursor);
             if (cell.is_err()) return Err(cell.unwrap_err());
-            const auto span_size = grid_ ? Some(slots_.extent(cell->lane, cell->span)) :
-                                          (cross_limit ? Some(Scalar(available)) : None<Scalar>());
-            const Scalar span_min = span_size && (grid_ || options_.cross_alignment == Alignment::Stretch) ? *span_size : 0;
-            auto constraints = horizontal_ ? LayoutConstraints{{}, span_size, 0, span_min}
-                                           : LayoutConstraints{span_size, {}, span_min, 0};
-            if (!grid_) {
-                const auto metadata = content_.describe(rendered_[child]);
-                auto fill = [](Option<Scalar> fraction, Option<Scalar> bound, Scalar padding,
-                               Scalar &min, Option<Scalar> &max) -> bool {
-                    if (!fraction) return true;
-                    if (!finite(*fraction) || *fraction < 0 || *fraction > 1) return false;
-                    if (bound) {
-                        min = larger(0, *bound - padding) * *fraction;
-                        max = Some(Scalar(min));
-                    }
-                    return true;
-                };
-                const auto width = parent_bounds ? parent_bounds->max_width : None<Scalar>();
-                const auto height = parent_bounds ? parent_bounds->max_height : None<Scalar>();
-                if (!fill(metadata.fill_parent_max_width, width, options_.padding.left + options_.padding.right,
-                          constraints.min_width, constraints.max_width) ||
-                    !fill(metadata.fill_parent_max_height, height, options_.padding.top + options_.padding.bottom,
-                          constraints.min_height, constraints.max_height))
-                    return Err(UiError::InvalidValue);
-            }
-            auto child_size = context.measure_child(child, constraints);
+            auto constraints = item_constraints(rendered_[child], *cell);
+            if (constraints.is_err()) return Err(constraints.unwrap_err());
+            auto child_size = context.measure_child(child, *constraints);
             if (child_size.is_err()) return Err(child_size.unwrap_err());
             auto child_id = context.child_id(child);
             if (child_id.is_err()) return Err(child_id.unwrap_err());
@@ -1122,12 +1147,25 @@ auto make_lazy_layout(LazyContent content, LazyOptions options, bool horizontal,
             if (slots.is_err()) return Err(slots.unwrap_err());
             for (const auto &slot : *slots) {
                 Vec<Element> contents;
-                if (slot.kind != LazySlot::Kind::Spare) {
+                if (slot.kind == LazySlot::Kind::Spare) {
+                    auto item = component<LazyItemTag>(Key(slot.key), [](CompositionContext &) -> ComposeResult<Element> {
+                        return Ok(Element{});
+                    }, source, {}, true);
+                    auto data = rstd::rc::make_rc<ElementData>(item.data());
+                    data.get()->retain_native = true;
+                    contents.push(Element(rstd::move(data)));
+                } else {
                     const auto index = slot.index;
-                    contents.push(component<LazyItemTag>(Key(slot.key), [content, index](CompositionContext &) {
+                    auto item = component<LazyItemTag>(Key(slot.key), [content, index](CompositionContext &) {
                         return content.build(index);
                     }, source, Rc<ComponentParameters>(new LazyItemParameters(content, index)),
-                    slot.kind == LazySlot::Kind::Prefetched));
+                    slot.kind == LazySlot::Kind::Prefetched);
+                    if (slot.kind == LazySlot::Kind::Prefetched) {
+                        auto data = rstd::rc::make_rc<ElementData>(item.data());
+                        data.get()->premeasure = slot.premeasure;
+                        item = Element(rstd::move(data));
+                    }
+                    contents.push(rstd::move(item));
                 }
                 auto wrapper = stack(rstd::move(contents), source).key(Key(slot.id));
                 if (!slot.placed())

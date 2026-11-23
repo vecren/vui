@@ -304,10 +304,16 @@ auto UiDocument::publish(PreparedEdit edit) -> Result<UiCommitReport, UiError> {
         auto node = resolve(id); node->parent = None(); ++node->relation_generation;
     }
     for (auto &entry : edit.entries_) {
+        const bool measured = entry.relation_changed && !entry.created && resolve(entry.id)->premeasured;
         if (entry.relation_changed && !entry.created) remount(entry.id, edit.preserved_.as_slice());
         if (entry.previous_style.is_some()) style_changed(entry.id, *resolve(entry.id), *entry.previous_style);
-        if (entry.created || !entry.states.is_empty() || !entry.patches.is_empty() || entry.children_owner.is_some() || entry.text.is_some() || entry.image.is_some() || entry.axes.is_some() || entry.children_changed || entry.relation_changed)
+        if (entry.created || !entry.states.is_empty() || !entry.patches.is_empty() || entry.children_owner.is_some() || entry.text.is_some() || entry.image.is_some() || entry.axes.is_some() || entry.children_changed || (entry.relation_changed && !measured))
             changed(true, Some(entry.id));
+        else if (measured) {
+            if (auto parent = resolve(entry.id)->parent; parent) dirty_measure(*parent);
+            layout_dirty_ = true;
+            changed(false, Some(entry.id));
+        }
         if (entry.updated && !entry.created) ++report.updated;
     }
     for (auto id : edit.retired_) changed(true, Some(id));

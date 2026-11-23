@@ -835,6 +835,7 @@ class UiDocument {
     }
     auto patch_style(UiId id, const NodeStylePatch &patch) -> Result<empty, UiError>;
     auto set_layout(UiId id, LayoutStyle value) -> Result<empty, UiError>;
+    auto premeasure_detached(UiId id, LayoutConstraints constraints) -> Result<Size, UiError>;
     auto set_background(UiId id, Color value, Scalar radius = 0) -> Result<empty, UiError>;
     auto set_transform(UiId id, Transform value) -> Result<empty, UiError>;
     auto set_opacity(UiId id, Scalar value) -> Result<empty, UiError>;
