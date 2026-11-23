@@ -1,6 +1,9 @@
 export module vui.examples.gallery:canvas_workload;
+import :canvas_animation;
 import :canvas_cube;
 import :canvas_fourier;
+import :canvas_gradient;
+import :canvas_painting;
 import :canvas_recording;
 import :style;
 import :parts;
@@ -10,7 +13,7 @@ import rstd;
 
 namespace examples::gallery::detail {
 constexpr Index canvas_loads[]{256, 1024, 4096};
-enum class CanvasScene { Particles, Fourier, Cube };
+enum class CanvasScene { Particles, Fourier, Cube, Animation, Gradient, Painting };
 
 struct CanvasOptions {
     Index particles{canvas_loads[1]};
@@ -18,6 +21,9 @@ struct CanvasOptions {
     CanvasScene scene{CanvasScene::Particles};
     FourierOptions epicycles;
     CubeOptions cube;
+    CanvasAnimationOptions animation;
+    CanvasGradientOptions gradient;
+    CanvasPaintingOptions painting;
     friend auto operator==(CanvasOptions, CanvasOptions) -> bool = default;
 };
 
@@ -190,26 +196,37 @@ auto canvas_workload(cx::Borrowed<state::Cell<CanvasOptions>> settings,
     if (read.is_err()) return Err(read.unwrap_err());
     const auto options = read->value();
     constexpr auto gap = CanvasLayout::toolbar_gap;
-    constexpr Scalar scenes_width = 240;
-    const auto compact = width < 540;
-    const auto selector_width = rstd::min(scenes_width, width);
-    const auto scene_width = rstd::cmp::max(Scalar(0), (selector_width - 2 * gap) / 3);
-    const auto available = compact ? width : width - selector_width - gap;
-    auto button_width = [available](unsigned count) {
-        return rstd::cmp::max(Scalar(0), rstd::min(Scalar(84), (available - (count - 1) * gap) / count));
+    const auto compact = width < 510;
+    const auto columns = compact ? 3 : 6;
+    const auto selector_width = rstd::min(Scalar(540), width);
+    const auto scene_width = rstd::cmp::max(Scalar(0), (selector_width - (columns - 1) * gap) / columns);
+    auto button_width = [width](unsigned count) {
+        return rstd::cmp::max(Scalar(0), rstd::min(Scalar(84), (width - (count - 1) * gap) / count));
+    };
+    auto apply = [settings](auto update) {
+        auto updated = state::read(settings->value()).unwrap().value();
+        update(updated);
+        settings->set(updated).unwrap();
     };
     auto change = [&](ref<str> title, Scalar extent, bool selected, auto update) {
-        return workload_button(title, extent, selected, [settings, update] {
-            auto updated = state::read(settings->value()).unwrap().value();
-            update(updated);
-            settings->set(updated).unwrap();
-        });
+        return workload_button(title, extent, selected, [apply, update] { apply(update); });
     };
     auto select = [&](ref<str> title, CanvasScene scene) {
         return change(title, scene_width, options.scene == scene, [scene](auto &value) { value.scene = scene; });
     };
-    auto selector = cx::row({select("Particles"_str, CanvasScene::Particles),
-        select("Fourier"_str, CanvasScene::Fourier), select("Cube"_str, CanvasScene::Cube)}).gap(gap);
+    auto particles = select("Particles"_str, CanvasScene::Particles);
+    auto fourier = select("Fourier"_str, CanvasScene::Fourier);
+    auto cube = select("Cube"_str, CanvasScene::Cube);
+    auto animation = select("Animation"_str, CanvasScene::Animation);
+    auto gradient = select("Gradient"_str, CanvasScene::Gradient);
+    auto painting = select("Painting"_str, CanvasScene::Painting);
+    auto selector = compact
+        ? cx::column({
+            cx::row({rstd::move(particles), rstd::move(fourier), rstd::move(cube)}).gap(gap),
+            cx::row({rstd::move(animation), rstd::move(gradient), rstd::move(painting)}).gap(gap),
+          }).gap(gap)
+        : cx::row({rstd::move(particles), rstd::move(fourier), rstd::move(cube),
+                   rstd::move(animation), rstd::move(gradient), rstd::move(painting)}).gap(gap);
     auto playback = [&](bool playing, Scalar width, auto toggle) {
         return change(playing ? "Pause"_str : "Run"_str, width, false, toggle);
     };
@@ -252,9 +269,51 @@ auto canvas_workload(cx::Borrowed<state::Cell<CanvasOptions>> settings,
         scene = cube_canvas(options.cube, recording);
         break;
     }
+    case CanvasScene::Animation: {
+        const auto button = rstd::min(Scalar(84), rstd::cmp::max(Scalar(0), width * .22));
+        const auto damping = rstd::format("Damping {:.0f}", options.animation.damping);
+        constexpr Scalar label_width = 82;
+        const auto track = rstd::min(Scalar(156), rstd::cmp::max(Scalar(0), width - 2 * button - label_width - 3 * gap));
+        controls = cx::row({
+            change("Move"_str, button, false, [](auto &value) { value.animation.target = (value.animation.target + 1) % 3; }),
+            playback(options.animation.playing, button, [](auto &value) { value.animation.playing = !value.animation.playing; }),
+            label(damping, 13, muted).style(label_style().width(label_width).build()),
+            damping_slider(options.animation.damping, [apply](Scalar damping) {
+                apply([damping](auto &value) { value.animation.damping = damping; });
+            }).style(NodeStyleBuilder{}.width(track).height(CanvasLayout::button_height).build()),
+        }).gap(gap);
+        scene = animation_canvas(options.animation);
+        break;
     }
-    auto groups = cx::elements({rstd::move(selector), rstd::move(controls)});
-    auto toolbar = (compact ? cx::column(rstd::move(groups)) : cx::row(rstd::move(groups))).gap(gap);
+    case CanvasScene::Gradient: {
+        const auto button = button_width(3);
+        controls = cx::row({
+            change("sRGB"_str, button, !options.gradient.perceptual, [](auto &value) { value.gradient.perceptual = false; }),
+            change("Oklab"_str, button, options.gradient.perceptual, [](auto &value) { value.gradient.perceptual = true; }),
+            change("Rotate 45°"_str, button, false, [](auto &value) { value.gradient.turns = (value.gradient.turns + 1) % 8; }),
+        }).gap(gap);
+        scene = gradient_canvas(options.gradient);
+        break;
+    }
+    case CanvasScene::Painting: {
+        const auto button = button_width(5);
+        constexpr ref<str> brush_names[painting_brush_count]{"Brush S"_str, "Brush M"_str, "Brush L"_str};
+        auto actions = cx::elements({
+            change("Solid"_str, button, !options.painting.dashed, [](auto &value) { value.painting.dashed = false; }),
+            change("Dashed"_str, button, options.painting.dashed, [](auto &value) { value.painting.dashed = true; }),
+            change(brush_names[options.painting.brush], button, false, [](auto &value) {
+                value.painting.brush = (value.painting.brush + 1) % painting_brush_count;
+            }),
+            change("Undo"_str, button, false, [](auto &value) { ++value.painting.undo; }),
+            change("Clear"_str, button, false, [](auto &value) { ++value.painting.clear; }),
+        });
+        if (width >= 560) actions.push(label("Shift locks axis"_str, 13, muted));
+        controls = cx::row(rstd::move(actions)).gap(gap);
+        scene = painting_canvas(options.painting);
+        break;
+    }
+    }
+    auto toolbar = cx::column({rstd::move(selector), rstd::move(controls)}).gap(gap);
     return Ok(layout_part(CanvasLayout{}, cx::elements({rstd::move(toolbar), rstd::move(scene)}))
         .style(fill().hit_self(false).build()));
 }

@@ -67,8 +67,8 @@ struct CanvasProfile {
             case Gallery::CanvasScene::Fourier: return String::make("scene=fourier"_str);
             case Gallery::CanvasScene::Cube: return String::make("scene=cube"_str);
             case Gallery::CanvasScene::Particles: return rstd::format("particles={}", launch.particles);
+            default: return String{};
             }
-            return String{};
         }();
         rstd::io::println("canvas {} extent={}x{} items={} batches={} instance_bytes={} surface_culled={} clip_culled={}",
             workload, extent.width, extent.height, draws->items, draws->batches, draws->instance_bytes,

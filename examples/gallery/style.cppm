@@ -85,6 +85,33 @@ auto control_finish(cx::Element control, bool highlight = true) -> cx::Element {
     return rstd::move(control).behavior(cx::Key{"control-finish"_str}, ControlFinish{highlight});
 }
 
+struct SliderTrackPaint {
+    UiSession &session;
+
+    auto paint(PaintContext &context) -> Result<empty, UiError> {
+        auto state = Slider::status(session.document(), context.id());
+        if (state.is_err()) return Err(state.unwrap_err());
+        auto &canvas = context.canvas();
+        const auto size = context.size();
+        const auto radius = rstd::min(Scalar(10), rstd::min(size.width, size.height) / 2);
+        if (radius <= 0) return Ok(empty{});
+        const auto x = radius + (size.width - 2 * radius) * state->ratio;
+        const auto y = size.height / 2;
+        const auto thickness = rstd::min(Scalar(6), radius);
+        canvas.fill(Shape::capsule({0, y - thickness / 2, size.width, thickness}), selected_surface);
+        canvas.fill(Shape::capsule({0, y - thickness / 2, x, thickness}), muted);
+        if (session.input().focused() == Some(context.id())) {
+            const auto inset = radius * .88;
+            canvas.fill(Shape::ellipse({x - inset, y - inset, 2 * inset, 2 * inset}), panel_surface);
+            canvas.border(Shape::ellipse({x - radius, y - radius, 2 * radius, 2 * radius}), radius - inset,
+                foreground);
+        }
+        const auto grip = radius * .7;
+        canvas.fill(Shape::ellipse({x - grip, y - grip, 2 * grip, 2 * grip}), foreground);
+        return Ok(empty{});
+    }
+};
+
 auto divider() -> cx::Element {
     return cx::native(LayoutKind::Leaf).style(NodeStyleBuilder{}.horizontal(Alignment::Stretch)
         .height(1).background(edge).hit_test_visible(false).build());

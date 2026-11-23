@@ -35,33 +35,6 @@ struct PowerLayout {
     }
 };
 
-struct PowerPaint {
-    UiSession &session;
-
-    auto paint(PaintContext &context) -> Result<empty, UiError> {
-        auto state = Slider::status(session.document(), context.id());
-        if (state.is_err()) return Err(state.unwrap_err());
-        auto &canvas = context.canvas();
-        const auto size = context.size();
-        const auto radius = rstd::min(Scalar(10), rstd::min(size.width, size.height) / 2);
-        if (radius <= 0) return Ok(empty{});
-        const auto x = radius + (size.width - 2 * radius) * state->ratio;
-        const auto y = size.height / 2;
-        const auto thickness = rstd::min(Scalar(6), radius);
-        canvas.fill(Shape::capsule({0, y - thickness / 2, size.width, thickness}), selected_surface);
-        canvas.fill(Shape::capsule({0, y - thickness / 2, x, thickness}), muted);
-        if (session.input().focused() == Some(context.id())) {
-            const auto inset = radius * .88;
-            canvas.fill(Shape::ellipse({x - inset, y - inset, 2 * inset, 2 * inset}), panel_surface);
-            canvas.border(Shape::ellipse({x - radius, y - radius, 2 * radius, 2 * radius}), radius - inset,
-                foreground);
-        }
-        const auto grip = radius * .7;
-        canvas.fill(Shape::ellipse({x - grip, y - grip, 2 * grip, 2 * grip}), foreground);
-        return Ok(empty{});
-    }
-};
-
 struct InputLayout {
     static auto count_width(Scalar width) -> Scalar { return rstd::min(Scalar(92), width * .36); }
     static auto gap(Scalar width) -> Scalar { return rstd::min(Scalar(10), width * .06); }
@@ -107,7 +80,7 @@ auto mount_power(UiSession &session, UiId parent) -> Result<empty, UiError> {
     if (value.is_err()) return Err(value.unwrap_err());
     auto initialized = Slider::set_value(ui, control, 60);
     if (initialized.is_err()) return initialized;
-    auto paint = ui.install_paint(control, PowerPaint{session});
+    auto paint = ui.install_paint(control, SliderTrackPaint{session});
     if (paint.is_err()) return paint;
     auto changed = Slider::on_changed(ui, control, [&ui, control, text = value.unwrap()](Scalar value) {
         auto number = rstd::format("{}%", unsigned(value));
