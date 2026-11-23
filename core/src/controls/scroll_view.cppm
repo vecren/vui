@@ -28,6 +28,8 @@ class ScrollDeltaLease {
 
   public:
     auto write(Point offset, const ViewportMetrics &metrics) const -> Result<empty, UiError>;
+    // A deferred request reports a remainder here once layout confirms its boundary.
+    auto reached_boundary(Point remaining, const ViewportMetrics &metrics) const -> Result<empty, UiError>;
 };
 
 struct ScrollDeltaProgress {
@@ -82,6 +84,13 @@ class ScrollInteraction {
     Option<Box<ScrollDeltaCompletion>> pending_delta_;
     Point decay_position_;
     Point pending_decay_delta_;
+    Serial pending_decay_time_{};
+    struct EdgeSpring {
+        Axis axis;
+        bool trailing;
+    };
+    Option<EdgeSpring> edge_spring_;
+    Scalar edge_pull_{};
     auto ui() -> UiDocument & {return session_.document();}
     static auto bounded(Scalar value,Scalar maximum) -> Scalar {return value<0 ? 0 : value>maximum ? maximum : value;}
     static auto bounded(Point value,Point maximum) -> Point {return {bounded(value.x,maximum.x),bounded(value.y,maximum.y)};}
@@ -94,8 +103,23 @@ class ScrollInteraction {
     void track(InputEvent event,const ViewportMetrics &metrics,Point actual,bool measured);
     auto write(Point value,const ViewportMetrics &metrics) -> bool;
     auto measured_scroll() const -> bool {
-        return resolve_delta_ && style_.motion.movement == ScrollMovement::Clamped;
+        return resolve_delta_ && (style_.motion.movement == ScrollMovement::Clamped ||
+                                  style_.axes.horizontal != style_.axes.vertical);
     }
+    auto measured_elastic() const -> bool { return measured_scroll() && style_.motion.movement == ScrollMovement::Elastic; }
+    auto along(Point value) const -> Scalar { return style_.axes.horizontal ? value.x : value.y; }
+    auto along(Size value) const -> Scalar { return style_.axes.horizontal ? value.width : value.height; }
+    auto main_axis(Scalar value) const -> Point { return style_.axes.horizontal ? Point{value, 0} : Point{0, value}; }
+    auto overscroll(const ViewportMetrics &metrics) const -> Scalar {
+        const auto offset = along(metrics.offset);
+        return offset - bounded(offset, along(metrics.maximum));
+    }
+    auto rubber(Scalar delta, Scalar extent) const -> Scalar;
+    auto recover_pull(const ViewportMetrics &metrics) const -> Scalar;
+    auto write_pull(Scalar pull, const ViewportMetrics &metrics) -> bool;
+    auto measured_drag(Point delta, const ViewportMetrics &metrics) -> bool;
+    auto reached_boundary(Point remaining, const ViewportMetrics &metrics, Serial time) -> bool;
+    auto sample_edge_spring(const ViewportMetrics &metrics, Serial time) -> bool;
     auto resolve_delta(Point delta, const ViewportMetrics &metrics) -> Result<Option<ScrollDeltaResolution>, UiError>;
     void spring(Axis &axis,Scalar value,Scalar velocity,Scalar target,Serial started) {
         axis={Phase::Spring,{value,velocity},target,started};

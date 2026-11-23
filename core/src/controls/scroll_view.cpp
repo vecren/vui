@@ -12,6 +12,16 @@ auto ScrollDeltaLease::write(Point offset, const ViewportMetrics &metrics) const
     return Ok(empty{});
 }
 
+auto ScrollDeltaLease::reached_boundary(Point remaining, const ViewportMetrics &metrics) const -> Result<empty, UiError> {
+    auto owner = owner_.upgrade();
+    if (!owner || (*owner)->gesture_ != gesture_ || !(*owner)->lease_.active() || !(*owner)->measured_elastic())
+        return Ok(empty{});
+    auto &interaction = *owner->get();
+    if (!interaction.reached_boundary(remaining, metrics, interaction.pending_decay_time_))
+        return Err(interaction.error_.unwrap_or(UiError::PropertyOwned));
+    return Ok(empty{});
+}
+
 ScrollInteraction::~ScrollInteraction() {
     if (animation_) *animation_->status.get() = ScrollAnimationStatus::Cancelled;
 }
@@ -47,14 +57,67 @@ auto ScrollInteraction::drag_value(Point position,const ViewportMetrics &metrics
     auto raw=masked({origin_.x-(position.x-anchor_.x),origin_.y-(position.y-anchor_.y)});
     auto result=bounded(raw,metrics.maximum);
     if (style_.motion.movement==ScrollMovement::Elastic) {
-        auto rubber=[&](Scalar delta,Scalar extent) {
-            if (extent<=0) return Scalar(0);
-            auto amount=(1-1/(1+__builtin_fabs(delta)*.55/extent))*extent*style_.motion.rubber_scale;
-            return delta<0 ? -amount : amount;
-        };
-        result.x+=rubber(raw.x-result.x,metrics.viewport.width);result.y+=rubber(raw.y-result.y,metrics.viewport.height);
+        result.x += rubber(raw.x - result.x, metrics.viewport.width);
+        result.y += rubber(raw.y - result.y, metrics.viewport.height);
     }
     return masked(result);
+}
+
+auto ScrollInteraction::rubber(Scalar delta, Scalar extent) const -> Scalar {
+    if (extent <= 0) return 0;
+    const auto amount = (1 - 1 / (1 + __builtin_fabs(delta) * .55 / extent)) * extent * style_.motion.rubber_scale;
+    return delta < 0 ? -amount : amount;
+}
+
+auto ScrollInteraction::recover_pull(const ViewportMetrics &metrics) const -> Scalar {
+    const auto extent = along(metrics.viewport);
+    const auto capacity = extent * style_.motion.rubber_scale;
+    if (capacity <= 0) return 0;
+    const auto stretch = overscroll(metrics);
+    const auto ratio = bounded(__builtin_fabs(stretch) / capacity, .99);
+    return (stretch < 0 ? -1 : 1) * extent * ratio / (.55 * (1 - ratio));
+}
+
+auto ScrollInteraction::write_pull(Scalar pull, const ViewportMetrics &metrics) -> bool {
+    edge_pull_ = pull;
+    const auto extent = along(metrics.viewport);
+    const auto offset = bounded(along(metrics.offset), along(metrics.maximum)) + rubber(pull, extent);
+    return offset == along(metrics.offset) || write(main_axis(offset), metrics);
+}
+
+auto ScrollInteraction::measured_drag(Point delta, const ViewportMetrics &before) -> bool {
+    if (!finite(delta.x) || !finite(delta.y)) { error_ = Some(UiError::InvalidValue); return false; }
+    auto metrics = before;
+    if (measured_elastic()) {
+        const auto stretch = overscroll(metrics);
+        if (stretch) {
+            if (!edge_pull_ || (edge_pull_ > 0) != (stretch > 0)) edge_pull_ = recover_pull(metrics);
+            const auto next = edge_pull_ + along(delta);
+            if (!next || (next > 0) == (edge_pull_ > 0)) return write_pull(next, metrics);
+            if (!write_pull(0, metrics)) return false;
+            metrics.offset = bounded(metrics.offset, metrics.maximum);
+            delta = main_axis(next);
+        } else {
+            edge_pull_ = 0;
+        }
+    }
+    pending_delta_ = None();
+    auto result = resolve_delta(delta, metrics);
+    if (result.is_err()) { error_ = Some(result.unwrap_err()); return false; }
+    if (auto resolved = result.unwrap(); resolved) {
+        if (resolved->after_layout) {
+            pending_delta_ = rstd::move(resolved->after_layout);
+            return true;
+        }
+        const auto moved = resolved->consumed;
+        const Point offset{metrics.offset.x + moved.x, metrics.offset.y + moved.y};
+        if (moved != Point{} && !write(offset, metrics)) return false;
+        metrics.offset = offset;
+        const Point remaining{delta.x - moved.x, delta.y - moved.y};
+        return !measured_elastic() || reached_boundary(remaining, metrics, 0);
+    }
+    const auto offset = bounded({metrics.offset.x + delta.x, metrics.offset.y + delta.y}, metrics.maximum);
+    return offset == metrics.offset || write(offset, metrics);
 }
 
 void ScrollInteraction::track(InputEvent event,const ViewportMetrics &metrics,Point actual,bool measured) {
@@ -189,6 +252,18 @@ void ScrollInteraction::begin_motion(const ViewportMetrics &metrics,Point veloci
     begin_axis(y_,metrics.offset.y,velocity_.y,metrics.maximum.y,style_.axes.vertical,started);
     if (x_.phase==Phase::Rest && y_.phase==Phase::Rest) {stop(true,false);return;}
     if (!acquire()) {stop(true,false);return;}mode_=Mode::Animate;rebase_=false;
+    if (measured_elastic()) {
+        const auto stretch = overscroll(metrics);
+        if (stretch) {
+            const auto extent = along(metrics.viewport);
+            const auto pull = edge_pull_ ? edge_pull_ : recover_pull(metrics);
+            const auto slope = extent > 0 ? 1 + __builtin_fabs(pull) * .55 / extent : 1;
+            Axis axis;
+            spring(axis, stretch, along(velocity_) * .55 * style_.motion.rubber_scale / (slope * slope), 0, started);
+            edge_spring_ = Some(EdgeSpring{axis, stretch > 0});
+        }
+        edge_pull_ = 0;
+    }
     decay_position_ = metrics.offset;
     wake();
 }
@@ -226,6 +301,42 @@ auto ScrollInteraction::sample_axis(Axis &axis,Scalar maximum,Serial time) -> Sc
     return axis.initial;
 }
 
+auto ScrollInteraction::sample_edge_spring(const ViewportMetrics &metrics, Serial time) -> bool {
+    auto &edge = *edge_spring_;
+    const auto offset = along(metrics.offset);
+    const auto base = edge.trailing ? along(metrics.maximum) : 0;
+    if (edge.trailing ? offset < base - 1e-6 : offset > base + 1e-6) {
+        edge.axis.phase = Phase::Rest;
+        return true;
+    }
+    const auto sample = sample_axis(edge.axis, 0, time);
+    const auto stretch = edge.trailing ? sample.value : -sample.value;
+    if (stretch < 0) edge.axis.phase = Phase::Rest;
+    const auto capacity = .99 * along(metrics.viewport) * style_.motion.rubber_scale;
+    const auto position = base + (edge.trailing ? 1 : -1) * bounded(stretch, capacity);
+    velocity_ = edge.axis.phase == Phase::Rest ? Point{} : main_axis(sample.velocity);
+    return position == offset || write(main_axis(position), metrics);
+}
+
+auto ScrollInteraction::reached_boundary(Point remaining, const ViewportMetrics &metrics, Serial time) -> bool {
+    const auto delta = along(remaining);
+    if (!delta) return true;
+    if (mode_ == Mode::Drag) return write_pull(delta, metrics);
+    if (mode_ != Mode::Animate) return true;
+    const auto &decay = style_.axes.horizontal ? x_ : y_;
+    if (decay.phase != Phase::Decay) return true;
+    const auto elapsed = time >= decay.started ? time - decay.started : 0;
+    const auto edge = along(decay_position_) - delta;
+    auto seconds = (edge - decay.initial.value) / decay.initial.velocity;
+    const auto drag = -__builtin_log(style_.motion.deceleration_rate);
+    if (drag > 0) seconds = -__builtin_log1p(-bounded(seconds * drag, 1)) / drag;
+    const auto hit = static_cast<Serial>(bounded(seconds * 1e9, Scalar(elapsed)));
+    Axis axis;
+    spring(axis, 0, decay_sample(decay, hit).velocity, 0, decay.started + hit);
+    edge_spring_ = Some(EdgeSpring{axis, delta > 0});
+    return sample_edge_spring(metrics, time);
+}
+
 auto ScrollInteraction::sample_measured_decay(MotionContext &context, const ViewportMetrics &metrics)
     -> Result<MotionStatus, MotionError> {
     const auto time = context.now_ns();
@@ -237,6 +348,10 @@ auto ScrollInteraction::sample_measured_decay(MotionContext &context, const View
         stop(true, false, false);
         return Ok(MotionStatus::Idle);
     };
+    if (edge_spring_) {
+        if (!sample_edge_spring(metrics, time) || edge_spring_->axis.phase == Phase::Rest) return finish();
+        return tick();
+    }
     if (pending_delta_) {
         const auto progress = (**pending_delta_)();
         if (!progress.settled) return tick();
@@ -260,12 +375,20 @@ auto ScrollInteraction::sample_measured_decay(MotionContext &context, const View
         if (resolved->after_layout) {
             pending_delta_ = rstd::move(resolved->after_layout);
             pending_decay_delta_ = delta;
+            pending_decay_time_ = time;
             return tick();
         }
         const auto moved = resolved->consumed;
         const Point offset{metrics.offset.x + moved.x, metrics.offset.y + moved.y};
         if (moved != Point{} && !write(offset, metrics)) return finish();
-        if (moved != delta) return finish();
+        if (moved != delta) {
+            if (!measured_elastic()) return finish();
+            auto at_edge = metrics;
+            at_edge.offset = offset;
+            if (!reached_boundary({delta.x - moved.x, delta.y - moved.y}, at_edge, time) || !edge_spring_)
+                return finish();
+            return tick();
+        }
     } else {
         const auto offset = bounded({metrics.offset.x + delta.x, metrics.offset.y + delta.y}, metrics.maximum);
         if (offset != metrics.offset && !write(offset, metrics)) return finish();
@@ -325,6 +448,8 @@ void ScrollInteraction::stop(bool clamp,bool release,bool request) {
     bool owned=mode_!=Mode::Idle || lease_.active() || boundary_owned_;auto pointer=pointer_;pointer_=None();mode_=Mode::Idle;velocity_={};
     if (lease_.active()) ui().release_presentation(lease_);else lease_.revoke();
     pending_delta_ = None();
+    edge_spring_ = None();
+    edge_pull_ = 0;
     ++gesture_;
     if (clamp && owned && ui().valid(viewport_)) {ui().set_viewport_boundary(viewport_,ViewportBoundary::Clamped);boundary_owned_=false;}
     if (release && pointer.is_some()) {auto key=*pointer;session_.input().release_input(slice<PointerKey>::from_raw_parts(&key,usize(1)));}
@@ -373,20 +498,14 @@ auto ScrollInteraction::handle(EventContext &context,const RoutedEvent &event) -
         rebase_ = false;
     }
     if (event.input.type==EventType::PointerMove) {
-        auto value = drag_value(local->position, *metrics);
+        auto value = metrics->offset;
         if (measured) {
-            const Point delta{last_local_.x - local->position.x, last_local_.y - local->position.y};
-            pending_delta_ = None();
-            auto result = resolve_delta(delta, *metrics);
-            if (result.is_err()) { error_ = Some(result.unwrap_err()); stop(true, false); return true; }
-            if (auto resolved = result.unwrap(); resolved) {
-                value = {metrics->offset.x + resolved->consumed.x, metrics->offset.y + resolved->consumed.y};
-                pending_delta_ = rstd::move(resolved->after_layout);
-            } else {
-                value = bounded(masked({metrics->offset.x + delta.x, metrics->offset.y + delta.y}), metrics->maximum);
-            }
+            const auto delta = masked({last_local_.x - local->position.x, last_local_.y - local->position.y});
+            if (!measured_drag(delta, *metrics)) { stop(true, false); return true; }
+        } else {
+            value = drag_value(local->position, *metrics);
+            if (value != metrics->offset && !write(value, *metrics)) { stop(true, false); return true; }
         }
-        if (value != metrics->offset && !write(value, *metrics)) { stop(true, false); return true; }
         track(rstd::move(local).unwrap(), *metrics, value, measured);
         last_local_ = inverse_->map(event.input.position);
     } else {

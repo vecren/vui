@@ -244,6 +244,9 @@ class LazyRuntime {
     auto cross(Size value) const -> Scalar { return horizontal_ ? value.height : value.width; }
     auto point(Scalar value) const -> Point { return horizontal_ ? Point{value, 0} : Point{0, value}; }
     auto axis(Point value) const -> Scalar { return horizontal_ ? value.x : value.y; }
+    auto scroll_offset(const ViewportMetrics &metrics) const -> Scalar {
+        return smaller(larger(0, axis(metrics.offset)), axis(metrics.maximum));
+    }
     auto physical_offset(Scalar logical, Scalar maximum) const -> Point {
         return point(options_.reverse_layout ? maximum - logical : logical);
     }
@@ -529,16 +532,17 @@ class LazyRuntime {
                            : Rect{across, along, place.cross, place.extent};
     }
 
-    auto publish_geometry(Size viewport, Scalar physical, Scalar maximum) -> Result<empty, UiError> {
+    auto publish_geometry(Size viewport, Scalar physical, Scalar stretch, Scalar maximum) -> Result<empty, UiError> {
         if (item_window_revision_) return Ok(empty{});
         auto visible = rstd::rc::make_rc<Vec<LazyVisibleItemInfo>>();
         Vec<LazyAnimatedItem> animated;
-        LazyItemViewport animation_viewport{viewport, point(-physical), {}, {}, horizontal_, options_.reverse_layout};
+        const auto displayed = physical + stretch;
+        LazyItemViewport animation_viewport{viewport, point(-displayed), {}, {}, horizontal_, options_.reverse_layout};
         const auto viewport_extent = main(viewport);
         for (usize child{}; child < placements_.len(); ++child) {
             auto bounds = item_bounds(child);
             auto &position = horizontal_ ? bounds.x : bounds.y;
-            position -= physical;
+            position -= displayed;
             if (position >= viewport_extent || position + placements_[child].extent <= 0) continue;
             const auto index = rendered_[child];
             const auto &placement = placements_[child];
@@ -608,7 +612,8 @@ class LazyRuntime {
         const auto viewport = main(metrics.viewport);
         if (!finite(amount) || viewport <= 0) return Ok(None<ScrollDeltaResolution>());
         const auto maximum = axis(metrics.maximum);
-        const auto logical = options_.reverse_layout ? maximum - axis(metrics.offset) : axis(metrics.offset);
+        const auto position = scroll_offset(metrics);
+        const auto logical = options_.reverse_layout ? maximum - position : position;
         auto step = scroll_step(logical, amount, viewport);
         if (!step.measure) return Ok(Some(ScrollDeltaResolution{point(oriented(step.consumed)), {}}));
         if (scroll_delta_ && scroll_delta_->progress.expired()) scroll_delta_ = None();
@@ -657,7 +662,14 @@ class LazyRuntime {
             progress->get()->consumed.y += amount.y;
         }
         if (!step.measure) {
-            finish_scroll_delta(__builtin_fabs(scroll_delta_->remaining) > 1e-6);
+            const auto remaining = scroll_delta_->remaining;
+            const bool boundary = __builtin_fabs(remaining) > 1e-6;
+            if (boundary && scroll_delta_->lease) {
+                metrics.offset = physical_offset(logical, axis(metrics.maximum));
+                auto stretched = scroll_delta_->lease->reached_boundary(point(oriented(remaining)), metrics);
+                if (stretched.is_err()) return stretched;
+            }
+            finish_scroll_delta(boundary);
         } else if ((!step.consumed && step.measure == scroll_delta_->measure) || scroll_delta_->probes == max_scroll_probes) {
             finish_scroll_delta();
         } else {
@@ -727,7 +739,7 @@ class LazyRuntime {
         const Scalar viewport = main(metrics->viewport);
         if (viewport <= 0) return Ok(empty{});
         const Scalar maximum = axis(metrics->maximum);
-        const Scalar current = axis(metrics->offset);
+        const Scalar current = scroll_offset(*metrics);
         auto logical = options_.reverse_layout ? maximum - current : current;
         Scalar rebase_delta{};
         const auto old_line_count = line_count();
@@ -761,13 +773,18 @@ class LazyRuntime {
         rebase_ = false;
         auto consumed = consume_pending_scroll(logical, viewport, *metrics);
         if (consumed.is_err()) return consumed;
+        Scalar stretch{};
+        if (metrics->boundary == ViewportBoundary::Unclamped) {
+            auto settled = ScrollView::metrics(*document_, scroll_);
+            if (settled.is_ok()) stretch = axis(settled->offset) - scroll_offset(*settled);
+        }
         const auto first = geometry_.line_at(larger(0, logical), line_count());
         auto window = request_window(first, logical, viewport, scroll_delta_ ? scroll_delta_->measure : None<Index>());
         if (window.is_err()) return window;
         if (scroll_delta_ && !item_window_revision_) finish_scroll_delta();
         item_rebase_delta_ += rebase_delta;
         if (old_line_count != line_count()) return document_->invalidate_layout(node_);
-        auto published = publish_geometry(metrics->viewport, axis(physical_offset(logical, maximum)), maximum);
+        auto published = publish_geometry(metrics->viewport, axis(physical_offset(logical, maximum)), stretch, maximum);
         if (published.is_err()) return published;
         auto prefetch = update_prefetch(logical);
         if (prefetch.is_err()) return prefetch;
