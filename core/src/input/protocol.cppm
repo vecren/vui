@@ -34,10 +34,13 @@ enum class EventType {
     InputReset,
     SemanticAction
 };
-enum class SemanticsAction { Activate, Increment, Decrement, ScrollForward, ScrollBackward, Focus };
+enum class SemanticsAction { Activate, Increment, Decrement, ScrollForward, ScrollBackward, Focus, ScrollToPosition };
+struct SemanticsPosition {
+    Index row{}, column{};
+};
 constexpr auto semantics_action_mask(SemanticsAction action) -> unsigned {
     auto index = static_cast<unsigned>(action);
-    return index <= static_cast<unsigned>(SemanticsAction::Focus) ? 1u << index : 0u;
+    return index <= static_cast<unsigned>(SemanticsAction::ScrollToPosition) ? 1u << index : 0u;
 }
 enum class InputDelivery { EverySample, LatestWithHistory };
 enum class RoutePhase { Capture, Target, Bubble };
@@ -295,6 +298,7 @@ struct InputEvent {
     Serial activation{};
     Option<bool> window_focused;
     SemanticsAction semantic_action{};
+    Option<SemanticsPosition> semantic_position;
 };
 struct RoutedEvent {
     InputEvent input;

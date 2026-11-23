@@ -1012,7 +1012,8 @@ auto EventRouter::allows_semantics(const InputSnapshot &snapshot, UiId target) c
     return !closed_ && scopes_.allows(snapshot, target, true);
 }
 
-auto EventRouter::dispatch_semantics(UiId target, SemanticsAction action) -> Result<bool, InputError> {
+auto EventRouter::dispatch_semantics(UiId target, SemanticsAction action, Option<SemanticsPosition> position)
+    -> Result<bool, InputError> {
     if (busy_ || !document_.can_route())
         return Err(InputError::Reentrant);
     if (closed_ || !controls_ || !window_focused_ || update_.is_none())
@@ -1026,7 +1027,7 @@ auto EventRouter::dispatch_semantics(UiId target, SemanticsAction action) -> Res
         return Ok(focus_ == Some(target));
     }
     begin();
-    InputEvent input{.type = EventType::SemanticAction, .semantic_action = action};
+    InputEvent input{.type = EventType::SemanticAction, .semantic_action = action, .semantic_position = position};
     auto handled = route(*update_, target, input, true);
     auto result = end();
     if (result.is_err()) return Err(result.unwrap_err());

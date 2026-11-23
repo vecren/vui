@@ -118,6 +118,7 @@ struct ElementData {
     rstd::rc::Rc<ComponentParameters> parameters;
     rstd::rc::Rc<AdapterFunction> adapter;
     Option<NodeRef> reference;
+    bool precompose{};
     bool invalid{};
     rstd::source_location source;
     ElementData() = default;
@@ -178,11 +179,12 @@ inline auto provide(initializer_list<LocalBinding> values, Element content,
 auto text(ref<str> value, rstd::source_location source = rstd::source_location::current()) -> Element;
 auto image(ImageData value, rstd::source_location source = rstd::source_location::current()) -> Element;
 template <class Tag, class F> auto component(Key key, F evaluate, rstd::source_location source = rstd::source_location::current(),
-    rstd::rc::Rc<ComponentParameters> parameters = {}) -> Element {
+    rstd::rc::Rc<ComponentParameters> parameters = {}, bool precompose = false) -> Element {
     auto data = rstd::rc::make_rc<ElementData>(); data.get()->kind = ElementKind::Component;
     data.get()->key = Some(rstd::move(key)); data.get()->component_type = rstd::any::TypeId::of<Tag>(); data.get()->source = source;
     data.get()->view = rstd::rc::make_rc<ViewFunction>(rstd::move(evaluate));
-    data.get()->parameters = rstd::move(parameters); return Element(rstd::move(data));
+    data.get()->parameters = rstd::move(parameters); data.get()->precompose = precompose;
+    return Element(rstd::move(data));
 }
 template <class Tag, class F> auto component(CallIdentity identity, F evaluate, rstd::source_location source = rstd::source_location::current(),
     rstd::rc::Rc<ComponentParameters> parameters = {}) -> Element {

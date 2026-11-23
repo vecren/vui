@@ -79,25 +79,29 @@ auto LazyContent::header_before(Index index) const -> Option<Index> {
     return first != usize() ? Some(Index(headers[first - usize(1)])) : None<Index>();
 }
 
-auto LazyContent::append_item(Box<Builder> build, Option<Key> key, Option<Key> content_type, Index span, bool sticky)
-    -> ComposeResult<empty> {
+auto LazyContent::append_item(Box<Builder> build, Option<Key> key, Option<Key> content_type, Index span,
+                              bool sticky, Option<LazyItemAnimationOptions> animation) -> ComposeResult<empty> {
+    if (animation && !animation->valid())
+        return Err(ComposeError(ComposeStage::Prepare, Some(UiError::InvalidValue)));
     auto describe = Box<Metadata>::make(
-        [key = rstd::move(key), type = rstd::move(content_type)](Index) -> LazyItemInfo {
-            return {key ? Some(Key(*key)) : None<Key>(), type ? Some(Key(*type)) : None<Key>()};
+        [key = rstd::move(key), type = rstd::move(content_type), animation](Index) -> LazyItemInfo {
+            return {key ? Some(Key(*key)) : None<Key>(), type ? Some(Key(*type)) : None<Key>(), animation};
         });
     Option<Box<Span>> grid_span;
     if (span != 1) grid_span = Some(Box<Span>::make([span](Index, LazyGridSpanScope) { return span; }));
     return append(1, rstd::move(build), Some(rstd::move(describe)), rstd::move(grid_span), sticky);
 }
 
-auto LazyContent::item(Element element, Option<Key> key, Option<Key> content_type, Index span) -> ComposeResult<empty> {
+auto LazyContent::item(Element element, Option<Key> key, Option<Key> content_type, Index span,
+                       Option<LazyItemAnimationOptions> animation) -> ComposeResult<empty> {
     auto build = compiler::lazy_item_builder([element = rstd::move(element)](Index) { return Element(element); });
-    return append_item(rstd::move(build), rstd::move(key), rstd::move(content_type), span, false);
+    return append_item(rstd::move(build), rstd::move(key), rstd::move(content_type), span, false, animation);
 }
 
-auto LazyContent::sticky_header(Element element, Option<Key> key, Option<Key> content_type)
+auto LazyContent::sticky_header(Element element, Option<Key> key, Option<Key> content_type,
+                                Option<LazyItemAnimationOptions> animation)
     -> ComposeResult<empty> {
     auto build = compiler::lazy_item_builder([element = rstd::move(element)](Index) { return Element(element); });
-    return append_item(rstd::move(build), rstd::move(key), rstd::move(content_type), 0, true);
+    return append_item(rstd::move(build), rstd::move(key), rstd::move(content_type), 0, true, animation);
 }
 } // namespace vui::compose

@@ -4,7 +4,7 @@ using namespace rstd::prelude;
 using namespace rstd::literals;
 
 namespace vui {
-auto UiDocument::make_visual(UiId id) -> Result<UiVisual, UiError> {
+auto UiDocument::make_visual(UiId id, bool include_geometry) -> Result<UiVisual, UiError> {
     auto &node = *resolve(id);
     Transform placement;
     placement.tx = node.position.x;
@@ -43,6 +43,12 @@ auto UiDocument::make_visual(UiId id) -> Result<UiVisual, UiError> {
     RenderProperties properties{transform,     content_bounds, clip,
                                 style.opacity, style.visible,  node.layout_clip, style.content_tint, style.paint_color,
                                 node.layout_clip_transform, clip_transform};
+    if (node.frozen_paint) {
+        properties = **node.frozen_paint;
+        properties.transform = transform * properties.transform;
+        properties.opacity *= style.opacity;
+        properties.visible = properties.visible && style.visible;
+    }
     if (!properties.valid())
         return Err(UiError::InvalidValue);
     UiVisual visual{
@@ -62,9 +68,11 @@ auto UiDocument::make_visual(UiId id) -> Result<UiVisual, UiError> {
         node.arranged_slot,
         node.style.hit_self,
         node.layout_has_text_input_area ? node.layout_text_input_area : node.style.text_input_area};
-    auto geometry = content_geometry(id);
-    if (geometry.is_err()) return Err(geometry.unwrap_err());
-    visual.content_geometry = geometry.unwrap();
+    if (include_geometry) {
+        auto geometry = content_geometry(id);
+        if (geometry.is_err()) return Err(geometry.unwrap_err());
+        visual.content_geometry = geometry.unwrap();
+    }
     for (auto child : node.children)
         visual.children.push(UiId(child));
     return Ok(rstd::move(visual));
@@ -78,7 +86,7 @@ auto UiDocument::collect(UiId id, UiUpdate::Data &output, Index depth, bool reco
     auto &node = *resolve(id);
     if (node.constraint_conflict)
         layout_diagnostics_.push(LayoutDiagnostic{id, LayoutIssue::ConstraintConflict});
-    if (recording && node.paint_dirty) {
+    if (recording && node.paint_dirty && !node.frozen_paint) {
         auto error = paint(id, node);
         if (error.is_some())
             return error;
@@ -239,5 +247,60 @@ auto UiDocument::update(Size viewport, DiagnosticsOptions options, bool recordin
     input_base_ = Some(UiUpdate(snapshot));
     input_changes_.clear();
     return Ok(rstd::move(snapshot));
+}
+auto UiDocument::capture_painted_subtree(UiId id, Index node_limit) -> Result<PaintedSubtree, UiError> {
+    auto node = resolve(id);
+    if (!node || !mounted(id)) return Err(UiError::InvalidId);
+    if (!node->arranged_slot) return Err(UiError::LayoutPending);
+    if (!node_limit) return Err(UiError::Limit);
+    PaintedSubtree snapshot;
+    auto visit = [&](auto &self, UiId target, Option<Index> parent) -> Result<empty, UiError> {
+        if (snapshot.entries_.len() >= usize(node_limit)) return Err(UiError::Limit);
+        auto visual = make_visual(target, false);
+        if (visual.is_err()) return Err(visual.unwrap_err());
+        auto entry = visual.unwrap();
+        if (entry.content.has_frame_queries()) return Err(UiError::InvalidValue);
+        auto index = Index(snapshot.entries_.len().to_primitive());
+        snapshot.entries_.push({entry.properties, rstd::move(entry.content), parent});
+        for (auto child : entry.children) {
+            auto copied = self(self, child, Some(Index(index)));
+            if (copied.is_err()) return copied;
+        }
+        return Ok(empty{});
+    };
+    auto captured = visit(visit, id, None<Index>());
+    if (captured.is_err()) return Err(captured.unwrap_err());
+    return Ok(rstd::move(snapshot));
+}
+
+auto UiDocument::append_painted_subtree(UiId parent, PaintedSubtree snapshot) -> Result<UiId, UiError> {
+    if (snapshot.entries_.is_empty()) return Err(UiError::InvalidValue);
+    Vec<UiId> nodes;
+    auto fail = [&](UiError error) -> Result<UiId, UiError> {
+        if (!nodes.is_empty()) (void)destroy(nodes[usize()]);
+        return Err(error);
+    };
+    for (usize i{}; i < snapshot.entries_.len(); ++i) {
+        auto &entry = snapshot.entries_[i];
+        NodeStyle style{.hit_test_visible = false, .enabled = false, .hit_self = false};
+        auto made = create<Stack>(style);
+        if (made.is_err()) return fail(made.unwrap_err());
+        auto id = made.unwrap();
+        auto *node = resolve(id);
+        node->content = rstd::move(entry.content);
+        node->frozen_paint = Some(Box<RenderProperties>::make(entry.properties));
+        if (entry.parent) {
+            auto attached = attach(nodes[usize(*entry.parent)], id);
+            if (attached.is_err()) {
+                (void)destroy(id);
+                return fail(attached.unwrap_err());
+            }
+        }
+        nodes.push(UiId(id));
+    }
+    auto root = nodes[usize()];
+    auto attached = attach(parent, root);
+    if (attached.is_err()) return fail(attached.unwrap_err());
+    return Ok(root);
 }
 } // namespace vui

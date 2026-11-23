@@ -218,12 +218,14 @@ struct AndroidBridge {
             return nullptr;
         return host(handle).accessibility_nodes(env, data.session.semantics().snapshot());
     }
-    static auto perform_semantics(jlong handle, SemanticsId id, jint action) -> bool {
+    static auto perform_semantics(jlong handle, SemanticsId id, jint action, jint row, jint column) -> bool {
         auto &data = *get(handle).data_;
         if (data.failed || data.closed || !host(handle).attached() ||
-            action <= 0 || action > jint(SemanticsAction::Focus) + 1)
+            action <= 0 || action > jint(SemanticsAction::ScrollToPosition) + 1)
             return false;
-        auto result = data.session.semantics().perform(id, SemanticsAction(action - 1));
+        auto position = row >= 0 && column >= 0
+            ? Some(SemanticsPosition{Index(row), Index(column)}) : None<SemanticsPosition>();
+        auto result = data.session.semantics().perform(id, SemanticsAction(action - 1), position);
         return result.is_ok() && result.unwrap();
     }
     static void redraw_async(JNIEnv *env, jlong handle, jobject runnable) {
@@ -260,10 +262,10 @@ JNIEXPORT jobjectArray JNICALL Java_io_vui_VuiView_nativeSemantics(JNIEnv *env, 
 }
 JNIEXPORT jboolean JNICALL Java_io_vui_VuiView_nativePerformSemantics(JNIEnv *, jclass, jlong handle, jlong session,
                                                                     jint slot, jlong generation, jlong mount,
-                                                                    jint action) {
+                                                                    jint action, jint row, jint column) {
     using namespace vui;
     return AndroidBridge::perform_semantics(handle, {{Serial(session), Index(slot), Serial(generation)}, Serial(mount)},
-                                            action);
+                                            action, row, column);
 }
 JNIEXPORT void JNICALL Java_io_vui_VuiView_nativeActive(JNIEnv *, jclass, jlong handle, jboolean value) {
     AndroidBridge::host(handle).active(value);

@@ -67,8 +67,9 @@ class UiTest {
         return Ok(*found);
     }
 
-    auto perform(SemanticsId target, SemanticsAction action) -> Result<AdvanceResult, TestError> {
-        auto handled = session_.semantics().perform(target, action);
+    auto perform(SemanticsId target, SemanticsAction action, Option<SemanticsPosition> position = {})
+        -> Result<AdvanceResult, TestError> {
+        auto handled = session_.semantics().perform(target, action, position);
         if (handled.is_err())
             return Err(TestError{TestStage::Action, {}, Some(handled.unwrap_err())});
         if (!handled.unwrap())

@@ -4,10 +4,32 @@ export import :scroll_types;
 import :types;
 using namespace rstd::prelude;
 namespace vui {
+class ScrollInteraction;
+}
+
+export namespace vui {
+enum class ScrollAnimationStatus { Running, Finished, Cancelled };
+
+class ScrollAnimation {
+    friend class ScrollInteraction;
+    rstd::rc::Rc<ScrollAnimationStatus> status_;
+    explicit ScrollAnimation(rstd::rc::Rc<ScrollAnimationStatus> status) : status_(rstd::move(status)) {}
+
+  public:
+    auto status() const -> ScrollAnimationStatus { return status_ ? *status_ : ScrollAnimationStatus::Cancelled; }
+};
+}
+
+namespace vui {
 class ScrollInteraction {
-    enum class Mode { Idle, Pending, Drag, Animate } mode_{Mode::Idle};
+    enum class Mode { Idle, Pending, Drag, Animate, Programmatic } mode_{Mode::Idle};
     enum class Phase { Rest, Decay, Spring };
     struct Axis { Phase phase{Phase::Rest};ScalarMotion initial;Scalar target{};Serial started{}; } x_,y_;
+    struct OffsetAnimation {
+        rstd::rc::Rc<ScrollAnimationStatus> status;
+        Point from, to;
+        Serial started, duration;
+    };
     UiSession &session_;
     UiId root_,viewport_;
     ScrollStyle &style_;
@@ -25,6 +47,7 @@ class ScrollInteraction {
     Point maximum_;
     bool geometry_known_{},rebase_{},boundary_owned_{};
     Option<UiError> error_;
+    Option<OffsetAnimation> animation_;
     auto ui() -> UiDocument & {return session_.document();}
     static auto bounded(Scalar value,Scalar maximum) -> Scalar {return value<0 ? 0 : value>maximum ? maximum : value;}
     static auto bounded(Point value,Point maximum) -> Point {return {bounded(value.x,maximum.x),bounded(value.y,maximum.y)};}
@@ -42,11 +65,14 @@ class ScrollInteraction {
     void begin_axis(Axis &axis,Scalar value,Scalar velocity,Scalar maximum,bool enabled,Serial started);
     void begin_motion(const ViewportMetrics &metrics,Point velocity,Serial started);
     auto sample_axis(Axis &axis,Scalar maximum,Serial time) -> ScalarMotion;
+    void restart_animation(Point from, Serial time);
+    auto sample_animation(MotionContext &context, const ViewportMetrics &metrics) -> Result<MotionStatus, MotionError>;
     void press(EventContext &,const RoutedEvent &event);
     void pending_up(EventContext &,const RoutedEvent &event);
   public:
     ScrollInteraction(UiSession &session,UiId root,UiId viewport,ScrollStyle &style,Signal<void(UserScroll)> &changed)
         :session_(session),root_(root),viewport_(viewport),style_(style),changed_(changed) {configure();}
+    ~ScrollInteraction();
     void configure() {
         pan_=PanRecognizer({style_.motion.threshold,style_.axes.horizontal && style_.axes.vertical ? PanAxis::Free : style_.axes.horizontal ? PanAxis::Horizontal : PanAxis::Vertical});
         inverse_=None();
@@ -54,8 +80,10 @@ class ScrollInteraction {
     static auto make(UiSession &session,UiId root,UiId viewport,ScrollStyle &style,Signal<void(UserScroll)> &changed) -> Result<rstd::rc::Rc<ScrollInteraction>,ControlError>;
     void stop(bool clamp=true,bool release=true,bool request=true);
     auto rebase_offset(Point value) -> Result<empty, UiError>;
+    auto animate_offset(Point value, Serial duration_ns) -> Result<ScrollAnimation, UiError>;
+    auto retarget_offset(const ScrollAnimation &animation, Point value) -> Result<empty, UiError>;
     auto describe_semantics() const -> Result<empty, UiError>;
-    auto status() const -> ScrollStatus {return {mode_==Mode::Drag,mode_==Mode::Animate,velocity_,error_};}
+    auto status() const -> ScrollStatus {return {mode_==Mode::Drag,mode_==Mode::Animate || mode_==Mode::Programmatic,velocity_,error_};}
     auto observe(InputContext &context,const InputPacket &packet) -> InputDecision;
     void cancel(InputContext &context,CancelReason reason) {
         pan_.cancel(context,reason);tracker_.remove(context.pointer());
@@ -68,6 +96,7 @@ class ScrollInteraction {
 
 export namespace vui {
 class ScrollState {
+    friend class ScrollView;
     UiId viewport_;
     ScrollStyle style_;
     Signal<void(UserScroll)> user_scrolled_;
@@ -122,6 +151,10 @@ class ScrollView {
         -> Result<UiId, ControlError>;
     static auto set_offset(UiDocument &ui, UiId id, Point value) -> Result<empty, UiError>;
     static auto rebase_offset(UiDocument &ui, UiId id, Point value) -> Result<empty, UiError>;
+    static auto animate_offset(UiDocument &ui, UiId id, Point value, Serial duration_ns)
+        -> Result<ScrollAnimation, UiError>;
+    static auto retarget_offset(UiDocument &ui, UiId id, const ScrollAnimation &animation, Point value)
+        -> Result<empty, UiError>;
     static auto metrics(UiDocument &ui, UiId id) -> Result<ViewportMetrics, UiError>;
     static auto status(UiDocument &ui,UiId id) -> Result<ScrollStatus,UiError> {
         auto state=ui.state<ScrollState>(id);return state ? Result<ScrollStatus,UiError>(Ok(state->status())) : Result<ScrollStatus,UiError>(Err(UiError::InvalidId));

@@ -45,15 +45,16 @@ final class VuiAccessibility extends AccessibilityNodeProvider {
         private final Identity key, parent;
         final String className, label, value;
         final Rect bounds;
-        final int activate, forward, backward, focus, checked;
-        final boolean enabled, focused;
+        final int activate, forward, backward, focus, checked, scrollToPosition, rows, columns;
+        final boolean collection, enabled, focused;
         final ArrayList<Integer> children = new ArrayList<>();
         int id, parentId;
 
         Node(long session, int slot, long generation, long mount,
              long parentSession, int parentSlot, long parentGeneration, long parentMount,
              String className, String label, String value, float left, float top, float right, float bottom,
-             int activate, int forward, int backward, int focus, int checked, boolean enabled, boolean focused) {
+             int activate, int forward, int backward, int focus, int checked, int scrollToPosition,
+             int rows, int columns, boolean collection, boolean enabled, boolean focused) {
             key = new Identity(session, slot, generation, mount);
             parent = parentSession == 0 ? null : new Identity(parentSession, parentSlot, parentGeneration, parentMount);
             this.className = className;
@@ -65,6 +66,10 @@ final class VuiAccessibility extends AccessibilityNodeProvider {
             this.backward = backward;
             this.focus = focus;
             this.checked = checked;
+            this.scrollToPosition = scrollToPosition;
+            this.rows = rows;
+            this.columns = columns;
+            this.collection = collection;
             this.enabled = enabled;
             this.focused = focused;
         }
@@ -73,12 +78,14 @@ final class VuiAccessibility extends AccessibilityNodeProvider {
             return id == other.id && parentId == other.parentId && bounds.equals(other.bounds) &&
                 className.equals(other.className) && label.equals(other.label) && value.equals(other.value) &&
                 activate == other.activate && forward == other.forward && backward == other.backward &&
-                focus == other.focus && checked == other.checked && enabled == other.enabled && focused == other.focused;
+                focus == other.focus && checked == other.checked && scrollToPosition == other.scrollToPosition &&
+                rows == other.rows && columns == other.columns && collection == other.collection &&
+                enabled == other.enabled && focused == other.focused;
         }
 
         boolean screenReaderFocusable() {
             return !label.isEmpty() || !value.isEmpty() || activate != NONE || focus != NONE ||
-                forward != NONE || backward != NONE || checked >= 0;
+                forward != NONE || backward != NONE || scrollToPosition != NONE || checked >= 0;
         }
     }
 
@@ -228,10 +235,14 @@ final class VuiAccessibility extends AccessibilityNodeProvider {
         info.setAccessibilityFocused(id == accessibilityFocus);
         info.setClickable(node.activate != NONE);
         info.setScrollable(!SLIDER.equals(node.className) && (node.forward != NONE || node.backward != NONE));
+        if (node.collection)
+            info.setCollectionInfo(AccessibilityNodeInfo.CollectionInfo.obtain(node.rows, node.columns, false));
         if (node.enabled) {
             if (node.activate != NONE) info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_CLICK);
             if (node.forward != NONE) info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_FORWARD);
             if (node.backward != NONE) info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_BACKWARD);
+            if (node.scrollToPosition != NONE)
+                info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_TO_POSITION);
             if (node.focus != NONE && !node.focused) info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_FOCUS);
         }
         if (id == accessibilityFocus) info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_CLEAR_ACCESSIBILITY_FOCUS);
@@ -295,8 +306,15 @@ final class VuiAccessibility extends AccessibilityNodeProvider {
             return true;
         }
         if (!node.enabled) return false;
-        int nativeAction;
-        switch (action) {
+        int nativeAction, row = -1, column = -1;
+        boolean scrollToPosition = action == AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_TO_POSITION.getId();
+        if (scrollToPosition) {
+            if (arguments == null || node.scrollToPosition == NONE) return false;
+            row = arguments.getInt(AccessibilityNodeInfo.ACTION_ARGUMENT_ROW_INT, 0);
+            column = arguments.getInt(AccessibilityNodeInfo.ACTION_ARGUMENT_COLUMN_INT, 0);
+            if (row < 0 || column < 0) return false;
+            nativeAction = node.scrollToPosition;
+        } else switch (action) {
             case AccessibilityNodeInfo.ACTION_CLICK: nativeAction = node.activate; break;
             case AccessibilityNodeInfo.ACTION_SCROLL_FORWARD: nativeAction = node.forward; break;
             case AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD: nativeAction = node.backward; break;
@@ -307,11 +325,13 @@ final class VuiAccessibility extends AccessibilityNodeProvider {
             default: return false;
         }
         Identity key = node.key;
-        if (nativeAction == NONE || !view.performSemantics(key.session, key.slot, key.generation, key.mount, nativeAction))
+        if (nativeAction == NONE ||
+            !view.performSemantics(key.session, key.slot, key.generation, key.mount, nativeAction, row, column))
             return false;
         if (action == AccessibilityNodeInfo.ACTION_CLICK)
             send(id, node, AccessibilityEvent.TYPE_VIEW_CLICKED);
-        else if (action == AccessibilityNodeInfo.ACTION_SCROLL_FORWARD || action == AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD)
+        else if (action == AccessibilityNodeInfo.ACTION_SCROLL_FORWARD ||
+                 action == AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD || scrollToPosition)
             send(id, node, SLIDER.equals(node.className) ? AccessibilityEvent.TYPE_VIEW_SELECTED : AccessibilityEvent.TYPE_VIEW_SCROLLED);
         return true;
     }

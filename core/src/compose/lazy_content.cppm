@@ -5,9 +5,22 @@ import :lifecycle;
 export namespace vui::compose {
 using namespace rstd::prelude;
 
+struct LazyItemAnimationOptions {
+    Option<AnimationOptions> fade_in{Some(AnimationOptions{180'000'000, AnimationEasing::EaseInOut})};
+    Option<AnimationOptions> placement{Some(AnimationOptions{250'000'000, AnimationEasing::EaseInOut})};
+    Option<AnimationOptions> fade_out{Some(AnimationOptions{180'000'000, AnimationEasing::EaseInOut})};
+
+    auto valid() const -> bool {
+        return (!fade_in || fade_in->valid()) && (!placement || placement->valid()) &&
+               (!fade_out || fade_out->valid());
+    }
+};
+
 struct LazyItemInfo {
     Option<Key> key;
     Option<Key> content_type;
+    Option<LazyItemAnimationOptions> animation;
+    Option<Scalar> fill_parent_max_width, fill_parent_max_height;
 };
 
 struct LazyGridSpanScope {
@@ -68,7 +81,8 @@ class LazyContent {
 
     auto append(Index count, Box<Builder>, Option<Box<Metadata>>, Option<Box<Span>> = {}, bool sticky = false)
         -> ComposeResult<empty>;
-    auto append_item(Box<Builder>, Option<Key>, Option<Key>, Index span, bool sticky) -> ComposeResult<empty>;
+    auto append_item(Box<Builder>, Option<Key>, Option<Key>, Index span, bool sticky,
+                     Option<LazyItemAnimationOptions>) -> ComposeResult<empty>;
     auto interval(Index index) const -> const Interval *;
 
   public:
@@ -82,21 +96,25 @@ class LazyContent {
     auto header_before(Index index) const -> Option<Index>;
     auto header_after(Index index) const -> Option<Index>;
 
-    auto item(Element element, Option<Key> key = {}, Option<Key> content_type = {}, Index span = 1) -> ComposeResult<empty>;
-    auto sticky_header(Element element, Option<Key> key = {}, Option<Key> content_type = {}) -> ComposeResult<empty>;
+    auto item(Element element, Option<Key> key = {}, Option<Key> content_type = {}, Index span = 1,
+              Option<LazyItemAnimationOptions> animation = {}) -> ComposeResult<empty>;
+    auto sticky_header(Element element, Option<Key> key = {}, Option<Key> content_type = {},
+                       Option<LazyItemAnimationOptions> animation = {}) -> ComposeResult<empty>;
 
     template <class F> requires requires(F &f) { f(); }
     auto item([[clang::annotate("vui.compose.content.v2")]] F content,
-              Option<Key> key = {}, Option<Key> content_type = {}, Index span = 1) -> ComposeResult<empty> {
+              Option<Key> key = {}, Option<Key> content_type = {}, Index span = 1,
+              Option<LazyItemAnimationOptions> animation = {}) -> ComposeResult<empty> {
         return append_item(compiler::lazy_single_item_builder(rstd::move(content), count()),
-                           rstd::move(key), rstd::move(content_type), span, false);
+                           rstd::move(key), rstd::move(content_type), span, false, animation);
     }
 
     template <class F> requires (requires(F &f) { f(Index{}); } || requires(F &f) { f(); })
     auto sticky_header([[clang::annotate("vui.compose.content.v2")]] F content,
-                       Option<Key> key = {}, Option<Key> content_type = {}) -> ComposeResult<empty> {
+                       Option<Key> key = {}, Option<Key> content_type = {},
+                       Option<LazyItemAnimationOptions> animation = {}) -> ComposeResult<empty> {
         return append_item(compiler::lazy_single_item_builder(rstd::move(content), count()),
-                           rstd::move(key), rstd::move(content_type), 0, true);
+                           rstd::move(key), rstd::move(content_type), 0, true, animation);
     }
 
     template <class F>

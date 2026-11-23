@@ -1,5 +1,6 @@
 module vui.compose;
 import :lazy;
+import :lazy_item_motion;
 import :controls;
 import :runtime;
 
@@ -145,10 +146,12 @@ struct LazyAnchor {
 };
 
 struct LazySlot {
+    enum class Kind { Active, Prefetched, Spare };
     Key key;
     Option<Key> content_type;
     Index index;
     Serial id{};
+    Kind kind{Kind::Active};
 };
 
 class LazyRuntime {
@@ -157,6 +160,7 @@ class LazyRuntime {
     bool horizontal_{};
     Option<GridCells> grid_;
     Rc<LazyStateData> state_;
+    Rc<LazyStateData> default_state_;
     Option<State<Serial>> signal_;
     Serial revision_{};
 
@@ -164,20 +168,35 @@ class LazyRuntime {
     LazyGridSlots slots_;
     LazyGridLines lines_;
     Scalar cross_{};
+    Option<LayoutConstraints> parent_bounds_;
     bool geometry_ready_{}, pending_{}, rebase_{true};
     Option<LazyAnchor> anchor_;
-    Option<Scalar> pending_scroll_;
-    Scalar extent_{};
+    Option<ScrollAnimation> scroll_animation_;
+    Serial animation_request_{};
+    Scalar extent_{}, arranged_extent_{};
     Vec<Index> requested_, rendered_;
     Vec<LazySlot> slots_in_use_;
     Serial next_slot_{1};
+    Vec<Index> prefetched_;
+    Option<Index> prefetch_line_;
+    Option<Scalar> prefetch_offset_;
+    Option<bool> prefetch_forward_;
+    Index prefetch_item_start_{}, prefetch_item_count_{};
+    Index demand_begin_{}, demand_end_{};
+    Serial prefetch_generation_{1};
+    bool prefetch_queued_{};
+    bool prefetch_constraints_changed_{};
+    rstd::rc::Weak<LazyRuntime> prefetch_owner_;
+    UiSession *session_{};
     struct Placement {
         Cell cell;
         Scalar extent, cross;
+        UiId node;
     };
     Vec<Placement> placements_;
     Option<Index> sticky_, next_sticky_line_;
     Scalar sticky_offset_{};
+    LazyItemAnimator item_animator_;
 
     UiDocument *document_{};
     UiId node_, viewport_, scroll_;
@@ -187,6 +206,9 @@ class LazyRuntime {
     auto cross(Size value) const -> Scalar { return horizontal_ ? value.height : value.width; }
     auto point(Scalar value) const -> Point { return horizontal_ ? Point{value, 0} : Point{0, value}; }
     auto axis(Point value) const -> Scalar { return horizontal_ ? value.x : value.y; }
+    auto physical_offset(Scalar logical, Scalar maximum) const -> Point {
+        return point(options_.reverse_layout ? maximum - logical : logical);
+    }
     auto start_padding() const -> Scalar {
         auto padding = options_.padding;
         return options_.reverse_layout ? (horizontal_ ? padding.right : padding.bottom)
@@ -255,6 +277,8 @@ class LazyRuntime {
         const auto begin = visible_begin > options_.overscan ? visible_begin - options_.overscan : 0;
         const auto end = geometry_.line_at(larger(0, logical + viewport - start_padding()), line_count());
         const auto overscan_end = Serial(end) + options_.overscan;
+        demand_begin_ = begin;
+        demand_end_ = Index(smaller(Scalar(overscan_end), Scalar(line_count() ? line_count() - 1 : 0)));
         const auto limit = usize(options_.max_materialized);
         auto first_item = first_in(first);
         if (first_item.is_err()) return Err(first_item.unwrap_err());
@@ -313,6 +337,73 @@ class LazyRuntime {
         return Ok(empty{});
     }
 
+    void clear_prefetch() {
+        prefetch_line_ = None();
+        prefetch_offset_ = None();
+        prefetch_forward_ = None();
+        prefetch_item_count_ = 0;
+        prefetched_.clear();
+    }
+
+    void queue_prefetch() {
+        if (!prefetch_line_ || prefetch_queued_) return;
+        auto queued = session_->defer_idle([weak = prefetch_owner_, generation = prefetch_generation_]() mutable {
+            auto owner = weak.upgrade();
+            if (!owner || owner->get()->prefetch_generation_ != generation) return false;
+            owner->get()->prefetch_queued_ = false;
+            return owner->get()->precompose_next();
+        });
+        prefetch_queued_ = queued.is_ok();
+    }
+
+    auto precompose_next() -> bool {
+        if (!prefetch_line_ || requested_.len() + prefetched_.len() >= usize(options_.max_materialized))
+            return false;
+        if (!prefetch_item_count_) {
+            if (grid_) {
+                auto row = lines_.line_at(*prefetch_line_, span());
+                if (row.is_err() || row->spans.is_empty()) return false;
+                prefetch_item_start_ = row->first;
+                prefetch_item_count_ = Index(row->spans.len().to_primitive());
+            } else {
+                prefetch_item_start_ = *prefetch_line_;
+                prefetch_item_count_ = 1;
+            }
+        }
+        prefetched_.push(Index(prefetch_item_start_ + prefetched_.len().to_primitive()));
+        if (prefetched_.len() < usize(prefetch_item_count_)) queue_prefetch();
+        return signal_->set(++revision_).is_ok();
+    }
+
+    auto update_prefetch(Scalar logical) -> Result<empty, UiError> {
+        if (!options_.prefetch || !session_ || requested_.is_empty()) return Ok(empty{});
+        if (rstd::exchange(prefetch_constraints_changed_, false)) {
+            if (!prefetched_.is_empty()) {
+                auto invalidated = signal_->set(++revision_);
+                if (invalidated.is_err()) return Err(UiError::InvalidValue);
+            }
+            clear_prefetch();
+        }
+        const auto previous = prefetch_offset_;
+        prefetch_offset_ = Some(logical);
+        if (previous && *previous != logical) prefetch_forward_ = Some(bool(logical > *previous));
+        if (!prefetch_forward_) return Ok(empty{});
+        const auto forward = *prefetch_forward_;
+        Option<Index> next;
+        if (forward && demand_end_ + 1 < line_count()) next = Some(Index(demand_end_ + 1));
+        if (!forward && demand_begin_) next = Some(Index(demand_begin_ - 1));
+        if (next == prefetch_line_) return Ok(empty{});
+        prefetch_line_ = next;
+        prefetch_item_count_ = 0;
+        if (!prefetched_.is_empty()) {
+            prefetched_.clear();
+            auto invalidated = signal_->set(++revision_);
+            if (invalidated.is_err()) return Err(UiError::InvalidValue);
+        }
+        queue_prefetch();
+        return Ok(empty{});
+    }
+
     auto item_bounds(usize child) const -> Rect {
         const auto &place = placements_[child];
         auto logical = start_padding() + geometry_.position(place.cell.line);
@@ -321,7 +412,11 @@ class LazyRuntime {
             if (next_sticky_line_) logical = smaller(logical,
                 start_padding() + geometry_.position(*next_sticky_line_) - place.extent);
         }
-        const auto along = options_.reverse_layout ? extent_ - logical - place.extent : logical;
+        auto along = options_.reverse_layout ? extent_ - logical - place.extent : logical;
+        const auto count = line_count();
+        const auto rank = options_.reverse_layout ? count - 1 - place.cell.line : place.cell.line;
+        along += arrangement_offset(options_.main_arrangement, arranged_extent_ - extent_, rank, count,
+                                    options_.reverse_layout);
         auto across = cross_start();
         if (grid_) across += slots_.positions[usize(place.cell.lane)];
         else if (options_.cross_alignment == Alignment::Center) across += (cross_ - place.cross) * .5;
@@ -330,24 +425,82 @@ class LazyRuntime {
                            : Rect{across, along, place.cross, place.extent};
     }
 
-    void publish_geometry(Size viewport, Scalar physical) {
+    auto publish_geometry(Size viewport, Scalar physical, Scalar maximum, Scalar rebase_delta) -> Result<empty, UiError> {
         auto visible = rstd::rc::make_rc<Vec<LazyVisibleItemInfo>>();
+        Vec<LazyAnimatedItem> animated;
         const auto viewport_extent = main(viewport);
-        const auto alignment = options_.reverse_layout ? larger(0, viewport_extent - extent_) : 0;
         for (usize child{}; child < placements_.len(); ++child) {
             auto bounds = item_bounds(child);
             auto &position = horizontal_ ? bounds.x : bounds.y;
-            position += alignment - physical;
+            position -= physical;
             if (position >= viewport_extent || position + placements_[child].extent <= 0) continue;
             const auto index = rendered_[child];
-            auto cell = placements_[child].cell;
-            visible.get()->push({index, cell.line, cell.lane, cell.span, content_.describe(index).key, bounds});
+            const auto &placement = placements_[child];
+            auto metadata = content_.describe(index);
+            if (metadata.animation)
+                animated.push({placement.node, index, bounds, copy_key(metadata.key), *metadata.animation,
+                               sticky_ == Some(index)});
+            const auto cell = placement.cell;
+            visible.get()->push({index, cell.line, cell.lane, cell.span, rstd::move(metadata.key), bounds});
         }
         state_.get()->info = {
             anchor_ ? anchor_->index : Index(), anchor_ ? anchor_->offset : 0, content_.count(),
             Index(rendered_.len().to_primitive()), viewport, start_padding(), end_padding(),
-            options_.reverse_layout, visible.to_const()
+            options_.reverse_layout, visible.to_const(),
+            options_.reverse_layout ? physical > 0 : physical < maximum,
+            options_.reverse_layout ? physical < maximum : physical > 0,
+            state_->info.prefetched_count, state_->info.retained_slot_count
         };
+        return item_animator_.update(*document_, content_, rstd::move(animated), point(-physical), point(rebase_delta));
+    }
+
+    auto scroll_to(Scalar target, Scalar maximum, Scalar viewport, Scalar &logical) -> Result<empty, UiError> {
+        auto &state = *state_.get();
+        if (state.request_duration) {
+            if (scroll_animation_ && animation_request_ == state.request_revision) {
+                switch (scroll_animation_->status()) {
+                case ScrollAnimationStatus::Cancelled:
+                    state.scroll_status = LazyScrollStatus::Cancelled;
+                    state.requested = None();
+                    scroll_animation_ = None();
+                    return Ok(empty{});
+                case ScrollAnimationStatus::Running: {
+                    auto retargeted = ScrollView::retarget_offset(*document_, scroll_, *scroll_animation_,
+                                                                 physical_offset(target, maximum));
+                    if (retargeted.is_err() && retargeted.unwrap_err() == UiError::Cancelled) {
+                        state.scroll_status = LazyScrollStatus::Cancelled;
+                        state.requested = None();
+                        scroll_animation_ = None();
+                        return Ok(empty{});
+                    }
+                    return retargeted;
+                }
+                case ScrollAnimationStatus::Finished:
+                    break;
+                }
+            } else if (target != logical) {
+                const auto approach = viewport * 4;
+                if (__builtin_fabs(target - logical) > approach) {
+                    logical = target + (target > logical ? -approach : approach);
+                    auto moved = ScrollView::set_offset(*document_, scroll_, physical_offset(logical, maximum));
+                    if (moved.is_err()) return moved;
+                }
+                auto animated = ScrollView::animate_offset(*document_, scroll_, physical_offset(target, maximum),
+                                                           state.request_duration);
+                if (animated.is_err()) return Err(animated.unwrap_err());
+                scroll_animation_ = Some(animated.unwrap());
+                animation_request_ = state.request_revision;
+                state.scroll_status = LazyScrollStatus::Animating;
+                return Ok(empty{});
+            }
+        }
+        auto moved = ScrollView::set_offset(*document_, scroll_, physical_offset(target, maximum));
+        if (moved.is_err()) return moved;
+        logical = target;
+        state.scroll_status = LazyScrollStatus::Finished;
+        state.requested = None();
+        scroll_animation_ = None();
+        return Ok(empty{});
     }
 
     auto refresh() -> Result<empty, UiError> {
@@ -363,46 +516,86 @@ class LazyRuntime {
         const Scalar maximum = axis(metrics->maximum);
         const Scalar current = axis(metrics->offset);
         auto logical = options_.reverse_layout ? maximum - current : current;
+        Scalar rebase_delta{};
         const auto old_line_count = line_count();
         const auto requested = state_->requested;
-        const bool requested_jump = requested && content_.count();
-        if (requested_jump) {
+        if (requested && content_.count()) {
             const auto index = *requested < content_.count() ? *requested : content_.count() - 1;
             auto line = line_for(index);
             if (line.is_err()) return Err(line.unwrap_err());
             if (old_line_count != line_count()) return document_->invalidate_layout(node_);
-            pending_scroll_ = Some(geometry_.position(*line) + state_->request_offset);
-        } else if (rebase_ && anchor_ && content_.count()) {
-            auto line = line_for(anchor_index(content_));
-            if (line.is_err()) return Err(line.unwrap_err());
-            if (old_line_count != line_count()) return document_->invalidate_layout(node_);
-            pending_scroll_ = Some(geometry_.position(*line) + anchor_->offset);
-        } else if (rebase_ && options_.reverse_layout && !anchor_) {
-            pending_scroll_ = Some(Scalar(0));
-        }
-        if (pending_scroll_) {
-            logical = smaller(larger(0, *pending_scroll_), maximum);
-            const auto corrected = options_.reverse_layout ? maximum - logical : logical;
-            pending_scroll_ = None();
-            if (requested_jump || corrected != current) {
-                auto rebased = requested_jump ? ScrollView::set_offset(*document_, scroll_, point(corrected))
-                                              : ScrollView::rebase_offset(*document_, scroll_, point(corrected));
-                if (rebased.is_err()) return Err(rebased.unwrap_err());
+            auto target = smaller(larger(0, geometry_.position(*line) + state_->request_offset), maximum);
+            auto moved = scroll_to(target, maximum, viewport, logical);
+            if (moved.is_err()) return moved;
+        } else if (rebase_) {
+            auto adjusted = logical;
+            if (anchor_ && content_.count()) {
+                auto line = line_for(anchor_index(content_));
+                if (line.is_err()) return Err(line.unwrap_err());
+                if (old_line_count != line_count()) return document_->invalidate_layout(node_);
+                adjusted = smaller(larger(0, geometry_.position(*line) + anchor_->offset), maximum);
+            } else if (options_.reverse_layout && !anchor_) {
+                adjusted = 0;
             }
-            if (requested_jump) state_.get()->requested = None();
+            if (adjusted != logical) {
+                const auto corrected = physical_offset(adjusted, maximum);
+                auto rebased = ScrollView::rebase_offset(*document_, scroll_, corrected);
+                if (rebased.is_err()) return Err(rebased.unwrap_err());
+                rebase_delta = axis(corrected) - current;
+            }
+            logical = adjusted;
         }
         rebase_ = false;
         const auto first = geometry_.line_at(larger(0, logical), line_count());
         auto window = request_window(first, logical, viewport);
         if (window.is_err()) return window;
-        publish_geometry(metrics->viewport, options_.reverse_layout ? maximum - logical : logical);
+        auto published = publish_geometry(metrics->viewport, axis(physical_offset(logical, maximum)), maximum, rebase_delta);
+        if (published.is_err()) return published;
+        auto prefetch = update_prefetch(logical);
+        if (prefetch.is_err()) return prefetch;
         return old_line_count != line_count() ? document_->invalidate_layout(node_) : Result<empty, UiError>(Ok(empty{}));
     }
 
   public:
     ~LazyRuntime() { unbind_state(); }
 
-    auto compose_slots(const LazyContent &content) const -> ComposeResult<Vec<LazySlot>> {
+    auto state_for(const Rc<LazyStateData> &supplied) -> Rc<LazyStateData> {
+        if (supplied) return supplied.clone();
+        if (!default_state_) default_state_ = rstd::rc::make_rc<LazyStateData>();
+        return default_state_.clone();
+    }
+
+    auto item_animator() -> LazyItemAnimator & { return item_animator_; }
+
+    void scroll_to_position(EventContext &context, const RoutedEvent &event) {
+        if (!state_ || !options_.user_scroll_enabled ||
+            event.input.semantic_action != SemanticsAction::ScrollToPosition || !event.input.semantic_position)
+            return;
+        const auto position = *event.input.semantic_position;
+        const auto main = horizontal_ ? position.column : position.row;
+        const auto cross = horizontal_ ? position.row : position.column;
+        auto index = main;
+        if (grid_) {
+            if (cross >= slots_.count()) return;
+            auto line = lines_.line_at(main, span());
+            if (line.is_err()) return;
+            index = line->first;
+            auto lane = Index();
+            bool found{};
+            for (auto width : line->spans) {
+                lane += width;
+                if (cross < lane) { found = true; break; }
+                ++index;
+            }
+            if (!found) return;
+        } else if (cross != 0) {
+            return;
+        }
+        if (index >= content_.count()) return;
+        if (state_.get()->request(index, 0, 0).is_ok()) context.prevent_default();
+    }
+
+    auto compose_slots(const LazyContent &content, const LazyOptions &options) const -> ComposeResult<Vec<LazySlot>> {
         const auto shift = anchor_ && content.identity() != content_.identity()
             ? rstd::int64_t(anchor_index(content)) - anchor_->index : 0;
         Vec<LazySlot> slots;
@@ -411,10 +604,9 @@ class LazyRuntime {
             (void)slot;
             claimed.push(false);
         }
-        for (const auto requested : requested_) {
-            const auto shifted = rstd::int64_t(requested) + shift;
-            if (shifted < 0 || shifted >= content.count()) continue;
-            const auto index = Index(shifted);
+        const auto add = [&](Index index, LazySlot::Kind kind) -> ComposeResult<empty> {
+            for (const auto &slot : slots)
+                if (kind == LazySlot::Kind::Prefetched && slot.index == index) return Ok(empty{});
             auto metadata = content.describe(index);
             auto encoded = metadata.key ? rstd::format("k{}", metadata.key->encoded().as_str()) : rstd::format("p{}", index);
             Key key(encoded.as_str());
@@ -424,11 +616,27 @@ class LazyRuntime {
             for (usize i{}; i < slots_in_use_.len(); ++i) {
                 const auto &previous = slots_in_use_[i];
                 if (previous.key != key) continue;
+                if (previous.kind == LazySlot::Kind::Spare && previous.content_type != metadata.content_type) continue;
                 id = previous.id;
                 claimed[i] = true;
                 break;
             }
-            slots.push({rstd::move(key), rstd::move(metadata.content_type), index, id});
+            slots.push({rstd::move(key), rstd::move(metadata.content_type), index, id, kind});
+            return Ok(empty{});
+        };
+        for (const auto requested : requested_) {
+            if (slots.len() >= usize(options.max_materialized)) break;
+            const auto shifted = rstd::int64_t(requested) + shift;
+            if (shifted < 0 || shifted >= content.count()) continue;
+            auto added = add(Index(shifted), LazySlot::Kind::Active);
+            if (added.is_err()) return Err(added.unwrap_err());
+        }
+        if (options.prefetch && content.identity() == content_.identity()) {
+            for (const auto index : prefetched_) {
+                if (slots.len() >= usize(options.max_materialized)) break;
+                auto added = add(index, LazySlot::Kind::Prefetched);
+                if (added.is_err()) continue;
+            }
         }
         auto next = next_slot_;
         for (usize i{}; i < slots.len(); ++i) {
@@ -446,6 +654,17 @@ class LazyRuntime {
                 slot.id = next++;
             }
         }
+        const auto active_and_prefetched = slots.len();
+        for (auto i = slots_in_use_.len(); i > usize() && slots.len() < usize(options.max_materialized);) {
+            --i;
+            if (claimed[i]) continue;
+            const auto &previous = slots_in_use_[i];
+            Index retained{};
+            for (auto slot = active_and_prefetched; slot < slots.len(); ++slot)
+                if (slots[slot].content_type == previous.content_type) ++retained;
+            if (retained >= options.retained_slots_per_type) continue;
+            slots.push({Key(previous.key), copy_key(previous.content_type), previous.index, previous.id, LazySlot::Kind::Spare});
+        }
         return Ok(rstd::move(slots));
     }
 
@@ -455,20 +674,28 @@ class LazyRuntime {
         if (state->owner && state->owner != this) return Err(UiError::PropertyOwned);
         const bool changed = content_.identity() != content.identity() || options_ != options ||
                              horizontal_ != horizontal || grid_ != grid;
-        bool placed_changed = rendered_.len() != slots.len();
-        for (usize i{}; !placed_changed && i < slots.len(); ++i) placed_changed = rendered_[i] != slots[i].index;
+        auto previous_rendered = rstd::move(rendered_);
+        if (changed) clear_prefetch();
         content_ = rstd::move(content);
         options_ = options;
         horizontal_ = horizontal;
         grid_ = grid;
         slots_in_use_ = rstd::move(slots);
-        rendered_.clear();
+        rendered_ = Vec<Index>{};
+        Index spares{}, prefetched{};
         for (const auto &slot : slots_in_use_) {
-            rendered_.push(Index(slot.index));
+            switch (slot.kind) {
+            case LazySlot::Kind::Active: rendered_.push(Index(slot.index)); break;
+            case LazySlot::Kind::Spare: ++spares; break;
+            case LazySlot::Kind::Prefetched: ++prefetched; break;
+            }
             if (next_slot_ <= slot.id) next_slot_ = slot.id + 1;
         }
+        bool placed_changed = previous_rendered.len() != rendered_.len();
+        for (usize i{}; !placed_changed && i < rendered_.len(); ++i) placed_changed = previous_rendered[i] != rendered_[i];
         signal_ = Some(rstd::move(signal));
         if (state_.get() != state.get()) {
+            if (document_ && scroll_animation_) (void)ScrollView::stop(*document_, scroll_);
             unbind_state();
             state_ = rstd::move(state);
             state_.get()->owner = this;
@@ -482,6 +709,8 @@ class LazyRuntime {
         }
         state_.get()->info.item_count = content_.count();
         state_.get()->info.materialized_count = Index(rendered_.len().to_primitive());
+        state_.get()->info.prefetched_count = prefetched;
+        state_.get()->info.retained_slot_count = spares;
         if (changed) {
             geometry_.reset(options.estimated_extent, options.spacing);
             geometry_ready_ = false;
@@ -505,13 +734,16 @@ class LazyRuntime {
         pending_ = queued.is_ok();
     }
 
-    auto attach(const Rc<LazyRuntime> &owner, UiDocument &document, UiId node, UiId viewport, UiId scroll) -> Result<empty, UiError> {
+    auto attach(const Rc<LazyRuntime> &owner, UiSession &session, UiId node, UiId viewport, UiId scroll) -> Result<empty, UiError> {
         if (!state_) return Err(UiError::PropertyOwned);
+        auto &document = session.document();
         auto observed = ScrollView::on_metrics_changed(document, scroll, [weak = owner.downgrade()](ViewportMetrics) {
             if (auto live = weak.upgrade(); live) live->get()->schedule(*live);
         });
         if (observed.is_err()) return Err(observed.unwrap_err());
         document_ = &document;
+        session_ = &session;
+        prefetch_owner_ = owner.downgrade();
         node_ = node;
         viewport_ = viewport;
         scroll_ = scroll;
@@ -519,14 +751,24 @@ class LazyRuntime {
         return Ok(empty{});
     }
     void detach() {
+        ++prefetch_generation_;
+        prefetch_queued_ = false;
+        clear_prefetch();
+        session_ = nullptr;
         metrics_ = None();
         unbind_state();
         state_.reset();
+        item_animator_.reset();
         document_ = nullptr;
     }
 
     void unbind_state() {
         if (state_ && state_->owner == this) {
+            if (scroll_animation_) {
+                state_.get()->requested = None();
+                state_.get()->scroll_status = LazyScrollStatus::Cancelled;
+                scroll_animation_ = None();
+            }
             state_.get()->owner = nullptr;
             state_.get()->wake = None();
         }
@@ -537,16 +779,20 @@ class LazyRuntime {
         const auto minimum = horizontal_ ? limits.min_height : limits.min_width;
         const auto requested_cross = cross_limit ? *cross_limit : minimum;
         const auto available = larger(0, requested_cross - cross_start() - cross_end());
-        if (!geometry_ready_ || cross_ != available) {
+        const auto parent_bounds = grid_ ? None<LayoutConstraints>() : context.parent_viewport_constraints();
+        if (!geometry_ready_ || cross_ != available || parent_bounds_ != parent_bounds) {
+            prefetch_constraints_changed_ = geometry_ready_;
             if (grid_) {
                 if (!cross_limit) return Err(UiError::InvalidValue);
-                auto slots = grid_->slots(available, options_.cross_spacing, options_.max_materialized);
+                auto slots = grid_->slots(available, options_.cross_spacing, options_.max_materialized,
+                                          options_.cross_arrangement);
                 if (slots.is_err()) return Err(slots.unwrap_err());
                 if (slots_.count() != slots->count())
                     lines_.reset(content_.count(), slots->count(), content_.has_spans());
                 slots_ = slots.unwrap();
             }
             cross_ = available;
+            parent_bounds_ = parent_bounds;
             geometry_.reset(options_.estimated_extent, options_.spacing);
             geometry_ready_ = true;
             rebase_ = true;
@@ -561,16 +807,43 @@ class LazyRuntime {
             const auto span_size = grid_ ? Some(slots_.extent(cell->lane, cell->span)) :
                                           (cross_limit ? Some(Scalar(available)) : None<Scalar>());
             const Scalar span_min = span_size && (grid_ || options_.cross_alignment == Alignment::Stretch) ? *span_size : 0;
-            auto child_size = context.measure_child(child, horizontal_ ? LayoutConstraints{{}, span_size, 0, span_min}
-                                                                      : LayoutConstraints{span_size, {}, span_min, 0});
+            auto constraints = horizontal_ ? LayoutConstraints{{}, span_size, 0, span_min}
+                                           : LayoutConstraints{span_size, {}, span_min, 0};
+            if (!grid_) {
+                const auto metadata = content_.describe(rendered_[child]);
+                auto fill = [](Option<Scalar> fraction, Option<Scalar> bound, Scalar padding,
+                               Scalar &min, Option<Scalar> &max) -> bool {
+                    if (!fraction) return true;
+                    if (!finite(*fraction) || *fraction < 0 || *fraction > 1) return false;
+                    if (bound) {
+                        min = larger(0, *bound - padding) * *fraction;
+                        max = Some(Scalar(min));
+                    }
+                    return true;
+                };
+                const auto width = parent_bounds ? parent_bounds->max_width : None<Scalar>();
+                const auto height = parent_bounds ? parent_bounds->max_height : None<Scalar>();
+                if (!fill(metadata.fill_parent_max_width, width, options_.padding.left + options_.padding.right,
+                          constraints.min_width, constraints.max_width) ||
+                    !fill(metadata.fill_parent_max_height, height, options_.padding.top + options_.padding.bottom,
+                          constraints.min_height, constraints.max_height))
+                    return Err(UiError::InvalidValue);
+            }
+            auto child_size = context.measure_child(child, constraints);
             if (child_size.is_err()) return Err(child_size.unwrap_err());
+            auto child_id = context.child_id(child);
+            if (child_id.is_err()) return Err(child_id.unwrap_err());
             const auto extent = main(*child_size);
-            placements_.push({*cell, extent, cross(*child_size)});
+            placements_.push({*cell, extent, cross(*child_size), *child_id});
             auto position = lines.len();
             while (position != usize() && lines[position - usize(1)].index >= cell->line) --position;
             if (position < lines.len() && lines[position].index == cell->line)
                 lines[position].extent = larger(lines[position].extent, extent);
             else lines.push({cell->line, extent});
+        }
+        for (auto child = rendered_.len(); child < context.child_count(); ++child) {
+            auto measured = context.measure_child(child, {Some(Scalar(0)), Some(Scalar(0))});
+            if (measured.is_err()) return Err(measured.unwrap_err());
         }
         rebase_ = geometry_.record(lines) || rebase_;
         extent_ = geometry_.extent(line_count()) + start_padding() + end_padding();
@@ -585,12 +858,21 @@ class LazyRuntime {
         return Ok(size(extent_, across));
     }
 
-    auto arrange(LayoutArrangeContext &context, Size) -> Result<empty, UiError> {
+    auto arrange_inactive(LayoutArrangeContext &context) -> Result<empty, UiError> {
+        for (auto child = rendered_.len(); child < context.child_count(); ++child) {
+            auto placed = context.arrange_child(child, {});
+            if (placed.is_err()) return placed;
+        }
+        return Ok(empty{});
+    }
+
+    auto arrange(LayoutArrangeContext &context, Size size) -> Result<empty, UiError> {
+        arranged_extent_ = main(size);
         for (usize child{}; child < placements_.len(); ++child) {
             auto placed = context.arrange_child(child, item_bounds(child));
             if (placed.is_err()) return Err(placed.unwrap_err());
         }
-        return Ok(empty{});
+        return arrange_inactive(context);
     }
 };
 
@@ -624,13 +906,22 @@ struct LazyElement {
             if (viewport.is_err()) return Err(ComposeError(ComposeStage::Effect, Some(viewport.unwrap_err())));
             auto scroll = parent(document, *viewport);
             if (scroll.is_err()) return Err(ComposeError(ComposeStage::Effect, Some(scroll.unwrap_err())));
+            auto action = document.bindings().make();
+            auto registered = committed.session().input().on(*scroll, EventType::SemanticAction, action.guard(),
+                [weak = runtime.downgrade()](EventContext &context, const RoutedEvent &event) {
+                    if (auto live = weak.upgrade(); live) live->get()->scroll_to_position(context, event);
+                });
+            if (registered.is_err()) return Err(ComposeError(ComposeStage::Effect, Some(UiError::Routing)));
             auto bounded = document.set_viewport_requires_bounds(*viewport, true);
             if (bounded.is_err()) return Err(ComposeError(ComposeStage::Effect, Some(bounded.unwrap_err())));
             auto installed = document.install_layout(*node, LazyLayout{runtime.clone()});
             if (installed.is_err()) return Err(ComposeError(ComposeStage::Effect, Some(installed.unwrap_err())));
-            auto attached = runtime.get()->attach(runtime, document, *node, *viewport, *scroll);
+            auto attached = runtime.get()->attach(runtime, committed.session(), *node, *viewport, *scroll);
             if (attached.is_err()) return Err(ComposeError(ComposeStage::Effect, Some(attached.unwrap_err())));
-            return Ok(EffectLease([runtime]() mutable { runtime.get()->detach(); }));
+            return Ok(EffectLease([runtime, action = rstd::move(action)]() mutable {
+                action = {};
+                runtime.get()->detach();
+            }));
         });
         return Ok(node);
     }
@@ -638,14 +929,16 @@ struct LazyElement {
 } // namespace
 
 auto make_lazy_layout(LazyContent content, LazyOptions options, bool horizontal, Option<GridCells> grid,
-                      LazyState state, rstd::source_location source) -> Element {
+                      Option<LazyState> state, rstd::source_location source) -> Element {
     auto name = rstd::ffi::CStr::from_ptr(source.file_name()).to_str().unwrap();
     auto site = rstd::format("lazy:{}:{}:{}", name, source.line(), source.column());
     return component<LazyRootTag>(Key(site.as_str()),
-        [content = rstd::move(content), options, horizontal, grid, state, source](CompositionContext &context) -> ComposeResult<Element> {
+        [content = rstd::move(content), options, horizontal, grid,
+         supplied = state ? LazyStateAccess::share(*state) : Rc<LazyStateData>{}, source](CompositionContext &context) -> ComposeResult<Element> {
             if (!options.padding.valid() || !finite(options.spacing) || !finite(options.cross_spacing) ||
-                options.cross_spacing < 0 || !finite(options.estimated_extent) || options.estimated_extent <= 0 ||
-                !options.max_materialized || !valid_alignment(options.cross_alignment))
+                !finite(options.estimated_extent) || options.estimated_extent <= 0 ||
+                !options.max_materialized || !valid_alignment(options.cross_alignment) ||
+                !valid_arrangement(options.main_arrangement) || !valid_arrangement(options.cross_arrangement))
                 return Err(ComposeError(ComposeStage::Prepare, Some(UiError::InvalidValue)));
             auto remembered = context.remember<Rc<LazyRuntime>>(Key{1}, []() -> ComposeResult<Rc<LazyRuntime>> {
                 return Ok(rstd::rc::make_rc<LazyRuntime>());
@@ -659,33 +952,54 @@ auto make_lazy_layout(LazyContent content, LazyOptions options, bool horizontal,
             auto observed = context.read(epoch->value());
             if (observed.is_err()) return Err(observed.unwrap_err());
             Vec<Element> children;
-            auto slots = runtime->compose_slots(content);
+            auto slots = runtime->compose_slots(content, options);
             if (slots.is_err()) return Err(slots.unwrap_err());
             for (const auto &slot : *slots) {
-                const auto index = slot.index;
-                auto item = component<LazyItemTag>(Key(slot.key), [content, index](CompositionContext &) {
-                    return content.build(index);
-                }, source, Rc<ComponentParameters>(new LazyItemParameters(content, index)));
-                children.push(stack({rstd::move(item)}, source).key(Key(slot.id)));
+                Vec<Element> contents;
+                if (slot.kind != LazySlot::Kind::Spare) {
+                    const auto index = slot.index;
+                    contents.push(component<LazyItemTag>(Key(slot.key), [content, index](CompositionContext &) {
+                        return content.build(index);
+                    }, source, Rc<ComponentParameters>(new LazyItemParameters(content, index)),
+                    slot.kind == LazySlot::Kind::Prefetched));
+                }
+                auto wrapper = stack(rstd::move(contents), source).key(Key(slot.id));
+                if (slot.kind != LazySlot::Kind::Active)
+                    wrapper = rstd::move(wrapper).style(NodeStyleBuilder{}.visible(false).hit_test_visible(false).build());
+                children.push(rstd::move(wrapper));
             }
-            context.on_commit([runtime, content, options, horizontal, grid, state, epoch = *epoch,
-                               slots = slots.unwrap()](CommittedContext &) mutable -> ComposeResult<empty> {
+            auto &animator = runtime.get()->item_animator();
+            children.push(animator.layer(source));
+            auto ghosts = animator.prepare_removals(context.session().document(), content);
+            context.on_commit([runtime, content, options, horizontal, grid, state = runtime.get()->state_for(supplied), epoch = *epoch,
+                               slots = slots.unwrap(), ghosts = rstd::move(ghosts)](CommittedContext &committed) mutable -> ComposeResult<empty> {
                 auto result = runtime.get()->configure(runtime, content, options, horizontal, grid,
-                                                       state.share(), epoch, rstd::move(slots));
+                                                       rstd::move(state), epoch, rstd::move(slots));
                 if (result.is_err()) return Err(ComposeError(ComposeStage::Action, Some(result.unwrap_err())));
+                auto removed = runtime.get()->item_animator().start_removals(committed.session().document(), rstd::move(ghosts));
+                if (removed.is_err()) return Err(ComposeError(ComposeStage::Action, Some(removed.unwrap_err())));
                 return Ok(empty{});
             });
             auto motion = options.motion;
             ScrollStyle scroll{.axes = {horizontal, !horizontal}, .motion = motion,
-                               .user_scroll_enabled = options.user_scroll_enabled};
+                               .user_scroll_enabled = options.user_scroll_enabled,
+                               .reverse_semantics = options.reverse_layout};
             auto body = element(LazyElement{runtime}, rstd::move(children), source);
-            if (options.reverse_layout) {
-                auto style = NodeStyleBuilder{};
-                if (horizontal) style.horizontal(Alignment::End);
-                else style.vertical(Alignment::End);
-                body = rstd::move(body).style(style.build());
+            auto style = NodeStyleBuilder{};
+            if (horizontal) style.horizontal(Alignment::Stretch);
+            else style.vertical(Alignment::Stretch);
+            auto actions = semantics_action_mask(SemanticsAction::Focus);
+            if (options.user_scroll_enabled)
+                actions |= semantics_action_mask(SemanticsAction::ScrollForward) |
+                           semantics_action_mask(SemanticsAction::ScrollBackward) |
+                           semantics_action_mask(SemanticsAction::ScrollToPosition);
+            auto collection = SemanticsCollection{.horizontal = horizontal};
+            if (!grid) {
+                collection.rows = Some(horizontal ? Index(1) : content.count());
+                collection.columns = Some(horizontal ? content.count() : Index(1));
             }
-            return Ok(scroll_view(rstd::move(body), scroll, source));
+            return Ok(with_semantics(scroll_view(rstd::move(body).style(style.build()), scroll, source),
+                {.role = SemanticsRole::ScrollArea, .actions = actions, .collection = Some(collection)}));
         }, source);
 }
 } // namespace vui::compose

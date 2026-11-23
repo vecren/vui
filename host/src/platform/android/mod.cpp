@@ -232,7 +232,7 @@ auto AndroidHost::accessibility_nodes(JNIEnv *env, const SemanticsSnapshot &snap
     if (!type)
         return nullptr;
     auto constructor = env->GetMethodID(type, "<init>",
-                                       "(JIJJJIJJLjava/lang/String;Ljava/lang/String;Ljava/lang/String;FFFFIIIIIZZ)V");
+                                       "(JIJJJIJJLjava/lang/String;Ljava/lang/String;Ljava/lang/String;FFFFIIIIIIIIZZZ)V");
     if (!constructor || nodes.len() > usize(0x7fffffff))
         return nullptr;
     auto array = env->NewObjectArray(jsize(nodes.len().to_primitive()), type, nullptr);
@@ -252,7 +252,13 @@ auto AndroidHost::accessibility_nodes(JNIEnv *env, const SemanticsSnapshot &snap
         const auto parent = node.parent ? *node.parent : SemanticsId{};
         auto checked = properties.checked.is_some() ? jint(*properties.checked) : -1;
         auto bounds = node.bounds;
-        auto class_name = env->NewStringUTF(accessibility_class(properties.role));
+        auto collection_count = [](Option<Index> count) -> jint {
+            return count && *count <= Index(0x7fffffff) ? jint(*count) : -1;
+        };
+        const auto collection = properties.collection;
+        auto class_name = env->NewStringUTF(
+            properties.role == SemanticsRole::ScrollArea && collection && collection->horizontal
+                ? "android.widget.HorizontalScrollView" : accessibility_class(properties.role));
         auto label = class_name ? encode(env, properties.label.as_str()) : nullptr;
         auto value = label ? encode(env, properties.value.as_str()) : nullptr;
         auto result = !value ? nullptr : env->NewObject(
@@ -263,7 +269,10 @@ auto AndroidHost::accessibility_nodes(JNIEnv *env, const SemanticsSnapshot &snap
             jfloat((bounds.y + bounds.height) * scale), action(SemanticsAction::Activate),
             forward ? forward : action(SemanticsAction::ScrollForward),
             backward ? backward : action(SemanticsAction::ScrollBackward), action(SemanticsAction::Focus), checked,
-            jboolean(node.enabled), jboolean(node.focused));
+            action(SemanticsAction::ScrollToPosition),
+            collection ? collection_count(collection->rows) : -1,
+            collection ? collection_count(collection->columns) : -1,
+            jboolean(collection.is_some()), jboolean(node.enabled), jboolean(node.focused));
         auto written = result != nullptr;
         if (written)
             env->SetObjectArrayElement(array, index++, result);

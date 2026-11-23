@@ -178,8 +178,9 @@ public final class VuiView extends SurfaceView implements SurfaceHolder.Callback
         return accessibility.hover(event) || super.dispatchHoverEvent(event);
     }
 
-    boolean performSemantics(long session, int slot, long generation, long mount, int action) {
-        if (handle == 0 || !surfaceAvailable || !nativePerformSemantics(handle, session, slot, generation, mount, action))
+    boolean performSemantics(long session, int slot, long generation, long mount, int action, int row, int column) {
+        if (handle == 0 || !surfaceAvailable ||
+            !nativePerformSemantics(handle, session, slot, generation, mount, action, row, column))
             return false;
         schedulePump();
         return true;
@@ -482,7 +483,7 @@ public final class VuiView extends SurfaceView implements SurfaceHolder.Callback
     private static native int nativePump(long handle, long now, long sample, long expected);
     private static native VuiAccessibility.Node[] nativeSemantics(long handle);
     private static native boolean nativePerformSemantics(long handle, long session, int slot, long generation,
-        long mount, int action);
+        long mount, int action, int row, int column);
     private static native void nativeActive(long handle, boolean active);
     private static native void nativeFocus(long handle, boolean focused);
     private static native void nativeWindowFocus(long handle, boolean focused);

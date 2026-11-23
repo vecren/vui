@@ -382,6 +382,7 @@ auto UiSession::advance_impl(slice<InputEvent> events, FrameTiming timing, Surfa
     auto sample_time = timing.sample_time_ns();
     timing.sample_ns = Some(rstd::cmp::max(sample_time, document_.animation_sample_time().unwrap_or(0)));
     last_timing_ = timing;
+    const auto idle_ready = events.is_empty() && !idle_work_.is_empty();
     UpdateStats stats;
     input_.begin_input_batch();
     auto settled = events.is_empty() ? settle(surface.logical_size, timing, stats)
@@ -454,16 +455,24 @@ auto UiSession::advance_impl(slice<InputEvent> events, FrameTiming timing, Surfa
         if (settled.is_err())
             return failure(settled.unwrap_err());
     }
+    if (idle_ready) {
+        auto work = idle_work_.remove(usize());
+        if ((*work)()) {
+            settled = settle(surface.logical_size, timing, stats);
+            if (settled.is_err()) return failure(settled.unwrap_err());
+        }
+    }
     bool changed = published_ui_ != update_->revision();
     bool surface_changed = surface_.is_none() || *surface_ != surface;
     auto published = publish_update();
     if (published.is_err()) return failure(published.unwrap_err());
     surface_ = Some(surface);
     bool content_changed = observe_content();
+    if (!idle_work_.is_empty()) document_.bindings().wake();
     return Ok(AdvanceResult{update_->revision(), visual_.applied_revision(), stats,
                             changed || surface_changed || content_changed || frame_content_.active(), processed,
                             document_.animations_active() || motion_.active() || frame_content_.active(),
-                            state_bindings_.pending() || updates_.pending()});
+                            state_bindings_.pending() || updates_.pending() || !idle_work_.is_empty()});
 }
 
 auto UiSession::publish_update() -> Result<empty, SessionError> {

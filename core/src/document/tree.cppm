@@ -8,6 +8,7 @@ import :document.modifier;
 import :document.subcomposition;
 import :layout.protocol;
 import :paint.protocol;
+import :scene.composition;
 import :motion.properties;
 import :state.targets;
 import :document.phase;
@@ -43,6 +44,7 @@ struct DocumentNode {
     bool paint_dirty{true};
     rstd::rc::Rc<DocumentPhaseObservation> phase_observations[3];
     DisplayList content;
+    Option<Box<RenderProperties>> frozen_paint;
     Serial mount_generation{1}, relation_generation{1};
     Vec<UiNodeStateSlot> states;
     Option<UiTreePermit> children_owner;

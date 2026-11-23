@@ -6,6 +6,16 @@ import :modifier.protocol;
 using namespace rstd::prelude;
 
 export namespace vui {
+class PaintedSubtree {
+    struct Entry {
+        RenderProperties properties;
+        DisplayList content;
+        Option<Index> parent;
+    };
+    Vec<Entry> entries_;
+    friend class UiDocument;
+};
+
 struct MutationResult {
     Serial id{};
     Option<UiError> error;

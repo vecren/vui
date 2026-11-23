@@ -106,8 +106,8 @@ auto level_content(cx::Borrowed<LevelRows> rows, state::ValueSnapshot<Vec<Level>
     cx::LazyContent content;
     for (usize section{}; section < levels.value().len(); section += usize(levels_per_section)) {
         const auto count = rstd::min(usize(levels_per_section), levels.value().len() - section);
-        auto title = rstd::format("Levels {:04}-{:04}", levels.value()[section].id,
-            levels.value()[section + count - usize(1)].id);
+        auto title = rstd::format("Levels {:04}-{:04}", (section + usize(1)).to_primitive(),
+            (section + count).to_primitive());
         auto header = cx::stack({label(title.as_str(), 13, foreground, true)})
             .style(NodeStyleBuilder{}.horizontal(Alignment::Stretch).min_height(34)
                 .padding(8).background(field_surface).radius(6).build());
@@ -118,7 +118,8 @@ auto level_content(cx::Borrowed<LevelRows> rows, state::ValueSnapshot<Vec<Level>
             [levels, section](Index index) {
                 const auto &level = levels.value()[section + usize(index)];
                 return cx::LazyItemInfo{.key = Some(cx::Key{level.id}),
-                    .content_type = Some(cx::Key{Serial(level.bonus)})};
+                    .content_type = Some(cx::Key{Serial(level.bonus)}),
+                    .animation = Some(cx::LazyItemAnimationOptions{})};
             }, [](Index index, cx::LazyGridSpanScope span) { return index == 0 ? span.max_line_span : Index(1); });
         if (added.is_err()) return Err(added.unwrap_err());
     }
@@ -132,6 +133,11 @@ auto mode_button(cx::Borrowed<LevelRows> rows, LevelMode current, LevelMode targ
     return cx::with_semantics(control_finish(cx::button(button_label(title),
         [rows, target] { rows->mode.set(target).unwrap(); }, button_style(active))
         .style(NodeStyleBuilder{}.width(78).height(36).build()), active), rstd::move(properties));
+}
+
+auto list_action(ref<str> title, auto callback) -> cx::Element {
+    return control_finish(cx::button(button_label(title), rstd::move(callback), button_style(false))
+        .style(NodeStyleBuilder{}.width(58).height(36).build()), false);
 }
 } // namespace
 
@@ -162,13 +168,36 @@ auto lists(cx::Borrowed<LevelRows> rows) -> cx::ComposeResult<cx::Element> {
     });
     if (bound.is_err()) return Err(bound.unwrap_err());
 
+    auto state = mode == LevelMode::Grid ? rows->grid : rows->list;
+    auto jump = list_action("Jump"_str, [state]() mutable {
+        const auto layout = state.layout_info();
+        if (!layout.item_count) return;
+        const auto index = layout.first_visible_index + 64;
+        state.animate_scroll_to_item(index < layout.item_count ? index : 0).unwrap();
+    });
+    auto move = list_action("Move"_str, [rows] {
+        auto levels = state::read(rows->levels.value());
+        if (levels.is_err()) return;
+        const auto data = levels->value().as_slice();
+        if (data.len() < usize(2)) return;
+        const auto selected = state::read(rows->selected.value()).unwrap().value();
+        for (usize i{}; i < data.len(); ++i) {
+            if (data[i].id != selected) continue;
+            const auto next = i + usize(1) < data.len() && (i + usize(1)) % usize(levels_per_section) != usize()
+                ? i + usize(1) : i - usize(1);
+            auto order = Vec<Level>::from(data);
+            rstd::swap(order[i], order[next]);
+            rows->levels.set(rstd::move(order)).unwrap();
+            break;
+        }
+    });
     auto toolbar = cx::row({mode_button(rows, mode, LevelMode::List, "List"_str),
-        mode_button(rows, mode, LevelMode::Grid, "Grid"_str)}).gap(6);
+        mode_button(rows, mode, LevelMode::Grid, "Grid"_str), rstd::move(jump), rstd::move(move)}).gap(6);
     auto content = items.unwrap();
     const cx::LazyOptions options{.spacing = 4, .cross_spacing = 6, .estimated_extent = 48};
     auto viewport = mode == LevelMode::Grid
-        ? cx::lazy_vertical_grid(cx::GridCells::adaptive(124), rstd::move(content), options, rows->grid)
-        : cx::lazy_column(rstd::move(content), options, rows->list);
+        ? cx::lazy_vertical_grid(cx::GridCells::adaptive(124), rstd::move(content), options, state)
+        : cx::lazy_column(rstd::move(content), options, state);
     viewport = rstd::move(viewport).style(fill().build()).reference(view);
 
     auto thumb = cx::native(LayoutKind::Leaf)

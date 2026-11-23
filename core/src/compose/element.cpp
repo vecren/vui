@@ -17,10 +17,7 @@ struct SemanticsModifier {
 
     auto create() const -> State { return {}; }
     auto update(State &, BehaviorContext &context) const -> ComposeResult<empty> {
-        auto described = context.session().semantics().set(context.target(), {
-            properties.role, properties.label.clone(), properties.value.clone(),
-            properties.actions, properties.merge_descendants, properties.checked,
-        });
+        auto described = context.session().semantics().set(context.target(), properties.clone());
         if (described.is_err()) return Err(ComposeError(ComposeStage::Effect, Some(described.unwrap_err())));
         return Ok(empty{});
     }
@@ -35,7 +32,8 @@ ElementData::ElementData(const ElementData &other)
       identity(other.identity.is_some() ? Some(CallIdentity(*other.identity)) : None<CallIdentity>()),
       text(other.text.is_some() ? Some(UiTextValue(*other.text)) : None<UiTextValue>()),
       component_type(other.component_type), view(other.view), movable(other.movable), parameters(other.parameters), adapter(other.adapter),
-      reference(other.reference.is_some() ? Some(NodeRef(*other.reference)) : None<NodeRef>()), invalid(other.invalid), source(other.source) {
+      reference(other.reference.is_some() ? Some(NodeRef(*other.reference)) : None<NodeRef>()),
+      precompose(other.precompose), invalid(other.invalid), source(other.source) {
     if (other.image.is_some()) {
         const auto &source = *other.image;
         image = Some(UiImageValue{source.data.is_some() ? Some(ImageData(*source.data)) : None<ImageData>(),

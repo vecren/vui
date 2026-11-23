@@ -1,5 +1,6 @@
 export module vui:document.layout;
 import :node.types;
+import :layout.types;
 import :document.snapshot;
 import :binding.signal;
 import :document.reveal;
@@ -28,6 +29,8 @@ struct DocumentViewportLayout {
     Point requested;
     ViewportMetrics metrics;
     Option<rstd::rc::Rc<DocumentViewportObserver>> observer;
+    Option<LayoutConstraints> measure_bounds;
+    bool child_measures_bounds{};
     bool requires_bounds{};
 };
 } // namespace vui

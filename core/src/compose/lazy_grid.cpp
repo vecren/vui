@@ -4,9 +4,24 @@ using namespace rstd::prelude;
 
 namespace vui::compose {
 
-auto GridCells::slots(Scalar available, Scalar spacing, Index max_slots) const
+auto arrangement_offset(LazyArrangement arrangement, Scalar spare, Index rank, Index count, bool reverse)
+    -> Scalar {
+    if (spare <= 0 || !count) return 0;
+    switch (arrangement) {
+    case LazyArrangement::Default: return reverse ? spare : 0;
+    case LazyArrangement::Start: return 0;
+    case LazyArrangement::Center: return spare * .5;
+    case LazyArrangement::End: return spare;
+    case LazyArrangement::SpaceBetween: return count > 1 ? spare * rank / (count - 1) : 0;
+    case LazyArrangement::SpaceAround: return spare * (Scalar(rank) + .5) / count;
+    case LazyArrangement::SpaceEvenly: return spare * (Scalar(rank) + 1) / (Scalar(count) + 1);
+    }
+    return 0;
+}
+
+auto GridCells::slots(Scalar available, Scalar spacing, Index max_slots, LazyArrangement arrangement) const
     -> Result<LazyGridSlots, UiError> {
-    if (!valid() || !finite(available) || !finite(spacing) || available < 0)
+    if (!valid() || !finite(available) || !finite(spacing) || available < 0 || !valid_arrangement(arrangement))
         return Err(UiError::InvalidValue);
 
     Scalar count = value_;
@@ -33,12 +48,13 @@ auto GridCells::slots(Scalar available, Scalar spacing, Index max_slots) const
     result.sizes.reserve(usize(lane_count));
     result.positions.reserve(usize(lane_count));
     Scalar position{};
+    const auto spare = available - (width * count + remainder + (count - 1) * spacing);
     for (Index lane{}; lane < lane_count; ++lane) {
         const auto lane_width = width + (Scalar(lane) < remainder ? Scalar(1) : Scalar(0));
         if (!finite(position + lane_width) || (lane + 1 < lane_count && lane_width + spacing < 0))
             return Err(UiError::InvalidValue);
         result.sizes.push(Scalar(lane_width));
-        result.positions.push(Scalar(position));
+        result.positions.push(position + arrangement_offset(arrangement, spare, lane, lane_count));
         position += lane_width + spacing;
     }
     return Ok(rstd::move(result));

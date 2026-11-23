@@ -89,12 +89,14 @@ struct DependencyWatch {
     DependencyWatch(vui::state::NodeId value, vui::state::Subscription watch)
         : id(value), subscription(rstd::move(watch)) {}
 };
+using CommitAction = Box<rstd::dyn<rstd::FnMut<ComposeResult<empty>(CommittedContext &)>>>;
 struct ScopeState {
-    bool dirty{true}, alive{true};
+    bool dirty{true}, alive{true}, precomposed{};
     Vec<rstd::rc::Rc<MemorySlot>> memories;
     Vec<rstd::rc::Rc<EffectSlot>> effects;
     Vec<rstd::rc::Rc<DependencyWatch>> reads;
     Vec<LocalRead> local_reads;
+    Vec<rstd::rc::Rc<CommitAction>> deferred_actions;
 };
 struct ScopeDraft {
     rstd::rc::Rc<ScopeState> scope;
@@ -102,6 +104,8 @@ struct ScopeDraft {
     Vec<rstd::rc::Rc<EffectSlot>> effects;
     Vec<rstd::rc::Rc<DependencyWatch>> reads;
     Vec<LocalRead> local_reads;
+    Vec<rstd::rc::Rc<CommitAction>> deferred_actions;
+    bool precompose{};
     explicit ScopeDraft(rstd::rc::Rc<ScopeState> value) : scope(rstd::move(value)) {}
     template <class T, class F>
     auto memory(MemoryKind kind, Key key, F make, EffectKeys dependencies = {}) -> ComposeResult<rstd::rc::Rc<MemorySlot>> {
@@ -190,7 +194,7 @@ struct ComposeDraft {
     Vec<rstd::rc::Rc<EffectSlot>> mounts;
     Vec<AttachedBehaviorDraft> attached;
     usize position{};
-    bool fresh{}, reused{}, owns_children{};
+    bool fresh{}, reused{}, owns_children{}, promoted{}, precompose_failed{};
 };
 class ComposeBuild {
     struct Observation {
@@ -261,7 +265,9 @@ class CompositionContext {
     CompositionContext(const CompositionContext &) = delete;
     auto session() -> UiSession & { return build_.session; }
     template <class F> void on_commit(F action) {
-        build_.actions.push(Box<rstd::dyn<rstd::FnMut<ComposeResult<empty>(CommittedContext &)>>>::make(rstd::move(action)));
+        auto callback = CommitAction::make(rstd::move(action));
+        if (draft_.precompose) draft_.deferred_actions.push(rstd::rc::make_rc<CommitAction>(rstd::move(callback)));
+        else build_.actions.push(rstd::move(callback));
     }
     auto identity(Serial site) -> CallIdentity;
     auto slot(Serial site) -> Key { return identity(site).memory_key(); }
@@ -319,7 +325,8 @@ class CompositionContext {
                 auto watched = observation.unwrap()->watch(value, [scope, signal](vui::state::Invalidation) {
                     auto receiver = scope.upgrade(); auto owner = signal.upgrade();
                     if (receiver.is_some() && receiver->get()->alive && owner.is_some()) {
-                        receiver->get()->dirty = true; owner->get()->invalidate();
+                        receiver->get()->dirty = true;
+                        if (!receiver->get()->precomposed) owner->get()->invalidate();
                     }
                 });
                 if (watched.is_err()) return Err(state_error(watched.unwrap_err()));
@@ -332,7 +339,9 @@ class CompositionContext {
         if (draft_.effects.len() >= usize(4096)) return Err(ComposeError(ComposeStage::Limit));
         for (const auto &slot : draft_.effects) if (slot->key == key) return Err(ComposeError(ComposeStage::Key));
         for (const auto &slot : draft_.scope->effects)
-            if (slot->key == key && slot->keys == keys) { draft_.effects.push(slot.clone()); return Ok(empty{}); }
+            if (slot->key == key && slot->keys == keys && !draft_.scope->precomposed) {
+                draft_.effects.push(slot.clone()); return Ok(empty{});
+            }
         draft_.effects.push(rstd::rc::make_rc<EffectSlot>(rstd::move(key), rstd::move(keys),
             rstd::rc::make_rc<EffectFunction>(rstd::move(start), source)));
         return Ok(empty{});

@@ -4,6 +4,10 @@ using namespace rstd::prelude;
 using namespace rstd::literals;
 
 namespace vui {
+ScrollInteraction::~ScrollInteraction() {
+    if (animation_) *animation_->status.get() = ScrollAnimationStatus::Cancelled;
+}
+
 auto ScrollInteraction::acquire() -> bool {
     if (lease_.active()) return true;
     PropertyKey key{viewport_,PresentationProperty::ViewportOffset};auto value=ui().take_over(slice<PropertyKey>::from_raw_parts(&key,usize(1)));
@@ -64,9 +68,83 @@ auto ScrollInteraction::rebase_offset(Point value) -> Result<empty, UiError> {
     auto result = ui().write_presentation(lease_, batch);
     if (result.is_ok()) {
         written_ = value;
-        rebase_ = true;
+        if (mode_ == Mode::Programmatic) restart_animation(value, now());
+        else rebase_ = true;
     }
     return result;
+}
+
+auto ScrollInteraction::animate_offset(Point value, Serial duration_ns) -> Result<ScrollAnimation, UiError> {
+    if (!finite(value.x) || !finite(value.y) || !duration_ns) return Err(UiError::InvalidValue);
+    auto metrics = ui().viewport_metrics(viewport_);
+    if (metrics.is_err()) return Err(metrics.unwrap_err());
+
+    stop();
+    error_ = None();
+    if (!acquire()) return Err(*error_);
+    auto status = rstd::rc::make_rc<ScrollAnimationStatus>(ScrollAnimationStatus::Running);
+    animation_ = Some(OffsetAnimation{status.clone(), bounded(metrics->offset, metrics->maximum),
+                                       masked(value), now(), duration_ns});
+    mode_ = Mode::Programmatic;
+    written_ = animation_->from;
+    rebase_ = false;
+    wake();
+    return Ok(ScrollAnimation(rstd::move(status)));
+}
+
+void ScrollInteraction::restart_animation(Point from, Serial time) {
+    auto &animation = *animation_;
+    const auto elapsed = time > animation.started ? time - animation.started : Serial{};
+    if (elapsed >= animation.duration) return;
+    animation.duration -= elapsed;
+    animation.from = from;
+    animation.started = time;
+}
+
+auto ScrollInteraction::retarget_offset(const ScrollAnimation &animation, Point value) -> Result<empty, UiError> {
+    if (!finite(value.x) || !finite(value.y)) return Err(UiError::InvalidValue);
+    if (mode_ != Mode::Programmatic || animation_->status.get() != animation.status_.get() || !lease_.active())
+        return Err(UiError::Cancelled);
+    const auto target = masked(value);
+    if (target == animation_->to) return Ok(empty{});
+    auto metrics = ui().viewport_metrics(viewport_);
+    if (metrics.is_err()) return Err(metrics.unwrap_err());
+    restart_animation(metrics->offset, now());
+    animation_->to = target;
+    return Ok(empty{});
+}
+
+auto ScrollInteraction::sample_animation(MotionContext &context, const ViewportMetrics &metrics)
+    -> Result<MotionStatus, MotionError> {
+    const auto time = context.now_ns();
+    auto &animation = *animation_;
+    const auto target = bounded(animation.to, metrics.maximum);
+    const auto elapsed = time > animation.started ? time - animation.started : Serial{};
+    const bool finished = elapsed >= animation.duration;
+    auto value = target;
+    if (!finished) {
+        const auto progress = Scalar(elapsed) / Scalar(animation.duration);
+        const auto eased = progress * progress * (3 - 2 * progress);
+        value = bounded({animation.from.x + (target.x - animation.from.x) * eased,
+                         animation.from.y + (target.y - animation.from.y) * eased}, metrics.maximum);
+    }
+    PresentationBatch batch;
+    batch.viewport_offset(viewport_, value);
+    if (auto written = context.write(lease_, batch); written.is_err()) {
+        error_ = Some(UiError::PropertyOwned);
+        stop(true, false, false);
+        return Ok(MotionStatus::Idle);
+    }
+    written_ = value;
+    if (finished) {
+        *animation.status.get() = ScrollAnimationStatus::Finished;
+        stop(true, false, false);
+        return Ok(MotionStatus::Idle);
+    }
+    const auto remaining = animation.duration - elapsed;
+    const auto step = remaining < Serial(8'333'333) ? remaining : Serial(8'333'333);
+    context.request_tick(time + (step <= ~Serial{} - time ? step : ~Serial{} - time)).unwrap();
+    return Ok(MotionStatus::Running);
 }
 
 auto ScrollInteraction::describe_semantics() const -> Result<empty, UiError> {
@@ -119,8 +197,12 @@ auto ScrollInteraction::sample_axis(Axis &axis,Scalar maximum,Serial time) -> Sc
 }
 
 void ScrollInteraction::press(EventContext &,const RoutedEvent &event) {
-    if (!style_.user_scroll_enabled || !style_.motion.enabled || (event.input.pointer_kind!=PointerKind::Touch && event.input.button!=PointerButton::Primary) || pointer_.is_some()) return;
-    stop(false,false);pointer_=Some(PointerKey{event.input.device,event.input.pointer});mode_=Mode::Pending;error_=None();
+    if (!style_.user_scroll_enabled || (!style_.motion.enabled && mode_ != Mode::Programmatic) ||
+        (event.input.pointer_kind != PointerKind::Touch && event.input.button != PointerButton::Primary) ||
+        pointer_.is_some()) return;
+    stop(false, false);
+    if (!style_.motion.enabled) return;
+    pointer_=Some(PointerKey{event.input.device,event.input.pointer});mode_=Mode::Pending;error_=None();
 }
 
 void ScrollInteraction::pending_up(EventContext &,const RoutedEvent &event) {
@@ -143,8 +225,16 @@ auto ScrollInteraction::make(UiSession &session,UiId root,UiId viewport,ScrollSt
     if (availability.is_err()) return Err(ControlError{{},Some(availability.unwrap_err())});owner.get()->availability_=rstd::move(availability).unwrap();
     owner.get()->metrics_=session.document().on_viewport_changed(viewport,[self](ViewportMetrics metrics){
         auto owner=self.upgrade();if (owner.is_none()) return;auto &value=*owner->get();
-        if (value.geometry_known_ && (value.viewport_size_!=metrics.viewport || value.maximum_!=metrics.maximum ||
-            (value.mode_==Mode::Animate && value.written_!=metrics.offset))) value.rebase_=true;
+        if (value.mode_ == Mode::Programmatic) {
+            if (value.written_ != metrics.offset) {
+                value.restart_animation(metrics.offset, value.now());
+                value.written_ = metrics.offset;
+            }
+        } else if (value.geometry_known_ &&
+                   (value.viewport_size_ != metrics.viewport || value.maximum_ != metrics.maximum ||
+                    (value.mode_ == Mode::Animate && value.written_ != metrics.offset))) {
+            value.rebase_ = true;
+        }
         value.viewport_size_=metrics.viewport;value.maximum_=metrics.maximum;value.geometry_known_=true;
     }).unwrap();return Ok(rstd::move(owner));
 }
@@ -154,6 +244,12 @@ void ScrollInteraction::stop(bool clamp,bool release,bool request) {
     if (lease_.active()) ui().release_presentation(lease_);else lease_.revoke();
     if (clamp && owned && ui().valid(viewport_)) {ui().set_viewport_boundary(viewport_,ViewportBoundary::Clamped);boundary_owned_=false;}
     if (release && pointer.is_some()) {auto key=*pointer;session_.input().release_input(slice<PointerKey>::from_raw_parts(&key,usize(1)));}
+    if (animation_) {
+        if (*animation_->status == ScrollAnimationStatus::Running)
+            *animation_->status.get() = ScrollAnimationStatus::Cancelled;
+        animation_ = None();
+        if (ui().valid(viewport_)) ui().invalidate_viewport_observation(viewport_);
+    }
     if (request && owned) wake();
 }
 
@@ -170,7 +266,9 @@ auto ScrollInteraction::handle(EventContext &context,const RoutedEvent &event) -
     if (event.input.type==EventType::CaptureGained && event.target==root_ && style_.motion.enabled && style_.user_scroll_enabled) {
         auto snapshot=session_.input().snapshot();auto metrics=ui().viewport_metrics(viewport_);
         if (snapshot.is_none() || metrics.is_err()) return true;
-        auto local=local_event(*snapshot,event.input);if (local.is_none() || !acquire()) return true;
+        auto local=local_event(*snapshot,event.input);if (local.is_none()) return true;
+        if (mode_ == Mode::Programmatic) stop(false, false);
+        if (!acquire()) return true;
         pointer_=Some(PointerKey{event.input.device,event.input.pointer});mode_=Mode::Drag;anchor_=last_local_=local->position;origin_=metrics->offset;rebase_=false;
         tracker_.remove(*pointer_);
         if (style_.motion.movement==ScrollMovement::Elastic) {ui().set_viewport_boundary(viewport_,ViewportBoundary::Unclamped).unwrap();boundary_owned_=true;}
@@ -195,10 +293,11 @@ auto ScrollInteraction::handle(EventContext &context,const RoutedEvent &event) -
 auto ScrollInteraction::sample(MotionContext &context,FrameTiming) -> Result<MotionStatus,MotionError> {
     if (mode_==Mode::Idle) return Ok(MotionStatus::Idle);
     if (!session_.input().pointer_available(root_)) {stop(true,false,false);return Ok(MotionStatus::Idle);}
-    if (mode_!=Mode::Animate) return Ok(MotionStatus::Idle);
+    if (mode_!=Mode::Animate && mode_!=Mode::Programmatic) return Ok(MotionStatus::Idle);
     if (!lease_.active()) {error_=Some(UiError::PropertyOwned);stop(true,false,false);return Ok(MotionStatus::Idle);}
     auto metrics=ui().viewport_metrics(viewport_);
     if (metrics.is_err()) {context.request_tick(context.now_ns()+8'333'333).unwrap();return Ok(MotionStatus::Running);}
+    if (mode_ == Mode::Programmatic) return sample_animation(context, *metrics);
     if (rebase_) {
         begin_axis(x_,metrics->offset.x,velocity_.x,metrics->maximum.x,style_.axes.horizontal,context.now_ns());
         begin_axis(y_,metrics->offset.y,velocity_.y,metrics->maximum.y,style_.axes.vertical,context.now_ns());rebase_=false;
@@ -295,7 +394,8 @@ void ScrollState::handle(EventContext &context, const RoutedEvent &event) {
             else next.y = shift(next.y, direction * metrics.viewport.height, 1, metrics.maximum.y);
         };
         if (semantic) {
-            page(event.input.semantic_action == SemanticsAction::ScrollForward ? 1 : -1);
+            const auto direction = event.input.semantic_action == SemanticsAction::ScrollForward ? 1 : -1;
+            page(style_.reverse_semantics ? -direction : direction);
             if (next == metrics.offset) return;
         } else switch (event.input.key) {
         case Key::Left:
@@ -342,6 +442,20 @@ auto ScrollView::rebase_offset(UiDocument &ui, UiId id, Point value) -> Result<e
     auto state = ui.state<ScrollState>(id);
     return state ? state->rebase_offset(ui, value)
                  : Result<empty, UiError>(Err(UiError::InvalidId));
+}
+
+auto ScrollView::animate_offset(UiDocument &ui, UiId id, Point value, Serial duration_ns)
+    -> Result<ScrollAnimation, UiError> {
+    auto state = ui.state<ScrollState>(id);
+    if (!state || !state->interaction_) return Err(UiError::InvalidId);
+    return state->interaction_->get()->animate_offset(value, duration_ns);
+}
+
+auto ScrollView::retarget_offset(UiDocument &ui, UiId id, const ScrollAnimation &animation, Point value)
+    -> Result<empty, UiError> {
+    auto state = ui.state<ScrollState>(id);
+    if (!state || !state->interaction_) return Err(UiError::InvalidId);
+    return state->interaction_->get()->retarget_offset(animation, value);
 }
 
 auto ScrollView::prepare(UiDocument &ui, UiEditBatch &edit, Option<UiId> previous,

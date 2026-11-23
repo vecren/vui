@@ -74,6 +74,13 @@ struct UiDocument::MeasureContext final : LayoutMeasureContext {
         if (!node.modifiers.is_empty()) value.padding = 0;
         return value;
     }
+    auto parent_viewport_constraints() const -> Option<LayoutConstraints> override {
+        auto parent = node.parent ? document.resolve(*node.parent) : nullptr;
+        if (!parent || !parent->viewport) return None();
+        auto &viewport = **parent->viewport;
+        viewport.child_measures_bounds = true;
+        return viewport.measure_bounds;
+    }
     auto child_relation(usize index) const -> Result<UiRelation, UiError> override {
         if (index >= node.children.len())
             return Err(UiError::MissingChild);
@@ -395,10 +402,14 @@ auto UiDocument::measure(UiId id, LayoutConstraints available, Index depth) -> O
         maximum(Scalar(0), (style.width.is_some() ? *width : min_width) - 2 * style.padding),
         maximum(Scalar(0), (style.height.is_some() ? *height : min_height) - 2 * style.padding)};
     if (node.viewport.is_some()) {
-        const auto &viewport = **node.viewport;
+        auto &viewport = **node.viewport;
         if (viewport.requires_bounds && ((viewport.axes.horizontal && !inner.max_width) ||
                                          (viewport.axes.vertical && !inner.max_height)))
             return layout_failure(id, LayoutIssue::ConstraintConflict, UiError::InvalidValue);
+        // Descendants normally see an unbounded scroll axis, so its resize would hit their measure cache.
+        if (viewport.child_measures_bounds && viewport.measure_bounds != Some(inner))
+            for (auto child : node.children) resolve(child)->measure_dirty = true;
+        viewport.measure_bounds = Some(inner);
         if (viewport.axes.horizontal)
             inner.max_width = None();
         if (viewport.axes.vertical)

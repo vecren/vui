@@ -8,12 +8,23 @@ using namespace rstd::prelude;
 export namespace vui {
 enum class SemanticsRole { Generic, Text, Button, Slider, TextField, ScrollArea, Dialog, Switch, Image };
 
+struct SemanticsCollection {
+    Option<Index> rows, columns;
+    bool horizontal{};
+    friend auto operator==(const SemanticsCollection &, const SemanticsCollection &) -> bool = default;
+};
+
 struct SemanticsProperties {
     SemanticsRole role{};
     String label, value;
     unsigned actions{};
     bool merge_descendants{};
     Option<bool> checked;
+    Option<SemanticsCollection> collection;
+
+    auto clone() const -> SemanticsProperties {
+        return {role, label.clone(), value.clone(), actions, merge_descendants, checked, collection};
+    }
 };
 
 struct SemanticsId {
@@ -63,6 +74,7 @@ class Semantics {
     auto set_default(UiId id, SemanticsProperties properties) -> Result<empty, UiError>;
     auto clear(UiId id) -> Result<empty, UiError>;
     auto snapshot() const -> SemanticsSnapshot;
-    auto perform(SemanticsId id, SemanticsAction action) -> Result<bool, InputError>;
+    auto perform(SemanticsId id, SemanticsAction action, Option<SemanticsPosition> position = {})
+        -> Result<bool, InputError>;
 };
 } // namespace vui

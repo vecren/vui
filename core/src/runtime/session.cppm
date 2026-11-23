@@ -102,6 +102,7 @@ class UiSession {
     Option<SurfaceInfo> surface_;
     Vec<MutationResult> mutations_;
     FrameTiming last_timing_;
+    Vec<Box<rstd::dyn<rstd::FnMut<bool()>>>> idle_work_;
     Serial published_ui_{}, frame_id_{}, revealed_focus_{};
     bool advancing_{}, planning_{}, closing_{}, closed_{};
     AdvanceTimings *active_timings_{};
@@ -151,6 +152,13 @@ class UiSession {
     auto frame_content() -> FrameContentRuntime & { return frame_content_; }
     auto state_bindings() -> UiStateBindings & { return state_bindings_; }
     auto updates() -> UiUpdates & { return updates_; }
+    template <class F> auto defer_idle(F callback) -> Result<empty, UiError> {
+        if (closed_ || closing_) return Err(UiError::Cancelled);
+        if (idle_work_.len() >= usize(4096)) return Err(UiError::Limit);
+        idle_work_.push(Box<rstd::dyn<rstd::FnMut<bool()>>>::make(rstd::move(callback)));
+        document_.bindings().wake();
+        return Ok(empty{});
+    }
     auto next_tick() const -> Option<Serial> { return frame_content_.active() ? None<Serial>() : motion_.next_tick(); }
     auto render_scene() const -> const RenderScene & { return endpoint_.scene(); }
     auto set_frame_waker(Option<FrameWaker> waker) -> Result<empty, SessionError>;

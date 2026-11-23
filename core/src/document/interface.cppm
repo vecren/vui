@@ -253,7 +253,7 @@ class UiDocument {
     }
     static auto place_image_content(const Node &node) -> Option<ImagePlacement>;
     auto paint(UiId id, Node &node) -> Option<UiError>;
-    auto make_visual(UiId id) -> Result<UiVisual, UiError>;
+    auto make_visual(UiId id, bool content_geometry = true) -> Result<UiVisual, UiError>;
     auto collect(UiId id, UiUpdate::Data &output, Index depth, bool recording = true)
         -> Option<UiError>;
     void erase(UiId id);
@@ -555,6 +555,9 @@ class UiDocument {
         -> Result<empty, UiError>;
     auto base_style(UiId id) -> Result<NodeStyle, UiError>;
     auto resolved_style(UiId id) -> Result<NodeStyle, UiError>;
+    // Capture recorded paint in the source parent's coordinates.
+    auto capture_painted_subtree(UiId id, Index node_limit) -> Result<PaintedSubtree, UiError>;
+    auto append_painted_subtree(UiId parent, PaintedSubtree snapshot) -> Result<UiId, UiError>;
     auto animate_transform(UiId id, Transform to, AnimationOptions options = {})
         -> Result<AnimationId, AnimationError>;
     auto animate_opacity(UiId id, Scalar to, AnimationOptions options = {})

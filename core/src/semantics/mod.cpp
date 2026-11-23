@@ -19,15 +19,10 @@ struct StoredSemantics {
 
 auto semantics_key() -> NodeStateKey { return NodeStateKey::of<Semantics>(); }
 
-auto copy_properties(const SemanticsProperties &value) -> SemanticsProperties {
-    return {value.role, String::make(value.label.as_str()), String::make(value.value.as_str()),
-            value.actions, value.merge_descendants, value.checked};
-}
-
 auto equal_properties(const SemanticsProperties &a, const SemanticsProperties &b) -> bool {
     return a.role == b.role && a.label.as_str() == b.label.as_str() &&
            a.value.as_str() == b.value.as_str() && a.actions == b.actions &&
-           a.merge_descendants == b.merge_descendants && a.checked == b.checked;
+           a.merge_descendants == b.merge_descendants && a.checked == b.checked && a.collection == b.collection;
 }
 
 auto map_bounds(Rect rect, Transform transform) -> Rect {
@@ -104,7 +99,7 @@ auto Semantics::set_default(UiId id, SemanticsProperties properties) -> Result<e
 
 auto Semantics::set_impl(UiId id, SemanticsProperties properties, bool defaults) -> Result<empty, UiError> {
     if (document_.routing() || !document_.can_animate()) return Err(UiError::Routing);
-    constexpr auto valid_actions = semantics_action_mask(SemanticsAction::Focus) * 2u - 1u;
+    constexpr auto valid_actions = semantics_action_mask(SemanticsAction::ScrollToPosition) * 2u - 1u;
     if (static_cast<unsigned>(properties.role) > static_cast<unsigned>(SemanticsRole::Image) ||
         (properties.actions & ~valid_actions))
         return Err(UiError::InvalidValue);
@@ -178,7 +173,7 @@ auto Semantics::snapshot() const -> SemanticsSnapshot {
                 if (merge.is_some() && !independent) {
                     if (merge->collect_label) append_label(nodes[merge->owner].properties.label, value.label.as_str());
                 } else {
-                    auto exported = copy_properties(value);
+                    auto exported = value.clone();
                     if (!enabled) exported.actions = 0;
                     else if (!input_.eligible(*snapshot, id, false))
                         exported.actions &= ~semantics_action_mask(SemanticsAction::Focus);
@@ -201,9 +196,11 @@ auto Semantics::snapshot() const -> SemanticsSnapshot {
     return SemanticsSnapshot(rstd::move(nodes));
 }
 
-auto Semantics::perform(SemanticsId id, SemanticsAction action) -> Result<bool, InputError> {
+auto Semantics::perform(SemanticsId id, SemanticsAction action, Option<SemanticsPosition> position)
+    -> Result<bool, InputError> {
     auto mask = semantics_action_mask(action);
-    if (!mask) return Err(InputError::InvalidEvent);
+    if (!mask || position.is_some() != (action == SemanticsAction::ScrollToPosition))
+        return Err(InputError::InvalidEvent);
     auto mount = document_.mount_state(id.node);
     if (mount.is_err() || !mount.unwrap().mounted || mount.unwrap().generation != id.mount_generation)
         return Ok(false);
@@ -218,6 +215,6 @@ auto Semantics::perform(SemanticsId id, SemanticsAction action) -> Result<bool, 
     auto state = snapshot();
     auto node = state.get(id);
     if (!node || !(node->properties.actions & mask)) return Ok(false);
-    return input_.dispatch_semantics(id.node, action);
+    return input_.dispatch_semantics(id.node, action, position);
 }
 } // namespace vui

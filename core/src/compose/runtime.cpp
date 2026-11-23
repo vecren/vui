@@ -92,6 +92,7 @@ auto ComposeBuild::retired_roots() const -> Vec<UiId> {
 }
 
 auto ComposeBuild::dirty(const ComposeInstance &instance, const CompositionEnvironment &environment) -> bool {
+    if (instance.element.data().precompose) return false;
     if (instance.scope && (instance.scope->dirty || environment.changed(instance.scope->local_reads.as_slice()))) return true;
     for (const auto &mount : instance.mounts) if (!mount->attempted) return true;
     for (const auto &behavior : instance.attached) if (!behavior->attempted) return true;
@@ -231,8 +232,14 @@ void CompositionRuntime::commit(ComposeDraft &draft, Vec<OldScope> &old) {
         scope.get()->effects = rstd::move((**draft.scope).effects);
         scope.get()->reads = rstd::move((**draft.scope).reads); scope.get()->dirty = false;
         scope.get()->local_reads = rstd::move((**draft.scope).local_reads);
+        scope.get()->deferred_actions = rstd::move((**draft.scope).deferred_actions);
         for (auto &slot : scope.get()->memories) slot.get()->committed = true;
         instance.scope = scope.clone();
+    }
+    if (instance.scope) {
+        instance.scope.get()->precomposed = draft.element.data().precompose;
+        if (draft.precompose_failed) instance.scope.get()->dirty = true;
+        if (draft.promoted) instance.scope.get()->deferred_actions.clear();
     }
     if (instance.element.data().reference.is_some()) {
         auto old_link = instance.element.data().reference->link();
@@ -260,7 +267,7 @@ void CompositionRuntime::commit(ComposeDraft &draft, Vec<OldScope> &old) {
 }
 
 void CompositionRuntime::activate(ComposeDraft &draft, CommittedContext &context) {
-    if (draft.reused || signal->closed) return;
+    if (draft.reused || draft.element.data().precompose || signal->closed) return;
     for (const auto &behavior : draft.attached) {
         if (signal->closed) return;
         auto slot = behavior.slot.clone();
@@ -302,7 +309,7 @@ void CompositionRuntime::activate(ComposeDraft &draft, CommittedContext &context
             }
         }
     }
-    if (draft.scope.is_some())
+    if (draft.scope.is_some() || draft.promoted)
         for (auto &effect : draft.instance.get()->scope.get()->effects) {
             if (signal->closed) return;
             if (effect->attempted) continue;
@@ -521,6 +528,7 @@ auto Composition::set_content(Element value, rstd::source_location source) -> Co
 
 auto compatible(const ElementData &a, const ElementData &b) -> bool {
     if (a.kind != b.kind) return false;
+    if (a.precompose && !b.precompose) return false;
     if (a.kind == ElementKind::Native) return a.layout == b.layout;
     if (a.kind == ElementKind::Component) return a.component_type == b.component_type;
     if (a.kind == ElementKind::Custom) return a.adapter->type == b.adapter->type;
@@ -561,7 +569,8 @@ auto ComposeBuild::reconcile(Element value, rstd::rc::Rc<ComposeInstance> previo
         if (claimed.is_err()) return Err(claimed.unwrap_err());
         movable_claim = Some(claimed.unwrap());
     }
-    if (previous && !force && !dirty(*previous.get(), environment)) {
+    draft.promoted = previous && previous->element.data().precompose && !data.precompose;
+    if (previous && !force && !draft.promoted && !dirty(*previous.get(), environment)) {
         auto claimed = claim_reused(previous, data.kind == ElementKind::Movable);
         if (claimed.is_err()) return Err(claimed.unwrap_err());
         draft.reused = true; committed_roots(*previous.get(), draft.roots);
@@ -575,14 +584,15 @@ auto ComposeBuild::reconcile(Element value, rstd::rc::Rc<ComposeInstance> previo
         auto refresh_modifiers = force;
         auto scope = draft.instance->scope ? draft.instance->scope.clone() : rstd::rc::make_rc<ScopeState>();
         auto scope_dirty = scope->dirty || environment.changed(scope->local_reads.as_slice());
-        if (force && !draft.fresh && !scope_dirty && data.parameters) {
+        if (force && !draft.fresh && (!scope_dirty || (data.precompose && draft.instance->element.data().precompose)) && data.parameters) {
             const auto &previous_parameters = draft.instance->element.data().parameters;
             ++comparisons;
             if (previous_parameters && data.parameters->type() == previous_parameters->type() &&
                 data.parameters->equal(*previous_parameters.get())) { force = false; ++skipped; }
         }
-        if (force || scope_dirty || draft.fresh) {
+        if (force || (scope_dirty && !data.precompose) || draft.fresh) {
             ++evaluations; draft.scope = Some(Box<ScopeDraft>::make(scope));
+            (**draft.scope).precompose = data.precompose;
             CompositionContext context(*this, **draft.scope, environment);
             auto evaluate = data.view.clone();
             auto evaluated = [&]() -> ComposeResult<Element> {
@@ -591,14 +601,27 @@ auto ComposeBuild::reconcile(Element value, rstd::rc::Rc<ComposeInstance> previo
                 if (read.is_err()) return Err(ComposeError(ComposeStage::Evaluation, Some(read.unwrap_err())));
                 auto guard = read.unwrap(); return evaluate.get()->invoke->operator()(context);
             }();
-            if (context.failure().is_some()) return Err(ComposeError(*context.failure()));
-            if (evaluated.is_err()) return Err(evaluated.unwrap_err());
-            draft.output = Some(evaluated.unwrap()); force = true;
+            if (context.failure().is_some() || evaluated.is_err()) {
+                if (!data.precompose)
+                    return Err(context.failure() ? ComposeError(*context.failure()) : evaluated.unwrap_err());
+                draft.precompose_failed = true;
+                draft.scope = None();
+            } else {
+                draft.output = Some(evaluated.unwrap());
+                force = true;
+            }
         } else if (draft.instance->output.is_some()) draft.output = Some(Element(*draft.instance->output));
-        else return Err(ComposeError(ComposeStage::Type));
-        auto modified = apply_modifiers(Element(*draft.output), data.modifiers);
-        if (modified.is_err()) return Err(modified.unwrap_err());
-        children.push(modified.unwrap());
+        else if (!data.precompose) return Err(ComposeError(ComposeStage::Type));
+        if (!data.precompose) {
+            if (draft.promoted && draft.scope.is_none())
+                for (const auto &action : scope->deferred_actions)
+                    actions.push(CommitAction::make([action = action.clone()](CommittedContext &context) mutable {
+                        return (*action.get())->operator()(context);
+                    }));
+            auto modified = apply_modifiers(Element(*draft.output), data.modifiers);
+            if (modified.is_err()) return Err(modified.unwrap_err());
+            children.push(modified.unwrap());
+        }
         if (refresh_modifiers && (!data.modifiers.is_empty() || !draft.instance->element.data().modifiers.is_empty())) force = true;
     } else {
         for (const auto &child : data.children) children.push(Element(child));
@@ -664,7 +687,8 @@ auto ComposeBuild::reconcile(Element value, rstd::rc::Rc<ComposeInstance> previo
             bool match = identified(child) ? same_identity(child, candidate) : !identified(candidate) && i == j;
             if (match) { old = draft.instance->children[j].clone(); used[j] = true; break; }
         }
-        if (old && !force && compatible(child, old->element.data()) && !dirty(*old.get(), environment)) {
+        if (old && !force && child.precompose == old->element.data().precompose &&
+            compatible(child, old->element.data()) && !dirty(*old.get(), environment)) {
             auto claimed = claim_reused(old);
             if (claimed.is_err()) return Err(claimed.unwrap_err());
             committed_roots(*old.get(), descendants);

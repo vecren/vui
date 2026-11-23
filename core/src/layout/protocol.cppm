@@ -17,6 +17,7 @@ class LayoutMeasureContext {
     virtual ~LayoutMeasureContext() = default;
     virtual auto node_id() const -> UiId = 0;
     virtual auto style() const -> LayoutStyle = 0;
+    virtual auto parent_viewport_constraints() const -> Option<LayoutConstraints> { return None(); }
     virtual auto child_count() const -> usize = 0;
     virtual auto child_id(usize) const -> Result<UiId, UiError> = 0;
     virtual auto child_relation(usize) const -> Result<UiRelation, UiError> = 0;

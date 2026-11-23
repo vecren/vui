@@ -15,6 +15,8 @@ struct LazyGridSlots {
 }
 
 export namespace vui::compose {
+enum class LazyArrangement { Default, Start, Center, End, SpaceBetween, SpaceAround, SpaceEvenly };
+
 class GridCells {
     enum class Kind { Fixed, Adaptive, FixedSize };
     Kind kind_{Kind::Fixed};
@@ -28,13 +30,20 @@ class GridCells {
     static auto adaptive(Scalar minimum) -> GridCells { return {Kind::Adaptive, minimum}; }
     static auto fixed_size(Scalar size) -> GridCells { return {Kind::FixedSize, size}; }
     auto valid() const -> bool { return finite(value_) && value_ > 0; }
-    auto slots(Scalar available, Scalar spacing, Index max_slots = 4096) const
+    auto slots(Scalar available, Scalar spacing, Index max_slots = 4096,
+               LazyArrangement arrangement = LazyArrangement::Start) const
         -> Result<LazyGridSlots, UiError>;
     friend auto operator==(const GridCells &, const GridCells &) -> bool = default;
 };
 }
 
 namespace vui::compose {
+inline auto valid_arrangement(LazyArrangement arrangement) -> bool {
+    return static_cast<unsigned>(arrangement) <= static_cast<unsigned>(LazyArrangement::SpaceEvenly);
+}
+
+auto arrangement_offset(LazyArrangement, Scalar spare, Index rank, Index count, bool reverse = false) -> Scalar;
+
 struct LazyGridLine {
     Index first{};
     Vec<Index> spans;
