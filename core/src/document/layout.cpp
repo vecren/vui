@@ -395,9 +395,13 @@ auto UiDocument::measure(UiId id, LayoutConstraints available, Index depth) -> O
         maximum(Scalar(0), (style.width.is_some() ? *width : min_width) - 2 * style.padding),
         maximum(Scalar(0), (style.height.is_some() ? *height : min_height) - 2 * style.padding)};
     if (node.viewport.is_some()) {
-        if ((*node.viewport)->axes.horizontal)
+        const auto &viewport = **node.viewport;
+        if (viewport.requires_bounds && ((viewport.axes.horizontal && !inner.max_width) ||
+                                         (viewport.axes.vertical && !inner.max_height)))
+            return layout_failure(id, LayoutIssue::ConstraintConflict, UiError::InvalidValue);
+        if (viewport.axes.horizontal)
             inner.max_width = None();
-        if ((*node.viewport)->axes.vertical)
+        if (viewport.axes.vertical)
             inner.max_height = None();
     }
     auto content = measure_modifier(id, usize(), inner, depth);
@@ -605,6 +609,19 @@ auto UiDocument::set_viewport_axes(UiId id, ScrollAxes axes) -> Result<empty, Ui
     auto &view = **node->viewport;
     if (view.axes != axes) {
         view.axes = axes;
+        changed(true, Some(id));
+    }
+    return Ok(empty{});
+}
+
+auto UiDocument::set_viewport_requires_bounds(UiId id, bool required) -> Result<empty, UiError> {
+    if (layout_active_ || painting_ || evaluating_ || editing_) return Err(UiError::Routing);
+    auto node = resolve(id);
+    if (!node) return Err(UiError::InvalidId);
+    if (!node->viewport) return Err(UiError::InvalidValue);
+    auto &viewport = **node->viewport;
+    if (viewport.requires_bounds != required) {
+        viewport.requires_bounds = required;
         changed(true, Some(id));
     }
     return Ok(empty{});

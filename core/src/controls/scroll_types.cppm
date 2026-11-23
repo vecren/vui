@@ -18,6 +18,7 @@ struct ScrollStyle {
     ScrollWheelMode wheel_mode{ScrollWheelMode::Direct};
     Point wheel_direction{1,1};
     ScrollMotionOptions motion;
+    bool user_scroll_enabled{true};
     auto valid() const -> bool { return finite(line_step) && line_step>0 && (wheel_mode==ScrollWheelMode::Direct || wheel_mode==ScrollWheelMode::SingleAxis) &&
         (wheel_direction.x==1 || wheel_direction.x==-1) && (wheel_direction.y==1 || wheel_direction.y==-1) && motion.valid(); }
 };

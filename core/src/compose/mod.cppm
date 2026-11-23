@@ -13,3 +13,4 @@ export import :animation;
 export import :controls;
 export import :popup;
 export import :constraints;
+export import :lazy;

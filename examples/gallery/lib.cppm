@@ -185,7 +185,7 @@ auto dialog(cx::Borrowed<state::Cell<bool>> shown, state::Value<Insets> insets) 
     return Ok(cx::dialog(rstd::move(panel), [shown](PopupCloseReason) { shown->set(false).unwrap(); }, rstd::move(options)));
 }
 [[vui::compose]]
-auto gallery_content(cx::Borrowed<Tabs> tabs, cx::Borrowed<LevelRowsOwner> rows, cx::NodeRef picture,
+auto gallery_content(cx::Borrowed<Tabs> tabs, cx::Borrowed<LevelRows> rows, cx::NodeRef picture,
              cx::Borrowed<state::Cell<bool>> dialog_open, state::Value<Insets> insets,
              state::Value<Scalar> width, cx::Borrowed<state::Cell<CanvasOptions>> canvas_options,
              cx::Borrowed<CanvasRecording> canvas_recording) -> cx::ComposeResult<cx::Element> {
@@ -232,8 +232,8 @@ class View {
     UiSession &session_;
     UiId background_, top_bar_, root_;
     cx::NodeRef picture_;
-    LevelRowsOwner rows_{rstd::rc::make_rc<LevelRows>()};
     state::Graph graph_;
+    LevelRows rows_{graph_};
     Tabs tabs_;
     state::Cell<Scalar> width_{graph_.cell(Scalar(0)).unwrap()};
     state::Cell<bool> dialog_open_{graph_.cell(false).unwrap()};
@@ -317,9 +317,7 @@ class View {
 
     auto status() -> Result<empty, UiError> {
         if (composition_.is_none()) return Err(UiError::InvalidValue);
-        auto result = examples::composition_status(*composition_);
-        if (result.is_err()) return result;
-        return lists_status(session_.document(), *rows_);
+        return examples::composition_status(*composition_);
     }
     auto picture() const -> cx::ComposeResult<UiId> { return picture_.id(); }
     auto canvas_paint_time() const -> CpuTiming { return canvas_recording_.paint; }

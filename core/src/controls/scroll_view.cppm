@@ -53,6 +53,8 @@ class ScrollInteraction {
     }
     static auto make(UiSession &session,UiId root,UiId viewport,ScrollStyle &style,Signal<void(UserScroll)> &changed) -> Result<rstd::rc::Rc<ScrollInteraction>,ControlError>;
     void stop(bool clamp=true,bool release=true,bool request=true);
+    auto rebase_offset(Point value) -> Result<empty, UiError>;
+    auto describe_semantics() const -> Result<empty, UiError>;
     auto status() const -> ScrollStatus {return {mode_==Mode::Drag,mode_==Mode::Animate,velocity_,error_};}
     auto observe(InputContext &context,const InputPacket &packet) -> InputDecision;
     void cancel(InputContext &context,CancelReason reason) {
@@ -77,9 +79,7 @@ class ScrollState {
     ScrollState(UiId viewport, ScrollStyle style) : viewport_(viewport), style_(style) {}
     auto style() const -> ScrollStyle { return style_; }
     void configure_prepared(ScrollStyle style) { style_ = style; }
-    void finish_configuration() {
-        stop(); if (interaction_.is_some()) interaction_->get()->configure();
-    }
+    auto finish_configuration() -> Result<empty, UiError>;
     auto viewport() const -> UiId { return viewport_; }
     auto connect(UiSession &session, UiId root) -> Result<empty, ControlError>;
     void stop() {if (interaction_.is_some()) interaction_->get()->stop();}
@@ -89,6 +89,7 @@ class ScrollState {
         return connected.is_ok() ? Result<Binding, UiError>(Ok(rstd::move(connected).unwrap())) : Result<Binding, UiError>(Err(UiError::Limit));
     }
     auto set_style(UiDocument &ui, ScrollStyle style) -> Result<empty, UiError>;
+    auto rebase_offset(UiDocument &ui, Point value) -> Result<empty, UiError>;
     void handle(EventContext &context, const RoutedEvent &event);
 };
 class ScrollView {
@@ -104,8 +105,9 @@ class ScrollView {
         auto state = session.document().state<ScrollState>(id);
         return state ? state->connect(session, id) : Result<empty, ControlError>(Err(ControlError{Some(UiError::InvalidId), {}}));
     }
-    static void finish_configuration(UiDocument &ui, UiId id) {
-        if (auto state = ui.state<ScrollState>(id)) state->finish_configuration();
+    static auto finish_configuration(UiDocument &ui, UiId id) -> Result<empty, UiError> {
+        auto state = ui.state<ScrollState>(id);
+        return state ? state->finish_configuration() : Result<empty, UiError>(Err(UiError::InvalidId));
     }
     static auto on_metrics_changed(UiDocument &ui, UiId id, auto callback) -> Result<Binding, UiError> {
         auto state = ui.state<ScrollState>(id);
@@ -119,6 +121,7 @@ class ScrollView {
     static auto create(UiSession &session, UiId content, NodeStyle style, ScrollStyle scroll = {})
         -> Result<UiId, ControlError>;
     static auto set_offset(UiDocument &ui, UiId id, Point value) -> Result<empty, UiError>;
+    static auto rebase_offset(UiDocument &ui, UiId id, Point value) -> Result<empty, UiError>;
     static auto metrics(UiDocument &ui, UiId id) -> Result<ViewportMetrics, UiError>;
     static auto status(UiDocument &ui,UiId id) -> Result<ScrollStatus,UiError> {
         auto state=ui.state<ScrollState>(id);return state ? Result<ScrollStatus,UiError>(Ok(state->status())) : Result<ScrollStatus,UiError>(Err(UiError::InvalidId));

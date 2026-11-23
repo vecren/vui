@@ -843,6 +843,7 @@ class UiDocument {
     auto set_text_input_area(UiId id, Option<Rect> area) -> Result<empty, UiError>;
     auto set_interaction(UiId id, bool hit_test_visible, bool enabled, bool focusable) -> Result<empty, UiError>;
     auto set_viewport_axes(UiId id, ScrollAxes axes) -> Result<empty, UiError>;
+    auto set_viewport_requires_bounds(UiId id, bool required) -> Result<empty, UiError>;
     auto set_viewport_boundary(UiId id, ViewportBoundary boundary) -> Result<empty,UiError>;
     auto set_viewport_offset(UiId id, Point offset) -> Result<empty, UiError>;
     auto viewport_metrics(UiId id) -> Result<ViewportMetrics, UiError>;
@@ -894,6 +895,18 @@ class UiDocument {
         return Ok(rstd::move(binding));
     }
     auto pending_viewport_callbacks() const -> bool { return pending_viewports_; }
+    // Layout may request a new snapshot observation without changing the viewport geometry.
+    auto invalidate_viewport_observation(UiId id) -> Result<empty, UiError> {
+        auto node = resolve(id);
+        if (!node) return Err(UiError::InvalidId);
+        if (!node->viewport) return Err(UiError::InvalidValue);
+        auto &view = **node->viewport;
+        if (view.observer) {
+            view.observer->get()->published = None();
+            pending_viewports_ = true;
+        }
+        return Ok(empty{});
+    }
     template <class Snapshot> auto dispatch_viewport_callbacks(const Snapshot &snapshot) -> Result<empty, UiError> {
         auto scope = acquire_route(); if (scope.is_err()) return Err(scope.unwrap_err());
         if (snapshot.document() != session_) return Err(UiError::InvalidValue);

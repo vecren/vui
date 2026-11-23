@@ -28,5 +28,6 @@ struct DocumentViewportLayout {
     Point requested;
     ViewportMetrics metrics;
     Option<rstd::rc::Rc<DocumentViewportObserver>> observer;
+    bool requires_bounds{};
 };
 } // namespace vui

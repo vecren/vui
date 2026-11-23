@@ -57,6 +57,26 @@ auto ScrollInteraction::write(Point value,const ViewportMetrics &metrics) -> boo
     written_=value;if (value!=metrics.offset) changed_.emit({value,metrics.maximum}).unwrap();return true;
 }
 
+auto ScrollInteraction::rebase_offset(Point value) -> Result<empty, UiError> {
+    if (!lease_.active()) return ui().set_viewport_offset(viewport_, value);
+    PresentationBatch batch;
+    batch.viewport_offset(viewport_, value);
+    auto result = ui().write_presentation(lease_, batch);
+    if (result.is_ok()) {
+        written_ = value;
+        rebase_ = true;
+    }
+    return result;
+}
+
+auto ScrollInteraction::describe_semantics() const -> Result<empty, UiError> {
+    auto actions = semantics_action_mask(SemanticsAction::Focus);
+    if (style_.user_scroll_enabled)
+        actions |= semantics_action_mask(SemanticsAction::ScrollForward) |
+                   semantics_action_mask(SemanticsAction::ScrollBackward);
+    return session_.semantics().set_default(root_, {.role = SemanticsRole::ScrollArea, .actions = actions});
+}
+
 void ScrollInteraction::begin_axis(Axis &axis,Scalar value,Scalar velocity,Scalar maximum,bool enabled,Serial started) {
     if (!enabled) {axis={};return;}
     auto target=bounded(value,maximum);
@@ -99,7 +119,7 @@ auto ScrollInteraction::sample_axis(Axis &axis,Scalar maximum,Serial time) -> Sc
 }
 
 void ScrollInteraction::press(EventContext &,const RoutedEvent &event) {
-    if (!style_.motion.enabled || (event.input.pointer_kind!=PointerKind::Touch && event.input.button!=PointerButton::Primary) || pointer_.is_some()) return;
+    if (!style_.user_scroll_enabled || !style_.motion.enabled || (event.input.pointer_kind!=PointerKind::Touch && event.input.button!=PointerButton::Primary) || pointer_.is_some()) return;
     stop(false,false);pointer_=Some(PointerKey{event.input.device,event.input.pointer});mode_=Mode::Pending;error_=None();
 }
 
@@ -138,7 +158,7 @@ void ScrollInteraction::stop(bool clamp,bool release,bool request) {
 }
 
 auto ScrollInteraction::observe(InputContext &context,const InputPacket &packet) -> InputDecision {
-    if (!style_.motion.enabled || (!style_.axes.horizontal && !style_.axes.vertical) ||
+    if (!style_.user_scroll_enabled || !style_.motion.enabled || (!style_.axes.horizontal && !style_.axes.vertical) ||
         (packet.input.pointer_kind!=PointerKind::Touch && packet.input.type==EventType::PointerDown && packet.input.button!=PointerButton::Primary) ||
         (pointer_.is_some() && *pointer_!=PointerKey{packet.input.device,packet.input.pointer})) return InputDecision::reject();
     auto local=local_event(context.snapshot(),packet.input);if (local.is_none()) return InputDecision::reject();
@@ -147,7 +167,7 @@ auto ScrollInteraction::observe(InputContext &context,const InputPacket &packet)
 
 auto ScrollInteraction::handle(EventContext &context,const RoutedEvent &event) -> bool {
     if (event.input.type==EventType::Wheel && mode_==Mode::Drag) {context.prevent_default();return true;}
-    if (event.input.type==EventType::CaptureGained && event.target==root_ && style_.motion.enabled) {
+    if (event.input.type==EventType::CaptureGained && event.target==root_ && style_.motion.enabled && style_.user_scroll_enabled) {
         auto snapshot=session_.input().snapshot();auto metrics=ui().viewport_metrics(viewport_);
         if (snapshot.is_none() || metrics.is_err()) return true;
         auto local=local_event(*snapshot,event.input);if (local.is_none() || !acquire()) return true;
@@ -210,19 +230,25 @@ auto ScrollState::set_style(UiDocument &ui, ScrollStyle style) -> Result<empty, 
     auto result = ui.set_viewport_axes(viewport_, style.axes);
     if (result.is_ok()) {
         style_ = style;
-        if (interaction_.is_some()) interaction_->get()->configure();
+        if (interaction_.is_some()) {
+            interaction_->get()->configure();
+            return (*interaction_)->describe_semantics();
+        }
     }
     return result;
+}
+
+auto ScrollState::finish_configuration() -> Result<empty, UiError> {
+    stop();
+    if (interaction_.is_none()) return Ok(empty{});
+    interaction_->get()->configure();
+    return (*interaction_)->describe_semantics();
 }
 
 auto ScrollState::connect(UiSession &session, UiId root) -> Result<empty, ControlError> {
     auto value = ScrollInteraction::make(session, root, viewport_, style_, user_scrolled_);
     if (value.is_err()) return Err(value.unwrap_err());
-    auto described = session.semantics().set_default(root, {
-        .role = SemanticsRole::ScrollArea,
-        .actions = semantics_action_mask(SemanticsAction::ScrollForward) |
-                   semantics_action_mask(SemanticsAction::ScrollBackward) | semantics_action_mask(SemanticsAction::Focus),
-    });
+    auto described = (*value)->describe_semantics();
     if (described.is_err()) return Err(ControlError{Some(described.unwrap_err()), {}});
     interaction_ = Some(rstd::move(value).unwrap());
     return Ok(empty{});
@@ -230,6 +256,7 @@ auto ScrollState::connect(UiSession &session, UiId root) -> Result<empty, Contro
 
 void ScrollState::handle(EventContext &context, const RoutedEvent &event) {
     if (interaction_.is_some() && interaction_->get()->handle(context,event)) return;
+    if (!style_.user_scroll_enabled) return;
     const bool semantic = event.input.type == EventType::SemanticAction && event.target == event.current &&
         (event.input.semantic_action == SemanticsAction::ScrollForward || event.input.semantic_action == SemanticsAction::ScrollBackward);
     if (semantic && context.default_prevented()) return;
@@ -304,6 +331,17 @@ void ScrollState::handle(EventContext &context, const RoutedEvent &event) {
             if (next != metrics.offset) user_scrolled_.emit({next, metrics.maximum}).unwrap();
         }
     }
+}
+
+auto ScrollState::rebase_offset(UiDocument &ui, Point value) -> Result<empty, UiError> {
+    return interaction_.is_some() ? interaction_->get()->rebase_offset(value)
+                                  : ui.set_viewport_offset(viewport_, value);
+}
+
+auto ScrollView::rebase_offset(UiDocument &ui, UiId id, Point value) -> Result<empty, UiError> {
+    auto state = ui.state<ScrollState>(id);
+    return state ? state->rebase_offset(ui, value)
+                 : Result<empty, UiError>(Err(UiError::InvalidId));
 }
 
 auto ScrollView::prepare(UiDocument &ui, UiEditBatch &edit, Option<UiId> previous,

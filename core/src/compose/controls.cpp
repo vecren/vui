@@ -76,7 +76,9 @@ auto ScrollElement::prepare(PrepareContext &context, Option<UiId> previous, Node
     if (prepared.changed)
         context.on_commit([target](CommittedContext &context) -> ComposeResult<empty> {
             auto id = context.resolve(target); if (id.is_err()) return Err(id.unwrap_err());
-            ScrollView::finish_configuration(context.session().document(), id.unwrap()); return Ok(empty{});
+            auto configured = ScrollView::finish_configuration(context.session().document(), id.unwrap());
+            if (configured.is_err()) return Err(ComposeError(ComposeStage::Effect, Some(configured.unwrap_err())));
+            return Ok(empty{});
         });
     return Ok(prepared.node);
 }

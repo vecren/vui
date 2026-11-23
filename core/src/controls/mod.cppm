@@ -6,6 +6,5 @@ export import :builders;
 export import :scroll_view;
 export import :scrollbar;
 export import :slider;
-export import :virtual_list;
 export import :popup;
 export import :text_field;
