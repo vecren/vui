@@ -181,3 +181,7 @@ class LazyContent {
 };
 
 } // namespace vui::compose
+
+namespace vui::compose {
+auto nearby_lazy_index(const LazyContent &content, Index index, const Option<Key> &key) -> Option<Index>;
+}

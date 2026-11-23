@@ -214,6 +214,8 @@ class LazyRuntime {
     Option<Index> sticky_, next_sticky_line_;
     Scalar sticky_offset_{};
     LazyItemAnimator item_animator_;
+    Scalar item_rebase_delta_{};
+    Option<Serial> item_window_revision_;
 
     UiDocument *document_{};
     UiId node_, viewport_, scroll_;
@@ -275,23 +277,9 @@ class LazyRuntime {
         const auto item = usize(index - cursor.row.first);
         return Ok(Cell{cursor.line, cursor.lanes[item], cursor.row.spans[item]});
     }
-    auto nearby_index(const LazyContent &content, Index index, const Option<Key> &key) const -> Option<Index> {
-        if (!key) return index < content.count() ? Some(Index(index)) : None<Index>();
-        if (!content.count()) return None();
-        if (index >= content.count()) index = content.count() - 1;
-        if (content.describe(index).key == key) return Some(Index(index));
-        constexpr Index neighborhood = 128;
-        for (Index distance = 1; distance <= neighborhood; ++distance) {
-            if (distance <= index && content.describe(index - distance).key == key) return Some(index - distance);
-            if (distance < content.count() - index && content.describe(index + distance).key == key)
-                return Some(index + distance);
-        }
-        return None();
-    }
-
     auto anchor_index(const LazyContent &content) const -> Index {
         if (!anchor_ || !content.count()) return 0;
-        auto located = nearby_index(content, anchor_->index, anchor_->key);
+        auto located = nearby_lazy_index(content, anchor_->index, anchor_->key);
         return located ? *located : rstd::cmp::min(anchor_->index, content.count() - 1);
     }
 
@@ -414,6 +402,7 @@ class LazyRuntime {
             requested_ = rstd::move(wanted);
             auto notified = signal_->set(++revision_);
             if (notified.is_err()) return Err(UiError::InvalidValue);
+            item_window_revision_ = Some(Serial(revision_));
         }
         if ((active_header && sticky_offset_ != logical) || previous_header != active_header) {
             sticky_offset_ = logical;
@@ -516,9 +505,10 @@ class LazyRuntime {
                            : Rect{across, along, place.cross, place.extent};
     }
 
-    auto publish_geometry(Size viewport, Scalar physical, Scalar maximum, Scalar rebase_delta) -> Result<empty, UiError> {
+    auto publish_geometry(Size viewport, Scalar physical, Scalar maximum) -> Result<empty, UiError> {
         auto visible = rstd::rc::make_rc<Vec<LazyVisibleItemInfo>>();
         Vec<LazyAnimatedItem> animated;
+        LazyItemViewport animation_viewport{viewport, point(-physical), {}, {}, horizontal_, options_.reverse_layout};
         const auto viewport_extent = main(viewport);
         for (usize child{}; child < placements_.len(); ++child) {
             auto bounds = item_bounds(child);
@@ -528,9 +518,17 @@ class LazyRuntime {
             const auto index = rendered_[child];
             const auto &placement = placements_[child];
             auto metadata = content_.describe(index);
-            if (metadata.animation)
-                animated.push({placement.node, index, bounds, copy_key(metadata.key), *metadata.animation,
-                               sticky_ == Some(index)});
+            const bool sticky = sticky_ == Some(index);
+            if (!item_window_revision_) {
+                if (metadata.animation)
+                    animated.push({placement.node, index, bounds, copy_key(metadata.key), *metadata.animation, sticky});
+                if (!sticky) {
+                    if (!animation_viewport.first || index < *animation_viewport.first)
+                        animation_viewport.first = Some(Index(index));
+                    if (!animation_viewport.last || index > *animation_viewport.last)
+                        animation_viewport.last = Some(Index(index));
+                }
+            }
             const auto cell = placement.cell;
             visible.get()->push({index, cell.line, cell.lane, cell.span, rstd::move(metadata.key), bounds});
         }
@@ -542,7 +540,9 @@ class LazyRuntime {
             options_.reverse_layout ? physical < maximum : physical > 0,
             state_->info.prefetched_count, state_->info.retained_slot_count
         };
-        return item_animator_.update(*document_, content_, rstd::move(animated), point(-physical), point(rebase_delta));
+        if (item_window_revision_) return Ok(empty{});
+        return item_animator_.update(*document_, content_, rstd::move(animated), *visible, animation_viewport,
+                                     point(rstd::exchange(item_rebase_delta_, 0)));
     }
 
     auto scroll_to(Scalar target, Scalar maximum, Scalar viewport, Scalar &logical) -> Result<empty, UiError> {
@@ -640,7 +640,8 @@ class LazyRuntime {
         const auto first = geometry_.line_at(larger(0, logical), line_count());
         auto window = request_window(first, logical, viewport);
         if (window.is_err()) return window;
-        auto published = publish_geometry(metrics->viewport, axis(physical_offset(logical, maximum)), maximum, rebase_delta);
+        item_rebase_delta_ += rebase_delta;
+        auto published = publish_geometry(metrics->viewport, axis(physical_offset(logical, maximum)), maximum);
         if (published.is_err()) return published;
         auto prefetch = update_prefetch(logical);
         if (prefetch.is_err()) return prefetch;
@@ -657,6 +658,11 @@ class LazyRuntime {
     }
 
     auto item_animator() -> LazyItemAnimator & { return item_animator_; }
+
+    auto capture_item_changes(UiDocument &document, const LazyContent &content) const -> Option<Vec<LazyItemGhost>> {
+        if (content_.identity() == content.identity()) return None();
+        return Some(item_animator_.capture_changes(document, content));
+    }
 
     void scroll_to_position(EventContext &context, const RoutedEvent &event) {
         if (!state_ || !options_.user_scroll_enabled ||
@@ -723,7 +729,7 @@ class LazyRuntime {
             if (kept_pins >= pin_limit(options)) break;
             const auto lease = pin.lease.upgrade();
             if (!lease || !(*lease)->active) continue;
-            auto index = nearby_index(content, pin.index, pin.key);
+            auto index = nearby_lazy_index(content, pin.index, pin.key);
             if (!index) continue;
             auto added = add(*index, LazySlot::Kind::Pinned);
             if (added.is_err()) return Err(added.unwrap_err());
@@ -788,9 +794,12 @@ class LazyRuntime {
     }
 
     auto configure(const Rc<LazyRuntime> &owner, LazyContent content, LazyOptions options, bool horizontal,
-                   Option<GridCells> grid, Rc<LazyStateData> state, State<Serial> signal, Vec<LazySlot> slots)
+                   Option<GridCells> grid, Rc<LazyStateData> state, State<Serial> signal,
+                   Serial slot_revision, Vec<LazySlot> slots)
         -> Result<empty, UiError> {
         if (state->owner && state->owner != this) return Err(UiError::PropertyOwned);
+        const bool window_committed = item_window_revision_ && slot_revision >= *item_window_revision_;
+        if (window_committed) item_window_revision_ = None();
         const bool changed = content_.identity() != content.identity() || options_ != options ||
                              horizontal_ != horizontal || grid_ != grid;
         auto previous_rendered = rstd::move(rendered_);
@@ -804,7 +813,7 @@ class LazyRuntime {
             for (auto &pin : pins_.as_mut_slice().as_mut_ref()) {
                 auto lease = pin.lease.upgrade();
                 if (!lease || !(*lease)->active) continue;
-                auto located = nearby_index(content, pin.index, pin.key);
+                auto located = nearby_lazy_index(content, pin.index, pin.key);
                 if (located && kept_pins < pin_limit(options)) {
                     pin.index = *located;
                     ++kept_pins;
@@ -867,8 +876,8 @@ class LazyRuntime {
             lines_.reset(content_.count(), slots_.count(), content_.has_spans());
             if (document_) return document_->invalidate_layout(node_);
         }
-        return document_ && (rebase_ || placed_changed) ? document_->invalidate_viewport_observation(viewport_)
-                                                       : Result<empty, UiError>(Ok(empty{}));
+        return document_ && (rebase_ || placed_changed || window_committed)
+            ? document_->invalidate_viewport_observation(viewport_) : Result<empty, UiError>(Ok(empty{}));
     }
 
     void schedule(const Rc<LazyRuntime> &owner) {
@@ -928,6 +937,8 @@ class LazyRuntime {
         unbind_state();
         state_.reset();
         item_animator_.reset();
+        item_window_revision_ = None();
+        item_rebase_delta_ = 0;
         document_ = nullptr;
     }
 
@@ -1174,14 +1185,14 @@ auto make_lazy_layout(LazyContent content, LazyOptions options, bool horizontal,
             }
             auto &animator = runtime.get()->item_animator();
             children.push(animator.layer(source));
-            auto ghosts = animator.prepare_removals(context.session().document(), content);
+            auto ghosts = runtime->capture_item_changes(context.session().document(), content);
             context.on_commit([runtime, content, options, horizontal, grid, state = runtime.get()->state_for(supplied), epoch = *epoch,
-                               slots = slots.unwrap(), ghosts = rstd::move(ghosts)](CommittedContext &committed) mutable -> ComposeResult<empty> {
+                               slot_revision = observed->value(),
+                               slots = slots.unwrap(), ghosts = rstd::move(ghosts)](CommittedContext &) mutable -> ComposeResult<empty> {
                 auto result = runtime.get()->configure(runtime, content, options, horizontal, grid,
-                                                       rstd::move(state), epoch, rstd::move(slots));
+                                                       rstd::move(state), epoch, slot_revision, rstd::move(slots));
                 if (result.is_err()) return Err(ComposeError(ComposeStage::Action, Some(result.unwrap_err())));
-                auto removed = runtime.get()->item_animator().start_removals(committed.session().document(), rstd::move(ghosts));
-                if (removed.is_err()) return Err(ComposeError(ComposeStage::Action, Some(removed.unwrap_err())));
+                if (ghosts) runtime.get()->item_animator().stage_changes(ghosts.unwrap());
                 return Ok(empty{});
             });
             auto motion = options.motion;

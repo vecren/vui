@@ -4,6 +4,20 @@ import :lazy_content;
 using namespace rstd::prelude;
 
 namespace vui::compose {
+auto nearby_lazy_index(const LazyContent &content, Index index, const Option<Key> &key) -> Option<Index> {
+    if (!key) return index < content.count() ? Some(Index(index)) : None<Index>();
+    if (!content.count()) return None();
+    if (index >= content.count()) index = content.count() - 1;
+    if (content.describe(index).key == key) return Some(Index(index));
+    constexpr Index neighborhood = 128;
+    for (Index distance = 1; distance <= neighborhood; ++distance) {
+        if (distance <= index && content.describe(index - distance).key == key) return Some(index - distance);
+        if (distance < content.count() - index && content.describe(index + distance).key == key)
+            return Some(index + distance);
+    }
+    return None();
+}
+
 auto LazyContent::append(Index count, Box<Builder> build, Option<Box<Metadata>> describe,
                          Option<Box<Span>> span, bool sticky) -> ComposeResult<empty> {
     if (count > ~Index{} - data_->count)

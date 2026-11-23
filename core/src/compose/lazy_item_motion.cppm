@@ -1,5 +1,6 @@
 export module vui.compose:lazy_item_motion;
 import :lazy_content;
+import :lazy_state;
 import :element;
 using namespace rstd::prelude;
 
@@ -18,6 +19,16 @@ struct LazyItemGhost {
     Option<Key> key;
     PaintedSubtree paint;
     AnimationOptions options;
+    Rect bounds;
+    Point visual_position;
+    Option<Index> destination;
+};
+
+struct LazyItemViewport {
+    Size size;
+    Point origin;
+    Option<Index> first, last;
+    bool horizontal{}, reverse{};
 };
 
 class LazyItemAnimator {
@@ -29,7 +40,7 @@ class LazyItemAnimator {
         UiId node;
         Index index;
         Option<Key> key;
-        bool position_adjusted{};
+        Option<Point> moving_origin;
     };
     struct Layer {
         Option<UiId> id;
@@ -39,15 +50,20 @@ class LazyItemAnimator {
     rstd::rc::Rc<Layer> layer_{rstd::rc::make_rc<Layer>()};
     Vec<Exiting> exiting_;
     Vec<Item> items_;
+    Vec<LazyItemGhost> pending_;
     Option<LazyContent> content_;
-    Point viewport_origin_;
+    LazyItemViewport viewport_;
+
+    auto start_exiting(UiDocument &document, LazyItemGhost ghost, Point offset,
+                       Option<Scalar> edge, bool horizontal) -> Result<empty, UiError>;
 
   public:
     auto layer(rstd::source_location source) const -> Element;
-    auto prepare_removals(UiDocument &document, const LazyContent &content) const -> Vec<LazyItemGhost>;
-    auto start_removals(UiDocument &document, Vec<LazyItemGhost> ghosts) -> Result<empty, UiError>;
+    auto capture_changes(UiDocument &document, const LazyContent &content) const -> Vec<LazyItemGhost>;
+    void stage_changes(Vec<LazyItemGhost> ghosts) { pending_ = rstd::move(ghosts); }
     auto update(UiDocument &document, const LazyContent &content, Vec<LazyAnimatedItem> items,
-                Point viewport_origin, Point anchor_correction = {}) -> Result<empty, UiError>;
+                const Vec<LazyVisibleItemInfo> &visible, LazyItemViewport viewport,
+                Point anchor_correction) -> Result<empty, UiError>;
     void reset();
 };
 } // namespace vui::compose
