@@ -370,8 +370,7 @@ auto UiDocument::premeasure_detached(UiId id, LayoutConstraints constraints) -> 
     nodes.push(UiId(id));
     for (usize i{}; i < nodes.len(); ++i) {
         const auto &node = *resolve(nodes[i]);
-        if (node.kind == LayoutKind::Custom || node.viewport || node.scene || node.layout_strategy ||
-            !node.modifiers.is_empty() || !node.subcomposition.expired())
+        if ((node.kind == LayoutKind::Custom && !node.layout_strategy) || node.scene || !node.subcomposition.expired())
             return Err(UiError::InvalidValue);
         if (nodes.len() + node.children.len() > usize(128)) return Err(UiError::Limit);
         for (auto child : node.children) nodes.push(UiId(child));

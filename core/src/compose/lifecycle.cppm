@@ -1,6 +1,7 @@
 export module vui.compose:lifecycle;
 import :compiler;
 import :runtime;
+import :saveable;
 using namespace rstd::prelude;
 using namespace rstd::literals;
 
@@ -41,6 +42,13 @@ auto state(Key key, T initial, CallSite site = {}) -> ComposeResult<State<T>> {
     auto opened = compiler::context(site); if (opened.is_err()) return Err(opened.unwrap_err());
     auto *scope = opened.unwrap();
     return compiler::located(scope->state(scope->slot(rstd::move(key)), rstd::move(initial)), site);
+}
+template <SaveableStateValue T>
+[[clang::annotate("vui.compose.hook.v2")]]
+auto saved_state(Key key, T initial, CallSite site = {}) -> ComposeResult<State<T>> {
+    auto opened = compiler::context(site); if (opened.is_err()) return Err(opened.unwrap_err());
+    auto *scope = opened.unwrap();
+    return compiler::located(scope->saved_state(scope->slot(rstd::move(key)), rstd::move(initial)), site);
 }
 template <class T, class F>
 [[clang::annotate("vui.compose.hook.v2")]]

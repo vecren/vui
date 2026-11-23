@@ -171,6 +171,22 @@ class ScrollMotionOptionsBuilder {
         rubber_scale(rstd::move(value));
         return rstd::move(*this);
     }
+    auto fling(ScrollFlingCurve value) & -> ScrollMotionOptionsBuilder & {
+        value_.fling = value;
+        return *this;
+    }
+    auto fling(ScrollFlingCurve value) && -> ScrollMotionOptionsBuilder {
+        fling(value);
+        return rstd::move(*this);
+    }
+    auto snap(ScrollSnapOptions value) & -> ScrollMotionOptionsBuilder & {
+        value_.snap = value;
+        return *this;
+    }
+    auto snap(ScrollSnapOptions value) && -> ScrollMotionOptionsBuilder {
+        snap(value);
+        return rstd::move(*this);
+    }
     auto build() const & -> ScrollMotionOptions { return value_; }
     auto build() && -> ScrollMotionOptions { return rstd::move(value_); }
 };

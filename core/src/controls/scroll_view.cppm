@@ -47,6 +47,23 @@ struct ScrollDeltaResolution {
 // Deltas use viewport pixels. Deferred writers keep the initiating gesture's presentation lease.
 using ScrollDeltaResolver = rstd::dyn<rstd::FnMut<Result<Option<ScrollDeltaResolution>, UiError>(
     Point, ViewportMetrics, bool, Option<ScrollDeltaLease>)>>;
+using ScrollSnapLayout = rstd::dyn<rstd::FnMut<Option<Point>(const ScrollSnapRequest &)>>;
+using ScrollNestedCallback = rstd::dyn<rstd::FnMut<Point(ScrollNestedPhase, const ScrollNestedOffer &)>>;
+struct ScrollNestedReceiver {
+    Box<ScrollNestedCallback> invoke;
+};
+
+class ScrollNestedBinding {
+    friend class ScrollView;
+    rstd::rc::Rc<ScrollNestedReceiver> callback_;
+    Binding binding_;
+    ScrollNestedBinding(rstd::rc::Rc<ScrollNestedReceiver> callback, Binding binding)
+        : callback_(rstd::move(callback)), binding_(rstd::move(binding)) {}
+
+  public:
+    auto active() const -> bool { return binding_.alive(); }
+    void disconnect() { binding_ = {}; callback_.reset(); }
+};
 }
 
 namespace vui {
@@ -59,12 +76,14 @@ class ScrollInteraction {
         rstd::rc::Rc<ScrollAnimationStatus> status;
         Point from, to;
         Serial started, duration;
+        bool user_scroll{};
     };
     UiSession &session_;
     UiId root_,viewport_;
     ScrollStyle &style_;
     Signal<void(UserScroll)> &changed_;
     Option<Box<ScrollDeltaResolver>> &resolve_delta_;
+    Option<Box<ScrollSnapLayout>> &snap_layout_;
     rstd::rc::Weak<ScrollInteraction> owner_;
     Serial gesture_{};
     ParticipantRegistration participant_;
@@ -83,6 +102,8 @@ class ScrollInteraction {
     Option<OffsetAnimation> animation_;
     Option<Box<ScrollDeltaCompletion>> pending_delta_;
     Point decay_position_;
+    Point fling_velocity_;
+    bool post_fling_delivered_{};
     Point pending_decay_delta_;
     Serial pending_decay_time_{};
     struct EdgeSpring {
@@ -97,11 +118,17 @@ class ScrollInteraction {
         Serial gesture;
     };
     struct Ancestor;
+    struct NestedRoute {
+        ScrollNestedPhase phase;
+        UiId source;
+        Point consumed, remaining;
+    };
     struct BoundaryHit {
         Scalar velocity;
         Serial time;
     };
     Option<NestedOrigin> nested_origin_;
+    Point drag_delta_, nested_remaining_, nested_consumed_;
     Vec<rstd::rc::Weak<ScrollInteraction>> nested_drag_members_;
     bool nested_scroll_{}, handoff_pending_{};
     auto ui() -> UiDocument & {return session_.document();}
@@ -118,10 +145,11 @@ class ScrollInteraction {
     auto write(Point value,const ViewportMetrics &metrics) -> bool;
     auto single_axis() const -> bool { return style_.axes.horizontal != style_.axes.vertical; }
     auto uses_scroll_deltas() const -> bool {
-        return (resolve_delta_ || nested_scroll_ || mode_ == Mode::NestedDrag) &&
-               (style_.motion.movement == ScrollMovement::Clamped || single_axis());
+        return resolve_delta_ || nested_scroll_ || mode_ == Mode::NestedDrag;
     }
-    auto uses_elastic_deltas() const -> bool { return uses_scroll_deltas() && style_.motion.movement == ScrollMovement::Elastic; }
+    auto uses_elastic_deltas() const -> bool {
+        return uses_scroll_deltas() && single_axis() && style_.motion.movement == ScrollMovement::Elastic;
+    }
     auto along(Point value) const -> Scalar { return style_.axes.horizontal ? value.x : value.y; }
     auto along(Size value) const -> Scalar { return style_.axes.horizontal ? value.width : value.height; }
     auto main_axis(Scalar value) const -> Point { return style_.axes.horizontal ? Point{value, 0} : Point{0, value}; }
@@ -134,14 +162,19 @@ class ScrollInteraction {
     auto write_pull(Scalar pull, const ViewportMetrics &metrics) -> bool;
     auto drag_by(Point delta, const ViewportMetrics &metrics) -> bool;
     auto consume_drag(Point delta, ViewportMetrics metrics) -> bool;
-    auto ancestor(Point delta, const ScrollInteraction *drag, bool test_range = true) -> Option<Ancestor>;
+    auto ancestor(Point delta, const ScrollInteraction *drag, bool test_range = true,
+                  NestedRoute *route = nullptr) -> Option<Ancestor>;
+    void notify_nested(const InputSnapshot &snapshot, UiId node, NestedRoute &route);
+    auto has_nested_connection() -> bool;
+    auto pre_nested(ScrollNestedPhase phase, Point amount) -> Point;
     auto accepts_nested_drag(const ScrollInteraction &origin) const -> bool;
     auto matches_origin(const ScrollInteraction &origin) const -> bool;
     auto offer_drag(Point remaining, const ViewportMetrics &metrics) -> bool;
     void release_nested_drag();
-    auto boundary_hit(Point remaining, Serial time) const -> BoundaryHit;
+    auto boundary_hit(const Axis &axis, Scalar edge, Serial time) const -> BoundaryHit;
     auto start_boundary_spring(Scalar remaining, const ViewportMetrics &metrics, BoundaryHit hit, Serial time) -> bool;
-    auto handoff_fling(Point remaining, const ViewportMetrics &metrics, BoundaryHit hit, Serial time) -> bool;
+    auto handoff_fling(Point velocity, Point remaining, const ViewportMetrics &metrics, Serial hit, Serial time,
+                       bool complete) -> bool;
     auto reached_boundary(Point remaining, const ViewportMetrics &metrics, Serial time) -> bool;
     auto sample_edge_spring(const ViewportMetrics &metrics, Serial time) -> bool;
     auto resolve_delta(Point delta, const ViewportMetrics &metrics) -> Result<Option<ScrollDeltaResolution>, UiError>;
@@ -149,9 +182,12 @@ class ScrollInteraction {
         axis={Phase::Spring,{value,velocity},target,started};
     }
     void begin_axis(Axis &axis,Scalar value,Scalar velocity,Scalar maximum,bool enabled,Serial started);
-    void begin_motion(const ViewportMetrics &metrics,Point velocity,Serial started);
+    void begin_motion(const ViewportMetrics &metrics, Point velocity, Serial started, bool transferred = false);
     auto sample_axis(Axis &axis,Scalar maximum,Serial time) -> ScalarMotion;
     auto decay_sample(const Axis &axis, Serial elapsed) const -> ScalarMotion;
+    auto decay_hit_time(const Axis &axis, Scalar edge, Serial elapsed) const -> Serial;
+    auto begin_snap(const ViewportMetrics &metrics, Serial time) -> bool;
+    void finish_fling();
     auto sample_scroll_deltas(MotionContext &context, const ViewportMetrics &metrics)
         -> Result<MotionStatus, MotionError>;
     void restart_animation(Point from, Serial time);
@@ -160,16 +196,18 @@ class ScrollInteraction {
     void pending_up(EventContext &,const RoutedEvent &event);
   public:
     ScrollInteraction(UiSession &session, UiId root, UiId viewport, ScrollStyle &style,
-                      Signal<void(UserScroll)> &changed, Option<Box<ScrollDeltaResolver>> &resolve_delta)
+                      Signal<void(UserScroll)> &changed, Option<Box<ScrollDeltaResolver>> &resolve_delta,
+                      Option<Box<ScrollSnapLayout>> &snap_layout)
         : session_(session), root_(root), viewport_(viewport), style_(style), changed_(changed),
-          resolve_delta_(resolve_delta) { configure(); }
+          resolve_delta_(resolve_delta), snap_layout_(snap_layout) { configure(); }
     ~ScrollInteraction();
     void configure() {
         pan_=PanRecognizer({style_.motion.threshold,style_.axes.horizontal && style_.axes.vertical ? PanAxis::Free : style_.axes.horizontal ? PanAxis::Horizontal : PanAxis::Vertical});
         inverse_=None();
     }
     static auto make(UiSession &session, UiId root, UiId viewport, ScrollStyle &style,
-                     Signal<void(UserScroll)> &changed, Option<Box<ScrollDeltaResolver>> &resolve_delta)
+                     Signal<void(UserScroll)> &changed, Option<Box<ScrollDeltaResolver>> &resolve_delta,
+                     Option<Box<ScrollSnapLayout>> &snap_layout)
         -> Result<rstd::rc::Rc<ScrollInteraction>, ControlError>;
     void stop(bool clamp=true,bool release=true,bool request=true);
     auto rebase_offset(Point value) -> Result<empty, UiError>;
@@ -195,6 +233,7 @@ class ScrollState {
     ScrollStyle style_;
     Signal<void(UserScroll)> user_scrolled_;
     Option<Box<ScrollDeltaResolver>> resolve_delta_;
+    Option<Box<ScrollSnapLayout>> snap_layout_;
     Option<rstd::rc::Rc<ScrollInteraction>> interaction_;
     static auto shift(Scalar value, Scalar amount, Scalar step, Scalar maximum) -> Scalar;
     static auto consumed(Scalar change, Scalar step, Scalar amount) -> Scalar;
@@ -231,6 +270,14 @@ class ScrollView {
     }
     static auto set_delta_resolver(UiDocument &ui, UiId id, Option<Box<ScrollDeltaResolver>> resolver)
         -> Result<empty, UiError>;
+    static auto set_snap_layout(UiDocument &ui, UiId id, Option<Box<ScrollSnapLayout>> layout)
+        -> Result<empty, UiError>;
+    static auto bind_nested_scroll(UiDocument &ui, UiId id, Box<ScrollNestedCallback> callback)
+        -> Result<ScrollNestedBinding, UiError>;
+    template <class F> static auto on_nested_scroll(UiDocument &ui, UiId id, F callback)
+        -> Result<ScrollNestedBinding, UiError> {
+        return bind_nested_scroll(ui, id, Box<ScrollNestedCallback>::make(rstd::move(callback)));
+    }
     static auto finish_configuration(UiDocument &ui, UiId id) -> Result<empty, UiError> {
         auto state = ui.state<ScrollState>(id);
         return state ? state->finish_configuration() : Result<empty, UiError>(Err(UiError::InvalidId));

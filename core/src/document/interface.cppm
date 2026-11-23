@@ -287,6 +287,9 @@ class UiDocument {
             Option<UiTreePermit> children_owner;
             Option<NodeStyle> previous_style;
             Option<ScrollAxes> axes;
+            Option<Box<rstd::dyn<Layout>>> layout;
+            Option<BindingGuard> previous_layout_binding;
+            bool layout_changed{};
         };
         struct Retirement final : UiEditRetirement { Vec<Entry> entries; };
         Serial session_{}, base_{}, batch_{};
@@ -295,6 +298,7 @@ class UiDocument {
         UiDocument *document_{};
         Vec<Entry> entries_;
         Vec<UiId> retired_;
+        Vec<UiId> recycled_;
         Vec<UiId> preserved_;
         usize slots_{};
         Option<Box<Retirement>> retirement_;

@@ -63,6 +63,7 @@ struct LazyStateData {
     LazyScrollStatus scroll_status{};
     Option<Box<rstd::dyn<rstd::FnMut<void()>>>> wake;
     Option<Box<rstd::dyn<rstd::FnMut<Result<LazyItemPin, UiError>(Index)>>>> pin;
+    Option<Box<rstd::dyn<rstd::FnMut<void(const Key &)>>>> forget_item_state;
     auto request(Index index, Scalar offset, Serial duration) -> Result<empty, UiError>;
     auto publish_layout(LazyLayoutInfo next) -> Result<empty, UiError>;
 };
@@ -97,6 +98,7 @@ class LazyState {
     }
     auto scroll_status() const -> LazyScrollStatus { return data_->scroll_status; }
     auto pin_item(Index index) -> Result<LazyItemPin, UiError>;
+    auto forget_item_state(const Key &key) -> Result<empty, UiError>;
     static auto restore(LazyScrollPosition position) -> Result<LazyState, UiError>;
     auto request_scroll_to_item(Index index, Scalar offset = 0) -> Result<empty, UiError> {
         return data_.get()->request(index, offset, 0);

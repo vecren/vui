@@ -11,6 +11,63 @@ auto valid_scroll_amount(Point amount, Point remaining) -> bool {
     };
     return valid(amount.x, remaining.x) && valid(amount.y, remaining.y);
 }
+
+auto spatial(FocusDirection direction) -> bool {
+    return direction != FocusDirection::Next && direction != FocusDirection::Previous;
+}
+
+struct FocusBounds {
+    Scalar near, far, cross_start, cross_end;
+};
+
+auto focus_bounds(const InputSnapshot &snapshot, UiId id, FocusDirection direction) -> Option<FocusBounds> {
+    const auto *visual = snapshot.get(id);
+    auto transform = snapshot.local_to_surface(id);
+    if (!visual || transform.is_err()) return None();
+    const auto rect = visual->layout_bounds;
+    const Point corners[] = {
+        transform->map({rect.x, rect.y}), transform->map({rect.x + rect.width, rect.y}),
+        transform->map({rect.x, rect.y + rect.height}), transform->map({rect.x + rect.width, rect.y + rect.height})
+    };
+    const bool horizontal = direction == FocusDirection::Left || direction == FocusDirection::Right;
+    const bool reverse = direction == FocusDirection::Left || direction == FocusDirection::Up;
+    const auto along = [&](Point value) {
+        return (reverse ? -1 : 1) * (horizontal ? value.x : value.y);
+    };
+    const auto across = [&](Point value) { return horizontal ? value.y : value.x; };
+    FocusBounds bounds{along(corners[0]), along(corners[0]), across(corners[0]), across(corners[0])};
+    for (const auto corner : corners) {
+        if (!finite(corner.x) || !finite(corner.y)) return None();
+        const auto a = along(corner);
+        const auto c = across(corner);
+        bounds.near = rstd::cmp::min(bounds.near, a);
+        bounds.far = rstd::cmp::max(bounds.far, a);
+        bounds.cross_start = rstd::cmp::min(bounds.cross_start, c);
+        bounds.cross_end = rstd::cmp::max(bounds.cross_end, c);
+    }
+    return Some(bounds);
+}
+
+auto directional_candidate(FocusBounds source, FocusBounds target) -> bool {
+    return (source.near < target.near || source.far <= target.near) && source.far < target.far;
+}
+
+auto directional_score(FocusBounds source, FocusBounds target) -> Scalar {
+    const auto along = rstd::cmp::max(Scalar(), target.near - source.far);
+    const auto across = (target.cross_start - source.cross_start) * .5 +
+                        (target.cross_end - source.cross_end) * .5;
+    return 13 * along * along + across * across;
+}
+
+auto beam_wins(FocusBounds source, FocusBounds target, FocusBounds other, bool horizontal) -> bool {
+    const auto overlaps = [&](FocusBounds rect) {
+        return source.cross_end > rect.cross_start && source.cross_start < rect.cross_end;
+    };
+    if (!overlaps(target) || overlaps(other)) return false;
+    if (other.near < source.far || horizontal) return true;
+    return rstd::cmp::max(Scalar(), target.near - source.far) <
+           rstd::cmp::max(Scalar(1), other.far - source.far);
+}
 }
 
 auto EventContext::consume_scroll(Point amount) -> Result<empty, InputError> {
@@ -857,8 +914,48 @@ auto EventRouter::focus_candidates() const -> Vec<UiId> {
     return candidates;
 }
 
-auto EventRouter::focus_neighbor(bool backwards, bool wrap) -> Option<UiId> {
+auto EventRouter::focus_accepted(UiId id) -> bool {
+    for (auto &provider : focus_providers_.as_mut_slice().as_mut_ref()) {
+        if (!provider.guard.alive() || !input_descendant(*update_, provider.root, id)) continue;
+        if (!(*provider.accepts)(*update_, id)) return false;
+    }
+    return true;
+}
+
+auto EventRouter::spatial_focus_neighbor(FocusDirection direction) -> Option<UiId> {
+    const auto root = scopes_.focus_root();
+    auto id = focus_ ? focus_ : root ? root : update_->root();
+    if (!id) return None();
+    auto source = focus_bounds(*update_, *id, direction);
+    if (!source) return None();
+    const bool horizontal = direction == FocusDirection::Left || direction == FocusDirection::Right;
+    if (!focus_) {
+        const bool backwards = direction == FocusDirection::Left || direction == FocusDirection::Up;
+        source->far = source->near;
+        const auto cross = backwards ? source->cross_end : source->cross_start;
+        source->cross_start = source->cross_end = cross;
+    }
+    Option<UiId> best;
+    FocusBounds bounds{};
+    for (const auto &visual : update_->visuals()) {
+        if (focus_ == Some(UiId(visual.id)) || !eligible(*update_, visual.id, false) || !focus_accepted(visual.id))
+            continue;
+        const auto next = focus_bounds(*update_, visual.id, direction);
+        if (!next || !directional_candidate(*source, *next)) continue;
+        if (!best || beam_wins(*source, *next, bounds, horizontal) ||
+            (!beam_wins(*source, bounds, *next, horizontal) &&
+             directional_score(*source, *next) < directional_score(*source, bounds))) {
+            best = Some(UiId(visual.id));
+            bounds = *next;
+        }
+    }
+    return best;
+}
+
+auto EventRouter::focus_neighbor(FocusDirection direction, bool wrap) -> Option<UiId> {
     if (!update_) return None();
+    if (spatial(direction)) return spatial_focus_neighbor(direction);
+    const bool backwards = direction == FocusDirection::Previous;
     auto candidates = focus_candidates();
     Option<UiId> first, last;
     bool found{};
@@ -868,12 +965,7 @@ auto EventRouter::focus_neighbor(bool backwards, bool wrap) -> Option<UiId> {
             if (backwards && last) return last;
             continue;
         }
-        bool accepted = true;
-        for (auto &provider : focus_providers_.as_mut_slice().as_mut_ref()) {
-            if (!provider.guard.alive() || !input_descendant(*update_, provider.root, id)) continue;
-            if (!(*provider.accepts)(*update_, id)) { accepted = false; break; }
-        }
-        if (!accepted) continue;
+        if (!focus_accepted(id)) continue;
         if (found && !backwards) return Some(UiId(id));
         if (!first) first = Some(UiId(id));
         last = Some(UiId(id));
@@ -915,18 +1007,23 @@ auto EventRouter::release_focus_search() -> bool {
 }
 
 auto EventRouter::move_focus(bool backwards) -> Result<empty, InputError> {
+    return move_focus(backwards ? FocusDirection::Previous : FocusDirection::Next);
+}
+
+auto EventRouter::move_focus(FocusDirection direction) -> Result<empty, InputError> {
     if (!update_) return Err(InputError::Unavailable);
+    if (unsigned(direction) > unsigned(FocusDirection::Down)) return Err(InputError::InvalidEvent);
     release_focus_search();
-    const auto neighbor = focus_neighbor(backwards, false);
+    const auto neighbor = focus_neighbor(direction, false);
     if (focus_) {
         if (auto provider = enclosing_focus_provider(*focus_, neighbor)) {
             const auto *root = update_->get(provider->root);
-            focus_search_ = Some(FocusSearch{*focus_, provider->root, focus_revision_, root->mount_generation, backwards});
+            focus_search_ = Some(FocusSearch{*focus_, provider->root, focus_revision_, root->mount_generation, direction});
             document_.bindings().wake();
             return Ok(empty{});
         }
     }
-    const auto target = neighbor ? neighbor : focus_neighbor(backwards, true);
+    const auto target = neighbor ? neighbor : focus_neighbor(direction, true);
     return target ? request_focus(target) : Result<empty, InputError>(Ok(empty{}));
 }
 
@@ -939,14 +1036,14 @@ auto EventRouter::continue_focus_search() -> Result<bool, InputError> {
         focus_ != Some(search.origin) || !eligible(*update_, search.origin, false) ||
         !input_descendant(*update_, search.root, search.origin))
         return Ok(release_focus_search());
-    const auto neighbor = focus_neighbor(search.backwards, false);
+    const auto neighbor = focus_neighbor(search.direction, false);
     if (neighbor && *neighbor != search.root && input_descendant(*update_, search.root, *neighbor)) {
         focus_search_->selected = true;
         auto focused = request_focus(neighbor);
         if (focused.is_err()) return Err(focused.unwrap_err());
         return Ok(true);
     }
-    if (search.probes < 12 && (*provider->extend)(search.backwards)) {
+    if (search.probes < 12 && (*provider->extend)(*update_, search.direction)) {
         ++focus_search_->probes;
         return Ok(true);
     }
@@ -959,7 +1056,7 @@ auto EventRouter::continue_focus_search() -> Result<bool, InputError> {
         focus_search_ = Some(search);
         return Ok(true);
     }
-    const auto fallback = focus_neighbor(search.backwards, true);
+    const auto fallback = focus_neighbor(search.direction, true);
     if (!fallback || focus_ == fallback) return Ok(released);
     auto focused = request_focus(fallback);
     if (focused.is_err()) return Err(focused.unwrap_err());
@@ -1351,8 +1448,11 @@ auto EventRouter::dispatch(InputEvent input) -> Result<empty, InputError> {
             (input.text_session == 0 || input.text_session == text_request_->session))
             route(*update_, *text_client_, input);
     } else if (key_event) {
+        const auto existing_commands = commands_.len();
         auto target = focus_.is_some() ? focus_ : scopes_.focus_root();
         bool prevented = target.is_some() && route(*update_, *target, input);
+        for (auto i = existing_commands; !prevented && i < commands_.len(); ++i)
+            prevented = commands_[i].type == CommandType::Focus;
         if (!prevented && navigation_.is_some())
             (*navigation_)->operator()(*this, input);
     } else {

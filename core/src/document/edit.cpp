@@ -25,9 +25,27 @@ auto UiDocument::prepare(UiEditBatch edit) -> Result<PreparedEdit, UiEditError> 
     result.batch_ = edit.owner_;
     result.document_ = this;
     result.session_ = session_; result.base_ = revision_; result.lifetime_ = lifetime();
+    Vec<UiId> recyclable;
+    for (auto root : edit.recycled_) {
+        auto node = resolve(root);
+        if (!node || node->parent || root_ == Some(root)) return fail(UiError::InvalidId);
+        auto allowed = children_access(root, edit.access_);
+        if (allowed.is_err()) return fail(allowed.unwrap_err());
+        for (auto previous : result.recycled_)
+            if (previous == root) return fail(UiError::InvalidValue);
+        result.recycled_.push(UiId(root));
+        const auto first = recyclable.len();
+        recyclable.push(UiId(root));
+        for (auto i = first; i < recyclable.len(); ++i) {
+            const auto &current = *resolve(recyclable[i]);
+            for (auto child : current.children) recyclable.push(UiId(child));
+        }
+    }
     for (auto id : edit.removed_) {
         if (!valid(id)) return fail(UiError::InvalidId);
         if (root_ == Some(id)) return fail(UiError::Root);
+        for (auto recycled : result.recycled_)
+            if (is_descendant(recycled, id).unwrap()) return fail(UiError::InvalidValue);
         auto allowed = relation_access(id, edit.access_);
         if (allowed.is_err()) return fail(allowed.unwrap_err());
         for (auto previous : result.retired_) {
@@ -41,6 +59,8 @@ auto UiDocument::prepare(UiEditBatch edit) -> Result<PreparedEdit, UiEditError> 
         auto existing = edit.entries_[i].existing;
         if (existing.is_none()) continue;
         if (!valid(*existing)) return fail(UiError::InvalidId);
+        for (auto recycled : result.recycled_)
+            if (is_descendant(recycled, *existing).unwrap()) return fail(UiError::InvalidValue);
         for (auto removed : result.retired_)
             if (is_descendant(removed, *existing).unwrap()) return fail(UiError::InvalidValue);
         auto node = resolve(*existing);
@@ -65,13 +85,22 @@ auto UiDocument::prepare(UiEditBatch edit) -> Result<PreparedEdit, UiEditError> 
             prepared.parent = node->parent;
             for (auto child : node->children) prepared.children.push(UiId(child));
         } else {
-            while (next_slot < slots_.len() &&
-                   (slots_[next_slot].node.is_some() || slots_[next_slot].generation == ~Serial{}))
+            for (usize i{}; i < recyclable.len(); ++i) {
+                const auto id = recyclable[i];
+                if (id.generation >= ~Serial{} - 1 || resolve(id)->kind != entry.kind) continue;
+                prepared.id = {session_, id.slot, id.generation + 1};
+                recyclable.remove(i);
+                break;
+            }
+            if (!prepared.id.valid()) {
+                while (next_slot < slots_.len() &&
+                       (slots_[next_slot].node.is_some() || slots_[next_slot].generation == ~Serial{}))
+                    ++next_slot;
+                if (next_slot >= usize(1'000'000)) return fail(UiError::Limit);
+                prepared.id = {session_, Index(next_slot.to_primitive()),
+                               next_slot < slots_.len() ? slots_[next_slot].generation : 1};
                 ++next_slot;
-            if (next_slot >= usize(1'000'000)) return fail(UiError::Limit);
-            prepared.id = {session_, Index(next_slot.to_primitive()),
-                           next_slot < slots_.len() ? slots_[next_slot].generation : 1};
-            ++next_slot;
+            }
             if (unsigned(entry.kind) > unsigned(LayoutKind::Item)) return fail(UiError::InvalidValue);
             prepared.fresh = Some(Node(entry.kind, NodeStyle{}));
             if (entry.kind == LayoutKind::Viewport) prepared.fresh->viewport = Some(Box<ViewportLayout>::make());
@@ -80,6 +109,10 @@ auto UiDocument::prepare(UiEditBatch edit) -> Result<PreparedEdit, UiEditError> 
             if (entry.kind == LayoutKind::Scene) prepared.fresh->scene = Some(Box<SceneContent>::make());
         }
         auto node = entry.existing.is_some() ? resolve(prepared.id) : &*prepared.fresh;
+        if (entry.layout) {
+            prepared.layout = rstd::move(entry.layout);
+            prepared.layout_changed = true;
+        }
         if (entry.style.is_some()) {
             operation = UiEditOperation::Style;
             auto checked = validate_style(*node, *entry.style);
@@ -283,13 +316,22 @@ auto UiDocument::publish(PreparedEdit edit) -> Result<UiCommitReport, UiError> {
     struct Guard { bool &value; ~Guard() { value = false; } } guard{editing_};
     UiCommitReport report;
     while (slots_.len() < edit.slots_) slots_.push(Slot{});
+    for (auto root : edit.recycled_) {
+        erase(root);
+        changed(false);
+    }
     for (auto &entry : edit.entries_)
         if (entry.fresh.is_some()) {
             slots_[usize(entry.id.slot)].node = rstd::move(entry.fresh); ++report.created;
         }
     for (auto &entry : edit.entries_) {
         auto node = resolve(entry.id);
-        entry.updated = entry.style.is_some() || entry.text.is_some() || entry.image.is_some() || !entry.states.is_empty() || !entry.patches.is_empty() || entry.children_owner.is_some() || entry.axes.is_some() || entry.children_changed || entry.relation_changed;
+        entry.updated = entry.style.is_some() || entry.text.is_some() || entry.image.is_some() || !entry.states.is_empty() || !entry.patches.is_empty() || entry.children_owner.is_some() || entry.axes.is_some() || entry.layout.is_some() || entry.children_changed || entry.relation_changed;
+        if (entry.layout) {
+            if (node->layout_binding) node->layout_binding->disconnect();
+            entry.previous_layout_binding = rstd::exchange(node->layout_binding, None<BindingGuard>());
+            entry.layout = rstd::exchange(node->layout_strategy, rstd::move(entry.layout));
+        }
         if (entry.style.is_some()) { entry.previous_style = Some(node->style); node->style = *entry.style; }
         if (entry.text.is_some()) { auto previous = rstd::move(node->text); node->text = rstd::move(entry.text); entry.text = rstd::move(previous); node->paint_dirty = true; }
         if (entry.image.is_some()) { auto previous = rstd::move(node->image); node->image = rstd::move(entry.image); entry.image = rstd::move(previous); node->paint_dirty = true; }
@@ -307,7 +349,7 @@ auto UiDocument::publish(PreparedEdit edit) -> Result<UiCommitReport, UiError> {
         const bool measured = entry.relation_changed && !entry.created && resolve(entry.id)->premeasured;
         if (entry.relation_changed && !entry.created) remount(entry.id, edit.preserved_.as_slice());
         if (entry.previous_style.is_some()) style_changed(entry.id, *resolve(entry.id), *entry.previous_style);
-        if (entry.created || !entry.states.is_empty() || !entry.patches.is_empty() || entry.children_owner.is_some() || entry.text.is_some() || entry.image.is_some() || entry.axes.is_some() || entry.children_changed || (entry.relation_changed && !measured))
+        if (entry.created || !entry.states.is_empty() || !entry.patches.is_empty() || entry.children_owner.is_some() || entry.text.is_some() || entry.image.is_some() || entry.axes.is_some() || entry.layout_changed || entry.children_changed || (entry.relation_changed && !measured))
             changed(true, Some(entry.id));
         else if (measured) {
             if (auto parent = resolve(entry.id)->parent; parent) dirty_measure(*parent);

@@ -12,7 +12,10 @@ struct LazyAnimatedItem {
     Option<Key> key;
     LazyItemAnimationOptions options;
     bool sticky{};
+    bool leaving{};
 };
+
+using LazyMoveCompletion = rstd::dyn<rstd::FnMut<void(UiId)>>;
 
 struct LazyItemGhost {
     Index index;
@@ -59,11 +62,14 @@ class LazyItemAnimator {
 
   public:
     auto layer(rstd::source_location source) const -> Element;
-    auto capture_changes(UiDocument &document, const LazyContent &content) const -> Vec<LazyItemGhost>;
+    auto moved_items(const LazyContent &content) const -> Vec<Index>;
+    auto capture_changes(UiDocument &document, const LazyContent &content, const Vec<Index> &retained) const
+        -> Vec<LazyItemGhost>;
     void stage_changes(Vec<LazyItemGhost> ghosts) { pending_ = rstd::move(ghosts); }
     auto update(UiDocument &document, const LazyContent &content, Vec<LazyAnimatedItem> items,
                 const Vec<LazyVisibleItemInfo> &visible, LazyItemViewport viewport,
-                Point anchor_correction) -> Result<empty, UiError>;
+                Point anchor_correction, const rstd::rc::Rc<Box<LazyMoveCompletion>> &completion)
+        -> Result<empty, UiError>;
     void reset();
 };
 } // namespace vui::compose

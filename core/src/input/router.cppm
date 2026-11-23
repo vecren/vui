@@ -16,6 +16,7 @@ struct InputAvailability {
     Serial mount_generation{};
     auto operator==(const InputAvailability &) const -> bool = default;
 };
+enum class FocusDirection { Next, Previous, Left, Right, Up, Down };
 class EventRouter;
 class EventContext;
 struct Behavior {
@@ -211,7 +212,7 @@ class EventRouter {
     struct FocusSearchProvider {
         UiId root;
         BindingGuard guard;
-        Box<rstd::dyn<rstd::FnMut<bool(bool)>>> extend;
+        Box<rstd::dyn<rstd::FnMut<bool(const InputSnapshot &, FocusDirection)>>> extend;
         Box<rstd::dyn<rstd::FnMut<bool()>>> release;
         Box<rstd::dyn<rstd::FnMut<bool(const InputSnapshot &, UiId)>>> accepts;
     };
@@ -219,7 +220,8 @@ class EventRouter {
     struct FocusSearch {
         UiId origin, root;
         Serial revision, mount;
-        bool backwards{}, selected{};
+        FocusDirection direction{FocusDirection::Next};
+        bool selected{};
         Index probes{};
     };
     Option<FocusSearch> focus_search_;
@@ -261,7 +263,9 @@ class EventRouter {
     auto dispatch_for_session(InputEvent input) -> Result<empty, InputError>;
     auto resume_wheel() -> Result<empty, InputError>;
     auto allows_semantics(const InputSnapshot &snapshot, UiId target) const -> bool;
-    auto focus_neighbor(bool backwards, bool wrap) -> Option<UiId>;
+    auto focus_accepted(UiId id) -> bool;
+    auto focus_neighbor(FocusDirection direction, bool wrap) -> Option<UiId>;
+    auto spatial_focus_neighbor(FocusDirection direction) -> Option<UiId>;
     auto focus_provider(UiId root) -> FocusSearchProvider *;
     auto enclosing_focus_provider(UiId origin, Option<UiId> neighbor, Option<UiId> after = {}) -> FocusSearchProvider *;
     auto continue_focus_search() -> Result<bool, InputError>;
@@ -582,6 +586,7 @@ class EventRouter {
     }
     auto focus_candidates() const -> Vec<UiId>;
     auto move_focus(bool backwards) -> Result<empty, InputError>;
+    auto move_focus(FocusDirection direction) -> Result<empty, InputError>;
     template <class Extend, class Release, class Accepts>
     auto on_focus_search(UiId root, Extend extend, Release release, Accepts accepts) -> Result<Binding, InputError> {
         if (closed_) return Err(InputError::Unavailable);
@@ -593,7 +598,12 @@ class EventRouter {
         auto binding = document_.bindings().make();
         focus_providers_.push({
             root, binding.guard(),
-            Box<rstd::dyn<rstd::FnMut<bool(bool)>>>::make(rstd::move(extend)),
+            Box<rstd::dyn<rstd::FnMut<bool(const InputSnapshot &, FocusDirection)>>>::make(
+                [extend = rstd::move(extend)](const InputSnapshot &snapshot, FocusDirection direction) mutable {
+                    if constexpr (requires { extend(snapshot, direction); }) return extend(snapshot, direction);
+                    else return (direction == FocusDirection::Next || direction == FocusDirection::Previous) &&
+                                extend(direction == FocusDirection::Previous);
+                }),
             Box<rstd::dyn<rstd::FnMut<bool()>>>::make(rstd::move(release)),
             Box<rstd::dyn<rstd::FnMut<bool(const InputSnapshot &, UiId)>>>::make(rstd::move(accepts))
         });

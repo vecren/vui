@@ -100,7 +100,23 @@ auto LazyItemAnimator::layer(rstd::source_location source) const -> Element {
     return element(LayerElement{layer_.clone()}, {}, source).key(Key("$lazy-exiting-items"_str)).style(style);
 }
 
-auto LazyItemAnimator::capture_changes(UiDocument &document, const LazyContent &content) const
+auto LazyItemAnimator::moved_items(const LazyContent &content) const -> Vec<Index> {
+    Vec<Index> moved;
+    if (!content_ || content_->identity() == content.identity()) return moved;
+    for (const auto &item : items_) {
+        if (moved.len() >= usize(max_ghosts)) break;
+        const auto &geometry = item.geometry;
+        if (geometry.sticky || !geometry.key) continue;
+        const auto index = nearby_lazy_index(content, geometry.index, geometry.key);
+        if (!index || (!geometry.leaving && *index == geometry.index)) continue;
+        const auto metadata = content.describe(*index);
+        const auto placement = metadata.animation ? metadata.animation->placement : None<AnimationOptions>();
+        if (placement && placement->duration_ns) moved.push(Index(*index));
+    }
+    return moved;
+}
+
+auto LazyItemAnimator::capture_changes(UiDocument &document, const LazyContent &content, const Vec<Index> &retained) const
     -> Vec<LazyItemGhost> {
     Vec<LazyItemGhost> ghosts;
     if (!content_ || content_->identity() == content.identity()) return ghosts;
@@ -132,6 +148,9 @@ auto LazyItemAnimator::capture_changes(UiDocument &document, const LazyContent &
             auto fade = geometry.options.fade_out;
             if (fade && fade->duration_ns) capture(geometry, *fade, {});
         } else if (!geometry.sticky && *index != geometry.index) {
+            bool live{};
+            for (auto retained_index : retained) live |= retained_index == *index;
+            if (live) continue;
             const auto metadata = content.describe(*index);
             const auto placement = metadata.animation ? metadata.animation->placement : None<AnimationOptions>();
             if (placement && placement->duration_ns) moves.push({&geometry, *index, *placement});
@@ -180,7 +199,8 @@ auto LazyItemAnimator::start_exiting(UiDocument &doc, LazyItemGhost ghost, Point
 
 auto LazyItemAnimator::update(UiDocument &doc, const LazyContent &content, Vec<LazyAnimatedItem> geometry,
                               const Vec<LazyVisibleItemInfo> &visible, LazyItemViewport viewport,
-                              Point anchor_correction) -> Result<empty, UiError> {
+                              Point anchor_correction, const rstd::rc::Rc<Box<LazyMoveCompletion>> &completion)
+    -> Result<empty, UiError> {
     auto same = [](const LazyAnimatedItem &a, const LazyAnimatedItem &b) {
         return a.node == b.node && same_item(a.index, a.key, b.index, b.key);
     };
@@ -217,11 +237,18 @@ auto LazyItemAnimator::update(UiDocument &doc, const LazyContent &content, Vec<L
         if (before) {
             current.move = before->move;
             current.opacity = before->opacity;
-            Point delta{before->geometry.viewport_bounds.x - viewport_.origin.x -
-                            value.viewport_bounds.x + viewport.origin.x + anchor_correction.x,
-                        before->geometry.viewport_bounds.y - viewport_.origin.y -
-                            value.viewport_bounds.y + viewport.origin.y + anchor_correction.y};
-            if (!value.sticky && !before->geometry.sticky && value.options.placement &&
+            Point delta{before->geometry.viewport_bounds.x - value.viewport_bounds.x,
+                        before->geometry.viewport_bounds.y - value.viewport_bounds.y};
+            if (!before->geometry.leaving && !value.leaving) {
+                delta.x += viewport.origin.x - viewport_.origin.x + anchor_correction.x;
+                delta.y += viewport.origin.y - viewport_.origin.y + anchor_correction.y;
+            }
+            if (before->geometry.leaving && !value.leaving && !changed) {
+                cancel(doc, current.move);
+                auto reset = doc.set_transform(value.node, {});
+                if (reset.is_err()) return reset;
+                current.move = None();
+            } else if (!value.sticky && !before->geometry.sticky && value.options.placement &&
                 value.options.placement->duration_ns &&
                 (__builtin_fabs(delta.x) > .01 || __builtin_fabs(delta.y) > .01)) {
                 auto style = doc.resolved_style(value.node);
@@ -265,6 +292,19 @@ auto LazyItemAnimator::update(UiDocument &doc, const LazyContent &content, Vec<L
                     return Err(ui_error(animated.unwrap_err()));
                 }
                 current.opacity = Some(animated.unwrap());
+            }
+        }
+        if (value.leaving && completion && (!before || !before->geometry.leaving || current.move != before->move)) {
+            const auto node = value.node;
+            if (current.move && doc.animation_state(*current.move).is_ok()) {
+                auto registered = doc.on_animation_end(*current.move,
+                    [node, done = completion.clone()](UiDocument &, const AnimationEvent &event) mutable {
+                        if (event.reason == AnimationEndReason::Finished) (**done.get())(node);
+                    });
+                if (registered.is_err()) return Err(ui_error(registered.unwrap_err()));
+            } else {
+                auto done = completion.clone();
+                (**done.get())(node);
             }
         }
         next.push(rstd::move(current));

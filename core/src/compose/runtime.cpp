@@ -4,6 +4,25 @@ using namespace rstd::prelude;
 using namespace rstd::literals;
 
 namespace vui::compose {
+auto SavedScopeCursor::address(Key key) const -> SavedAddress {
+    SavedAddress address(rstd::move(key));
+    auto append = [&](auto &&self, const SavedPathFrame *frame) -> void {
+        if (!frame) return;
+        self(self, frame->parent);
+        const auto &data = *frame->element;
+        auto position = [&]() -> Key {
+            if (data.kind == ElementKind::Movable) return Key(rstd::format("m{}", data.movable->identity).as_str());
+            if (data.identity) return data.identity->memory_key(data.key ? Some(Key(*data.key)) : None<Key>());
+            if (data.key) return Key(rstd::format("k{}", data.key->encoded().as_str()).as_str());
+            return Key(Serial(frame->position.to_primitive()));
+        };
+        const auto type = data.kind == ElementKind::Custom ? data.adapter->type : data.component_type;
+        address.path.push({position(), static_cast<Index>(data.kind), static_cast<Index>(data.layout), type});
+    };
+    append(append, path);
+    return address;
+}
+
 auto ComposeBuild::observe(vui::state::GraphView graph) -> ComposeResult<vui::state::ObservationBatch *> {
     for (auto &entry : observations) if (entry.graph.id() == graph.id()) return Ok(&entry.batch);
     auto batch = vui::state::ObservationBatch::begin(graph);
@@ -94,33 +113,101 @@ auto ComposeBuild::retired_roots() const -> Vec<UiId> {
     return roots;
 }
 
-namespace {
-auto passive_native_tree(const Element &element, Index &budget) -> bool {
-    if (!budget) return false;
-    --budget;
-    const auto &data = element.data();
-    if (data.invalid || data.precompose || data.reference || !data.behaviors.is_empty() ||
-        !data.modifiers.is_empty())
-        return false;
-    if (data.kind == ElementKind::Native) {
-        if (data.layout == LayoutKind::Custom || data.layout == LayoutKind::Viewport || data.layout == LayoutKind::Scene)
-            return false;
-    } else if (data.kind != ElementKind::Fragment) {
-        return false;
-    }
-    for (const auto &child : data.children)
-        if (!passive_native_tree(child, budget)) return false;
-    return true;
+auto ComposeBuild::capture_item_state(const ComposeInstance &instance) -> ComposeResult<empty> {
+    if (!instance.saved_activation || !instance.saved_activation->valid || !instance.element.data().saved_item)
+        return Ok(empty{});
+    for (const auto &saved : saved_items_)
+        if (saved.activation.get() == instance.saved_activation.get()) return Ok(empty{});
+    rstd::rc::Rc<SavedItemValues> values;
+    auto capture = [&](auto &&self, const ComposeInstance &current) -> ComposeResult<empty> {
+        if (current.scope && !current.scope->precomposed) {
+            for (const auto &slot : current.scope->saved_slots) {
+                auto payload = slot.capture(*this, *slot.slot);
+                if (payload.is_err()) return Err(payload.unwrap_err());
+                if (!values) values = rstd::rc::make_rc<SavedItemValues>();
+                values.get()->values.push({SavedAddress(slot.address), payload.unwrap()});
+            }
+        }
+        for (const auto &child : current.children) {
+            if (child->element.data().saved_item || retains(child)) continue;
+            auto saved = self(self, *child);
+            if (saved.is_err()) return saved;
+        }
+        return Ok(empty{});
+    };
+    auto captured = capture(capture, instance);
+    if (captured.is_err()) return captured;
+    saved_items_.push({instance.element.data().saved_item->holder.clone(), instance.saved_activation.clone(),
+                       rstd::move(values)});
+    return Ok(empty{});
 }
+
+auto ComposeBuild::stage_saved_items(const ComposeDraft &draft) -> ComposeResult<empty> {
+    auto discarded = [&](auto &&self, const rstd::rc::Rc<ComposeInstance> &instance) -> ComposeResult<empty> {
+        if (retains(instance)) return Ok(empty{});
+        auto captured = capture_item_state(*instance);
+        if (captured.is_err()) return captured;
+        for (const auto &child : instance->children) {
+            auto result = self(self, child);
+            if (result.is_err()) return result;
+        }
+        return Ok(empty{});
+    };
+    for (const auto &instance : retired) {
+        auto staged = discarded(discarded, instance);
+        if (staged.is_err()) return staged;
+    }
+    for (const auto &instance : parked) {
+        auto staged = discarded(discarded, instance);
+        if (staged.is_err()) return staged;
+    }
+    auto park = [&](auto &&self, const ComposeDraft &current) -> ComposeResult<empty> {
+        if (current.reused) return Ok(empty{});
+        if (current.element.data().precompose) {
+            auto captured = capture_item_state(*current.instance);
+            if (captured.is_err()) return captured;
+        }
+        for (const auto &child : current.children) {
+            auto result = self(self, *child);
+            if (result.is_err()) return result;
+        }
+        return Ok(empty{});
+    };
+    return park(park, draft);
+}
+
+void ComposeBuild::apply_saved_items(ComposeDraft &draft) {
+    for (auto &saved : saved_items_)
+        saved.holder.get()->save(*saved.activation.get(), rstd::move(saved.values));
+    auto activate = [&](auto &&self, ComposeDraft &current) -> void {
+        if (current.reused) return;
+        const auto &data = current.element.data();
+        auto &instance = *current.instance.get();
+        if (data.precompose) {
+            instance.saved_activation.reset();
+            instance.saved_preview = current.saved_preview.clone();
+            return;
+        }
+        instance.saved_preview.reset();
+        if (data.saved_item && !instance.saved_activation) {
+            auto active = rstd::rc::make_rc<SavedItemActivation>(SavedItemActivation{Key(data.saved_item->key)});
+            auto holder = data.saved_item->holder.clone();
+            holder.get()->activate(active);
+            instance.saved_activation = rstd::move(active);
+        }
+        for (auto &child : current.children) self(self, *child.get());
+    };
+    activate(activate, draft);
 }
 
 auto ComposeBuild::dirty(const ComposeInstance &instance, const CompositionEnvironment &environment) -> bool {
     if (instance.element.data().precompose) return false;
+    if (instance.detached) return true;
     if (instance.scope && (instance.scope->dirty || environment.changed(instance.scope->local_reads.as_slice()))) return true;
     for (const auto &mount : instance.mounts) if (!mount->attempted) return true;
     for (const auto &behavior : instance.attached) if (!behavior->attempted) return true;
     auto nested = environment;
-    if (instance.element.data().kind == ElementKind::Provider) {
+    if (!instance.element.data().locals.is_empty()) {
         auto provided = environment.extended(instance.element.data().locals.as_slice());
         if (provided.is_err()) return true;
         nested = provided.unwrap();
@@ -192,10 +279,12 @@ void CompositionRuntime::cleanup(const rstd::rc::Rc<ComposeInstance> &instance, 
         auto &scope = *value.get()->scope.get(); scope.alive = false;
         for (usize i = scope.effects.len(); i > usize(); --i) scope.effects[i - usize(1)].get()->lease = None();
         for (auto &slot : scope.memories) slot.get()->alive = false;
-        scope.effects.clear(); scope.reads.clear(); scope.local_reads.clear(); scope.memories.clear();
+        scope.effects.clear(); scope.reads.clear(); scope.local_reads.clear(); scope.saved_slots.clear(); scope.memories.clear();
     }
     for (usize i = value->mounts.len(); i > usize(); --i) value.get()->mounts[i - usize(1)].get()->lease = None();
     value.get()->mounts.clear(); value.get()->native.clear();
+    value.get()->saved_activation.reset();
+    value.get()->saved_preview.reset();
 }
 
 void CompositionRuntime::invalidate_links(const rstd::rc::Rc<ComposeInstance> &instance, const ComposeBuild *retained) {
@@ -245,22 +334,26 @@ auto CompositionRuntime::resolve(ComposeDraft &draft, UiDocument &document, cons
     return Ok(empty{});
 }
 
-void CompositionRuntime::commit(ComposeDraft &draft, Vec<OldScope> &old) {
+void CompositionRuntime::commit(ComposeDraft &draft, Vec<OldScope> &old, bool speculative) {
     if (draft.reused) return;
     auto &instance = *draft.instance.get();
     if (draft.scope.is_some()) {
         auto &scope = (**draft.scope).scope;
         old.push({scope.clone(), rstd::move(scope.get()->memories), rstd::move(scope.get()->effects), rstd::move(scope.get()->reads)});
         scope.get()->memories = rstd::move((**draft.scope).memories);
+        scope.get()->saved_slots = rstd::move((**draft.scope).saved_slots);
         scope.get()->effects = rstd::move((**draft.scope).effects);
         scope.get()->reads = rstd::move((**draft.scope).reads); scope.get()->dirty = false;
         scope.get()->local_reads = rstd::move((**draft.scope).local_reads);
         scope.get()->deferred_actions = rstd::move((**draft.scope).deferred_actions);
-        for (auto &slot : scope.get()->memories) slot.get()->committed = true;
         instance.scope = scope.clone();
     }
+    instance.detached = speculative;
+    instance.native_active |= !speculative;
     if (instance.scope) {
-        instance.scope.get()->precomposed = draft.element.data().precompose;
+        instance.scope.get()->precomposed = speculative || draft.element.data().precompose;
+        for (auto &slot : instance.scope.get()->memories)
+            slot.get()->committed = !instance.scope->precomposed;
         if (draft.precompose_failed) instance.scope.get()->dirty = true;
         if (draft.promoted) instance.scope.get()->deferred_actions.clear();
     }
@@ -276,55 +369,110 @@ void CompositionRuntime::commit(ComposeDraft &draft, Vec<OldScope> &old) {
         instance.attached.push(behavior.slot.clone());
     }
     if (draft.output.is_some()) instance.output = Some(Element(*draft.output));
-    if (draft.fresh) instance.mounts = rstd::move(draft.mounts);
+    if (draft.fresh || draft.promoted) instance.mounts = rstd::move(draft.mounts);
     instance.owns_children = draft.owns_children;
     if (draft.resolved.is_some()) instance.id = draft.resolved;
-    if (instance.id.is_some()) { instance.link.get()->id = *instance.id; instance.link.get()->active = true; }
-    if (draft.element.data().reference.is_some() && instance.id.is_some()) {
+    if (!speculative && instance.id.is_some()) { instance.link.get()->id = *instance.id; instance.link.get()->active = true; }
+    if (!speculative && draft.element.data().reference.is_some() && instance.id.is_some()) {
         auto link = draft.element.data().reference->link(); link.get()->id = *instance.id; link.get()->active = true;
     }
     for (auto &child : draft.children) {
-        commit(*child.get(), old);
+        commit(*child.get(), old, speculative);
     }
     instance.children = rstd::move(draft.committed_children);
 }
 
-void CompositionRuntime::prepare_native(ComposeDraft &draft, UiSession &session, UiCommitReport &report) {
+void CompositionRuntime::park(const rstd::rc::Rc<ComposeInstance> &instance, const ComposeBuild &retained) {
+    auto owner = instance.clone();
+    auto &value = *owner.get();
+    if (value.detached) return;
+    value.children.retain([&](const auto &child) {
+        if (retained.retains(child)) return false;
+        park(child, retained);
+        return true;
+    });
+    value.detached = true;
+    value.saved_activation.reset();
+    value.saved_preview.reset();
+    for (usize i = value.attached.len(); i > usize(); --i) value.attached[i - usize(1)].get()->close();
+    value.attached.clear();
+    if (value.scope) {
+        auto &scope = *value.scope.get();
+        scope.alive = false;
+        for (usize i = scope.effects.len(); i > usize(); --i) scope.effects[i - usize(1)].get()->lease = None();
+        for (auto &memory : scope.memories) memory.get()->alive = false;
+        value.scope.reset();
+    }
+    for (usize i = value.mounts.len(); i > usize(); --i) {
+        auto &mount = *value.mounts[i - usize(1)].get();
+        mount.lease = None();
+        mount.attempted = false;
+    }
+    value.link.get()->active = false;
+    if (value.element.data().reference) {
+        auto link = value.element.data().reference->link();
+        link.get()->active = false;
+        link.get()->alive = false;
+    }
+}
+
+void CompositionRuntime::prepare_native(ComposeDraft &draft, UiSession &session, UiCommitReport &report, usize &budget) {
     if (draft.reused || signal->closed) return;
     const auto &data = draft.element.data();
     if (data.precompose) {
         auto &instance = *draft.instance.get();
-        if (!data.premeasure || !instance.output || draft.precompose_failed) return;
+        if (data.retain_native || !instance.output || draft.precompose_failed) return;
         if (instance.children.is_empty()) {
-            Index budget = 128;
-            if (!passive_native_tree(*instance.output, budget)) return;
-            ComposeBuild build(session, graph_.view(), signal, children_claim_);
-            auto staged = build.reconcile(*instance.output, {}, true);
+            if (!draft.precompose_reserved) {
+                if (budget == usize()) return;
+                --budget;
+            }
+            ComposeBuild build(session, graph_.view(), signal, children_claim_, budget);
+            build.speculative = true;
+            auto output = apply_modifiers(*instance.output, data.modifiers);
+            if (output.is_err()) return;
+            auto content = output.unwrap();
+            const SavedPathFrame path{nullptr, &content.data(), usize()};
+            const SavedScopeCursor saved{data.saved_item ? &*data.saved_item : nullptr, draft.saved_preview.get(), &path};
+            auto staged = build.reconcile(Element(content), {}, true, 0, draft.precompose_environment, saved);
             if (staged.is_err()) return;
             auto tree = staged.unwrap();
             auto prepared = session.document().prepare(rstd::move(build.edit));
             if (prepared.is_err()) return;
+            for (auto &prepare : build.preparers) {
+                auto read = session.document().acquire_read();
+                if (read.is_err()) return;
+                auto guard = read.unwrap();
+                if ((*prepare)(*prepared).is_err()) return;
+            }
             Vec<Element> old_elements;
             Vec<NodeLink *> references;
             usize scopes{};
             if (resolve(*tree.get(), session.document(), *prepared, old_elements, references, scopes).is_err())
                 return;
+            for (auto &observation : build.observations) {
+                if (observation.batch.ready().is_err()) return;
+                observation.batch.finish_reads();
+            }
             auto published = session.document().publish(prepared.unwrap());
             if (published.is_err()) return;
             Vec<OldScope> old;
-            commit(*tree.get(), old);
+            commit(*tree.get(), old, true);
+            for (auto &observation : build.observations) observation.batch.publish();
             instance.children.push(tree->instance.clone());
             report.created += published->created;
             report.revision = published->revision;
             signal.get()->committed_revision = report.revision;
+            prepare_native(*tree.get(), session, report, budget);
         }
+        if (!data.premeasure) return;
         Vec<ComposeRoot> roots;
         for (const auto &child : instance.children) ComposeBuild::committed_roots(*child, roots);
         for (const auto &root : roots)
             if (root.existing) (void)session.document().premeasure_detached(*root.existing, *data.premeasure);
         return;
     }
-    for (auto &child : draft.children) prepare_native(*child.get(), session, report);
+    for (auto &child : draft.children) prepare_native(*child.get(), session, report, budget);
 }
 
 void CompositionRuntime::activate(ComposeDraft &draft, CommittedContext &context) {
@@ -370,7 +518,7 @@ void CompositionRuntime::activate(ComposeDraft &draft, CommittedContext &context
             }
         }
     }
-    if (draft.scope.is_some() || draft.promoted)
+    if ((draft.scope.is_some() || draft.promoted) && draft.instance->scope)
         for (auto &effect : draft.instance.get()->scope.get()->effects) {
             if (signal->closed) return;
             if (effect->attempted) continue;
@@ -418,7 +566,8 @@ auto CompositionRuntime::perform(UiSession &session) -> ComposeResult<CommitRepo
         return Err(ComposeError(ComposeStage::External, Some(UiError::InvalidId)));
     }
     if (!content_) return Ok(CommitReport{session.document().revision(), attempt_});
-    ComposeBuild build(session, graph_.view(), signal, children_claim_);
+    auto precompose_budget = usize(16);
+    ComposeBuild build(session, graph_.view(), signal, children_claim_, precompose_budget);
     build.index_movable(root_);
     auto data = rstd::rc::make_rc<ElementData>(); data.get()->kind = ElementKind::Component;
     data.get()->component_type = rstd::any::TypeId::of<RootTag>(); data.get()->view = content_; data.get()->source = content_source_;
@@ -457,6 +606,8 @@ auto CompositionRuntime::perform(UiSession &session) -> ComposeResult<CommitRepo
         auto result = (*prepare)(session.input(), behaviors, prepared);
         if (result.is_err()) { ComposeError error(ComposeStage::Input); error.input = Some(result.unwrap_err()); return Err(rstd::move(error)); }
     }
+    auto saved_items = build.stage_saved_items(*draft);
+    if (saved_items.is_err()) return Err(saved_items.unwrap_err());
     for (auto &observation : build.observations) {
         auto ready = observation.batch.ready(); if (ready.is_err()) return Err(state_error(ready.unwrap_err()));
         observation.batch.finish_reads();
@@ -467,6 +618,7 @@ auto CompositionRuntime::perform(UiSession &session) -> ComposeResult<CommitRepo
     if (published.is_err()) return Err(ComposeError(ComposeStage::Publish, Some(published.unwrap_err())));
     auto report = published.unwrap();
     signal.get()->published = true; signal.get()->committed_revision = report.revision;
+    build.apply_saved_items(*draft.get());
     commit(*draft.get(), old); root_ = draft.get()->instance.clone();
     for (auto &claim : build.claims) claim.identity.get()->owner = signal.downgrade();
     for (auto &observation : build.observations) observation.batch.publish();
@@ -480,6 +632,7 @@ auto CompositionRuntime::perform(UiSession &session) -> ComposeResult<CommitRepo
     auto cancelled = session.input().cancel_detached();
     if (cancelled.is_err()) { ComposeError error(ComposeStage::Input); error.input = Some(cancelled.unwrap_err()); signal.get()->report(rstd::move(error)); }
     for (auto &instance : build.retired) cleanup(instance, &build);
+    for (auto &instance : build.parked) if (!build.retains(instance)) park(instance, build);
     for (usize i = old.len(); i > usize(); --i) {
         auto &entry = old[i - usize(1)];
         for (usize i = entry.effects.len(); i > usize(); --i) {
@@ -510,7 +663,7 @@ auto CompositionRuntime::perform(UiSession &session) -> ComposeResult<CommitRepo
     for (auto id : removed) if (session.document().valid(id)) session.document().destroy(id, children_claim_.access()).unwrap();
     old_elements.clear();
     report.retirement = None();
-    prepare_native(*draft.get(), session, report);
+    prepare_native(*draft.get(), session, report, precompose_budget);
     session.document().notify_edit_targets();
     CommittedContext context(session);
     for (auto &action : build.actions) {
@@ -591,6 +744,9 @@ auto Composition::set_content(Element value, rstd::source_location source) -> Co
 auto compatible(const ElementData &a, const ElementData &b) -> bool {
     if (a.kind != b.kind) return false;
     if (a.precompose && !b.precompose && !a.retain_native) return false;
+    if (!a.retain_native && !b.retain_native &&
+        (a.saved_item.is_some() != b.saved_item.is_some() ||
+         (a.saved_item && !a.saved_item->same(*b.saved_item)))) return false;
     if (a.kind == ElementKind::Native) return a.layout == b.layout;
     if (a.kind == ElementKind::Component) return a.component_type == b.component_type;
     if (a.kind == ElementKind::Custom) return a.adapter->type == b.adapter->type;
@@ -608,7 +764,7 @@ auto same_identity(const ElementData &a, const ElementData &b) -> bool {
 }
 
 auto ComposeBuild::reconcile(Element value, rstd::rc::Rc<ComposeInstance> previous, bool force, Index depth,
-                             CompositionEnvironment environment)
+                             CompositionEnvironment environment, SavedScopeCursor saved)
     -> ComposeResult<rstd::rc::Rc<ComposeDraft>> {
     if (++nodes > usize(65536) || depth >= 128) return Err(ComposeError(ComposeStage::Limit));
     const auto &data = value.data();
@@ -617,7 +773,17 @@ auto ComposeBuild::reconcile(Element value, rstd::rc::Rc<ComposeInstance> previo
     if (previous && previous->id.is_some() && !session.document().valid(*previous->id))
         return Err(ComposeError(ComposeStage::External, Some(UiError::InvalidId)));
     if (previous && !compatible(data, previous->element.data())) { retire(previous); previous = {}; }
+    rstd::rc::Rc<SavedItemValues> saved_preview;
+    if (data.saved_item && (!previous || previous->element.data().precompose || !previous->saved_activation)) {
+        saved_preview = data.saved_item->holder->peek(data.saved_item->key);
+        if (previous && previous->element.data().precompose && previous->element.data().saved_item &&
+            previous->saved_preview.get() != saved_preview.get()) {
+            retire(previous);
+            previous = {};
+        }
+    }
     if (data.kind == ElementKind::Movable) {
+        if (speculative) return Err(ComposeError(ComposeStage::Prepare, Some(UiError::Cancelled)));
         auto indexed = previous_movable(data.movable);
         if (previous && previous.get() != indexed.get()) retire(previous);
         previous = rstd::move(indexed);
@@ -625,13 +791,20 @@ auto ComposeBuild::reconcile(Element value, rstd::rc::Rc<ComposeInstance> previo
     auto plan = rstd::rc::make_rc<ComposeDraft>(); auto &draft = *plan.get();
     draft.element = value; draft.fresh = !previous;
     draft.instance = previous ? previous.clone() : rstd::rc::make_rc<ComposeInstance>();
+    if (data.saved_item) {
+        draft.saved_preview = rstd::move(saved_preview);
+        saved = {&*data.saved_item, draft.saved_preview.get(), nullptr};
+    }
     Option<usize> movable_claim;
     if (data.kind == ElementKind::Movable) {
         auto claimed = claim_movable(data.movable.clone(), draft.instance.clone());
         if (claimed.is_err()) return Err(claimed.unwrap_err());
         movable_claim = Some(claimed.unwrap());
     }
-    draft.promoted = previous && previous->element.data().precompose && !data.precompose;
+    draft.promoted = previous && (previous->element.data().precompose || previous->detached) &&
+                     !data.precompose && !speculative;
+    if (data.precompose) draft.precompose_environment = environment;
+    if (draft.promoted && data.kind == ElementKind::Custom) force = true;
     if (previous)
         force |= data.retain_native != previous->element.data().retain_native ||
                  data.premeasure != previous->element.data().premeasure;
@@ -647,14 +820,10 @@ auto ComposeBuild::reconcile(Element value, rstd::rc::Rc<ComposeInstance> previo
         draft.scope = Some(Box<ScopeDraft>::make(rstd::move(scope)));
         (**draft.scope).precompose = true;
         draft.output = Some(Element{});
-        Index budget = 128;
         for (const auto &child : draft.instance->children) {
-            if (passive_native_tree(child->element, budget)) {
-                draft.reused_children.push(child.clone());
-                draft.committed_children.push(child.clone());
-            } else {
-                retire(child.clone());
-            }
+            parked.push(child.clone());
+            draft.reused_children.push(child.clone());
+            draft.committed_children.push(child.clone());
         }
         return Ok(rstd::move(plan));
     }
@@ -671,10 +840,17 @@ auto ComposeBuild::reconcile(Element value, rstd::rc::Rc<ComposeInstance> previo
             if (previous_parameters && data.parameters->type() == previous_parameters->type() &&
                 data.parameters->equal(*previous_parameters.get())) { force = false; ++skipped; }
         }
-        if (force || (scope_dirty && !data.precompose) || draft.fresh) {
+        const bool needs_evaluation = force || (scope_dirty && !data.precompose) || draft.fresh;
+        if (needs_evaluation && data.precompose && precompose_budget == usize()) {
+            draft.precompose_failed = true;
+        } else if (needs_evaluation) {
+            if (data.precompose) {
+                --precompose_budget;
+                draft.precompose_reserved = true;
+            }
             ++evaluations; draft.scope = Some(Box<ScopeDraft>::make(scope));
-            (**draft.scope).precompose = data.precompose;
-            CompositionContext context(*this, **draft.scope, environment);
+            (**draft.scope).precompose = data.precompose || speculative;
+            CompositionContext context(*this, **draft.scope, environment, saved);
             auto evaluate = data.view.clone();
             auto evaluated = [&]() -> ComposeResult<Element> {
                 compiler::Activation activation(context);
@@ -695,7 +871,7 @@ auto ComposeBuild::reconcile(Element value, rstd::rc::Rc<ComposeInstance> previo
         else if (!data.precompose) return Err(ComposeError(ComposeStage::Type));
         if (data.precompose) {
             for (const auto &child : draft.instance->children) {
-                if (data.premeasure && draft.scope.is_none() && !draft.precompose_failed) {
+                if (draft.scope.is_none() && !draft.precompose_failed) {
                     draft.reused_children.push(child.clone());
                     draft.committed_children.push(child.clone());
                 } else {
@@ -757,10 +933,22 @@ auto ComposeBuild::reconcile(Element value, rstd::rc::Rc<ComposeInstance> previo
         }
     }
     if (draft.owns_children && !children.is_empty()) return Err(ComposeError(ComposeStage::Prepare, Some(UiError::InvalidValue)));
-    if (data.kind == ElementKind::Provider) {
+    if (!data.locals.is_empty()) {
         auto provided = environment.extended(data.locals.as_slice());
         if (provided.is_err()) return Err(provided.unwrap_err());
         environment = provided.unwrap();
+    }
+    if (data.recycle_children && previous) {
+        const auto recycle = [&](const auto &self, const ComposeInstance &item) -> void {
+            if (item.element.data().retain_native) {
+                Vec<ComposeRoot> roots;
+                for (const auto &child : item.children) committed_roots(*child, roots);
+                for (auto root : roots) if (root.existing) edit.recycle_detached(*root.existing);
+                return;
+            }
+            if (!item.id) for (const auto &child : item.children) self(self, *child);
+        };
+        for (const auto &child : previous->children) recycle(recycle, *child);
     }
     Vec<bool> used;
     for (usize i{}; i < draft.instance->children.len(); ++i) used.push(false);
@@ -787,7 +975,10 @@ auto ComposeBuild::reconcile(Element value, rstd::rc::Rc<ComposeInstance> previo
             committed_roots(*old.get(), descendants);
             draft.reused_children.push(old.clone()); draft.committed_children.push(rstd::move(old)); continue;
         }
-        auto built = reconcile(children[i], rstd::move(old), force, depth + 1, environment);
+        const SavedPathFrame child_path{saved.path, &child, i};
+        auto child_scope = saved;
+        if (child_scope.item) child_scope.path = &child_path;
+        auto built = reconcile(children[i], rstd::move(old), force, depth + 1, environment, child_scope);
         if (built.is_err()) {
             auto error = built.unwrap_err();
             if (!error.source.line()) error.source = child.source;
@@ -825,9 +1016,9 @@ auto ComposeBuild::reconcile(Element value, rstd::rc::Rc<ComposeInstance> previo
                 auto valid = declaration.config->validate(*slot.get()->state.get());
                 if (valid.is_err()) return Err(valid.unwrap_err());
             }
-            if (declaration.config->input()) {
+            if (!speculative && declaration.config->input()) {
                 input_order.push(NodeStateKey(slot->role));
-                if (created) {
+                if (created || !slot->input) {
                     if (draft.node.is_none()) draft.node = Some(edit.existing(*draft.instance->id));
                     behaviors.push(Box<rstd::dyn<rstd::FnMut<Result<empty, InputError>(EventRouter &, EventRouter::BehaviorEdit &, const UiDocument::PreparedEdit &)>>>::make(
                         [slot = slot.clone(), node = *draft.node](EventRouter &input, EventRouter::BehaviorEdit &edit, const UiDocument::PreparedEdit &document) mutable {

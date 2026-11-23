@@ -21,9 +21,10 @@ struct SemanticsProperties {
     bool merge_descendants{};
     Option<bool> checked;
     Option<SemanticsCollection> collection;
+    bool exclude_subtree{};
 
     auto clone() const -> SemanticsProperties {
-        return {role, label.clone(), value.clone(), actions, merge_descendants, checked, collection};
+        return {role, label.clone(), value.clone(), actions, merge_descendants, checked, collection, exclude_subtree};
     }
 };
 

@@ -6,6 +6,17 @@ using namespace rstd::literals;
 namespace vui {
 namespace {
 auto difference(Point a, Point b) -> Point { return {a.x - b.x, a.y - b.y}; }
+auto sum(Point a, Point b) -> Point { return {a.x + b.x, a.y + b.y}; }
+
+struct NestedConnection {
+    rstd::rc::Weak<ScrollNestedReceiver> callback;
+    BindingGuard guard;
+};
+
+auto nested_connection(UiDocument &document, UiId node) -> NestedConnection * {
+    auto value = document.state<NestedConnection>(node, {rstd::any::TypeId::of<NestedConnection>(), 0});
+    return value && value->guard.alive() ? value : nullptr;
+}
 
 auto map_delta(const Transform &transform, Point delta) -> Point {
     return {transform.a * delta.x + transform.c * delta.y, transform.b * delta.x + transform.d * delta.y};
@@ -123,8 +134,24 @@ auto ScrollInteraction::write_pull(Scalar pull, const ViewportMetrics &metrics) 
     return offset == along(metrics.offset) || write(main_axis(offset), metrics);
 }
 
+struct ScrollInteraction::Ancestor {
+    rstd::rc::Rc<ScrollInteraction> owner;
+    Point delta, remainder, consumed;
+    ViewportMetrics metrics;
+};
+
 auto ScrollInteraction::drag_by(Point delta, const ViewportMetrics &before) -> bool {
     if (!finite(delta.x) || !finite(delta.y)) { error_ = Some(UiError::InvalidValue); return false; }
+    const auto gesture = gesture_;
+    if (nested_scroll_) delta = pre_nested(ScrollNestedPhase::PreScroll, delta);
+    if (gesture != gesture_) return true;
+    if (delta == Point{}) {
+        if (nested_scroll_) {
+            NestedRoute route{ScrollNestedPhase::PostScroll, root_, {}, {}};
+            (void)ancestor({}, this, true, &route);
+        }
+        return true;
+    }
     auto metrics = before;
     if (uses_elastic_deltas()) {
         const auto stretch = overscroll(metrics);
@@ -139,11 +166,13 @@ auto ScrollInteraction::drag_by(Point delta, const ViewportMetrics &before) -> b
             edge_pull_ = 0;
         }
     }
+    if (gesture != gesture_) return true;
     return consume_drag(delta, metrics);
 }
 
 auto ScrollInteraction::consume_drag(Point delta, ViewportMetrics metrics) -> bool {
     pending_delta_ = None();
+    drag_delta_ = delta;
     auto result = resolve_delta(delta, metrics);
     if (result.is_err()) { error_ = Some(result.unwrap_err()); return false; }
     if (auto resolved = result.unwrap(); resolved) {
@@ -203,36 +232,81 @@ auto ScrollInteraction::accepts_nested_drag(const ScrollInteraction &origin) con
            (mode_ == Mode::NestedDrag && matches_origin(origin));
 }
 
-struct ScrollInteraction::Ancestor {
-    rstd::rc::Rc<ScrollInteraction> owner;
-    Point delta;
-    ViewportMetrics metrics;
-};
+void ScrollInteraction::notify_nested(const InputSnapshot &snapshot, UiId node, NestedRoute &route) {
+    auto connection = nested_connection(ui(), node);
+    if (!connection || !session_.input().pointer_available(node)) return;
+    auto callback = connection->callback.upgrade();
+    if (!callback) return;
+    auto available = transfer_delta(snapshot, root_, node, route.remaining);
+    auto consumed = transfer_delta(snapshot, root_, node, route.consumed);
+    if (!available || !consumed) return;
+    const ScrollNestedOffer offer{route.source, *consumed, *available};
+    const auto taken = (*callback->get()->invoke)(route.phase, offer);
+    DeltaOffer valid(*available);
+    if (valid.consume(taken).is_err()) return;
+    auto returned = transfer_delta(snapshot, node, root_, valid.remaining);
+    if (!returned) return;
+    route.consumed = sum(route.consumed, difference(route.remaining, *returned));
+    route.remaining = *returned;
+}
 
-auto ScrollInteraction::ancestor(Point delta, const ScrollInteraction *drag, bool test_range) -> Option<Ancestor> {
-    if (!single_axis() || delta == Point{}) return None();
-    const auto snapshot = session_.input().snapshot();
-    if (!snapshot || !session_.input().pointer_available(root_)) return None();
+auto ScrollInteraction::has_nested_connection() -> bool {
     auto cursor = root_;
     for (unsigned depth{}; depth < 256; ++depth) {
         auto relation = ui().parent_relation(cursor);
         if (relation.is_err() || !*relation) break;
         cursor = (**relation).parent;
+        if (nested_connection(ui(), cursor)) return true;
+    }
+    return false;
+}
+
+auto ScrollInteraction::pre_nested(ScrollNestedPhase phase, Point amount) -> Point {
+    auto snapshot = session_.input().snapshot();
+    if (!snapshot) return amount;
+    Vec<UiId> connections;
+    auto cursor = root_;
+    for (unsigned depth{}; depth < 256; ++depth) {
+        auto relation = ui().parent_relation(cursor);
+        if (relation.is_err() || !*relation) break;
+        cursor = (**relation).parent;
+        if (nested_connection(ui(), cursor)) connections.push(UiId(cursor));
+    }
+    NestedRoute route{phase, root_, {}, amount};
+    const auto gesture = gesture_;
+    for (auto i = connections.len(); i != usize() && gesture_ == gesture;)
+        notify_nested(*snapshot, connections[--i], route);
+    return route.remaining;
+}
+
+auto ScrollInteraction::ancestor(Point delta, const ScrollInteraction *drag, bool test_range, NestedRoute *route) -> Option<Ancestor> {
+    if (delta == Point{} && !route) return None();
+    const auto snapshot = session_.input().snapshot();
+    if (!snapshot || !session_.input().pointer_available(root_)) return None();
+    const auto gesture = gesture_;
+    auto cursor = root_;
+    for (unsigned depth{}; depth < 256; ++depth) {
+        auto relation = ui().parent_relation(cursor);
+        if (relation.is_err() || !*relation) break;
+        cursor = (**relation).parent;
+        if (route) {
+            notify_nested(*snapshot, cursor, *route);
+            if (gesture_ != gesture) return None();
+            delta = route->remaining;
+        }
+        if (delta == Point{}) continue;
         auto state = ui().state<ScrollState>(cursor);
         if (!state || !state->interaction_ || !state->style_.user_scroll_enabled ||
             !state->style_.motion.enabled || !session_.input().pointer_available(cursor)) continue;
         auto parent = state->interaction_->clone();
-        if (!parent->single_axis()) continue;
         if (drag ? !parent->accepts_nested_drag(*drag)
-                 : parent->mode_ != Mode::Idle || !parent->style_.motion.inertia || !parent->style_.motion.deceleration_rate)
+                 : parent->mode_ != Mode::Idle || !parent->style_.motion.inertia ||
+                   (!parent->style_.motion.fling && !parent->style_.motion.deceleration_rate))
             continue;
         auto mapped = transfer_delta(*snapshot, root_, cursor, delta);
         if (!mapped) continue;
-        const auto amount = parent->along(*mapped);
-        const auto projected = parent->main_axis(amount);
-        const auto discarded = difference(*mapped, projected);
-        if (__builtin_fabs(amount) <= 1e-6 ||
-            __builtin_fabs(discarded.x) + __builtin_fabs(discarded.y) > __builtin_fabs(amount) * 1e-6) continue;
+        const auto projected = parent->masked(*mapped);
+        if (__builtin_fabs(projected.x) + __builtin_fabs(projected.y) <= 1e-6) continue;
         auto metrics = ui().viewport_metrics(parent->viewport_);
         if (metrics.is_err()) continue;
         if (test_range) {
@@ -240,12 +314,12 @@ auto ScrollInteraction::ancestor(Point delta, const ScrollInteraction *drag, boo
                 auto resolved = (**parent->resolve_delta_)(projected, *metrics, false, {});
                 if (resolved.is_err() || (*resolved && (*resolved)->consumed == Point{})) continue;
             } else {
-                const auto maximum = parent->along(metrics->maximum);
-                const auto offset = bounded(parent->along(metrics->offset), maximum);
-                if (amount < 0 ? offset <= 0 : offset >= maximum) continue;
+                const auto offset = bounded(metrics->offset, metrics->maximum);
+                if (bounded(sum(offset, projected), metrics->maximum) == offset) continue;
             }
         }
-        return Some(Ancestor{rstd::move(parent), projected, *metrics});
+        const auto consumed = route ? transfer_delta(*snapshot, root_, cursor, route->consumed).unwrap_or(Point{}) : Point{};
+        return Some(Ancestor{rstd::move(parent), projected, difference(*mapped, projected), consumed, *metrics});
     }
     return None();
 }
@@ -254,7 +328,15 @@ auto ScrollInteraction::offer_drag(Point remaining, const ViewportMetrics &metri
     auto source = nested_origin_ ? nested_origin_->owner.upgrade() : owner_.upgrade();
     if (!source || (*source)->mode_ != Mode::Drag || (nested_origin_ && !matches_origin(**source)))
         return true;
-    if (auto next = ancestor(remaining, source->get()); next) {
+    const auto consumed = sum(nested_consumed_, difference(drag_delta_, remaining));
+    remaining = sum(remaining, nested_remaining_);
+    nested_remaining_ = {};
+    nested_consumed_ = {};
+    const auto gesture = gesture_;
+    NestedRoute route{ScrollNestedPhase::PostScroll, (*source)->root_, consumed, remaining};
+    auto next = nested_scroll_ || mode_ == Mode::NestedDrag ? ancestor(remaining, source->get(), true, &route) : None<Ancestor>();
+    if (gesture_ != gesture || (*source)->mode_ != Mode::Drag) return true;
+    if (next) {
         auto &parent = *next->owner.get();
         if (parent.mode_ != Mode::NestedDrag) {
             parent.stop(true, false, false);
@@ -265,8 +347,11 @@ auto ScrollInteraction::offer_drag(Point remaining, const ViewportMetrics &metri
             next->metrics.offset = bounded(next->metrics.offset, next->metrics.maximum);
             next->metrics.boundary = ViewportBoundary::Clamped;
         }
+        parent.nested_remaining_ = next->remainder;
+        parent.nested_consumed_ = next->consumed;
         return parent.consume_drag(next->delta, next->metrics);
     }
+    remaining = route.remaining;
     if (!(*source)->uses_elastic_deltas()) return true;
     if (source->get() == this) return write_pull(along(remaining), metrics);
     auto snapshot = session_.input().snapshot();
@@ -359,6 +444,15 @@ auto ScrollInteraction::sample_animation(MotionContext &context, const ViewportM
         return Ok(MotionStatus::Idle);
     }
     written_ = value;
+    if (animation.user_scroll && value != metrics.offset) {
+        const auto gesture = gesture_;
+        changed_.emit({value, metrics.maximum}).unwrap();
+        if (gesture != gesture_) {
+            if (mode_ != Mode::Animate && mode_ != Mode::Programmatic) return Ok(MotionStatus::Idle);
+            context.request_tick(time + rstd::cmp::min(Serial(8'333'333), ~Serial{} - time)).unwrap();
+            return Ok(MotionStatus::Running);
+        }
+    }
     if (finished) {
         *animation.status.get() = ScrollAnimationStatus::Finished;
         stop(true, false, false);
@@ -382,14 +476,33 @@ void ScrollInteraction::begin_axis(Axis &axis,Scalar value,Scalar velocity,Scala
     if (!enabled) {axis={};return;}
     auto target=bounded(value,maximum);
     if (style_.motion.movement==ScrollMovement::Elastic && value!=target) spring(axis,value,velocity,target,started);
-    else if (style_.motion.inertia && style_.motion.deceleration_rate>0 && __builtin_fabs(velocity)>=1) axis={Phase::Decay,{value,velocity},0,started};
+    else if (style_.motion.inertia && (style_.motion.fling || style_.motion.deceleration_rate > 0) &&
+             __builtin_fabs(velocity) >= 1) axis={Phase::Decay,{value,velocity},0,started};
     else axis={Phase::Rest,{target,0},target,started};
 }
 
-void ScrollInteraction::begin_motion(const ViewportMetrics &metrics,Point velocity,Serial started) {
-    velocity_=style_.motion.inertia ? masked(velocity) : Point{};begin_axis(x_,metrics.offset.x,velocity_.x,metrics.maximum.x,style_.axes.horizontal,started);
+void ScrollInteraction::begin_motion(const ViewportMetrics &metrics, Point velocity, Serial started, bool transferred) {
+    const auto settle_drag = mode_ == Mode::Drag;
+    velocity_ = style_.motion.inertia ? masked(velocity) : Point{};
+    const auto gesture = gesture_;
+    const auto offer_fling = !transferred && nested_scroll_ && velocity_ != Point{};
+    if (offer_fling) {
+        velocity_ = masked(pre_nested(ScrollNestedPhase::PreFling, velocity_));
+        if (gesture == gesture_ && velocity_ == Point{}) {
+            NestedRoute route{ScrollNestedPhase::PostFling, root_, {}, {}};
+            (void)ancestor({}, nullptr, true, &route);
+        }
+    }
+    if (gesture != gesture_) return;
+    fling_velocity_ = velocity_;
+    post_fling_delivered_ = false;
+    begin_axis(x_,metrics.offset.x,velocity_.x,metrics.maximum.x,style_.axes.horizontal,started);
     begin_axis(y_,metrics.offset.y,velocity_.y,metrics.maximum.y,style_.axes.vertical,started);
-    if (x_.phase==Phase::Rest && y_.phase==Phase::Rest) {stop(true,false);return;}
+    if (x_.phase == Phase::Rest && y_.phase == Phase::Rest) {
+        if (settle_drag && begin_snap(metrics, started)) wake();
+        else if (gesture == gesture_) stop(true, false);
+        return;
+    }
     if (!acquire()) {stop(true,false);return;}mode_=Mode::Animate;rebase_=false;
     if (uses_elastic_deltas()) {
         const auto stretch = overscroll(metrics);
@@ -409,22 +522,75 @@ void ScrollInteraction::begin_motion(const ViewportMetrics &metrics,Point veloci
 
 auto ScrollInteraction::decay_sample(const Axis &axis, Serial elapsed) const -> ScalarMotion {
     if (axis.phase != Phase::Decay) return axis.initial;
+    if (const auto curve = style_.motion.fling) return curve(axis.initial, style_.motion.deceleration_rate, elapsed);
     const auto drag = -__builtin_log(style_.motion.deceleration_rate);
     if (drag > 0) return Decay{axis.initial, drag}.sample(elapsed);
     return {axis.initial.value + axis.initial.velocity * Scalar(elapsed) / 1e9, axis.initial.velocity};
 }
 
+auto ScrollInteraction::decay_hit_time(const Axis &axis, Scalar edge, Serial elapsed) const -> Serial {
+    if (style_.motion.fling) {
+        Serial first{}, last = elapsed;
+        const auto forward = axis.initial.velocity > 0;
+        while (first < last && last - first > 1'000) {
+            const auto mid = first + (last - first) / 2;
+            const auto value = decay_sample(axis, mid).value;
+            if (forward ? value < edge : value > edge) first = mid;
+            else last = mid;
+        }
+        return last;
+    }
+    auto seconds = (edge - axis.initial.value) / axis.initial.velocity;
+    const auto drag = -__builtin_log(style_.motion.deceleration_rate);
+    if (drag > 0) seconds = -__builtin_log1p(-bounded(seconds * drag, 1)) / drag;
+    return static_cast<Serial>(bounded(seconds * 1e9, Scalar(elapsed)));
+}
+
+auto ScrollInteraction::begin_snap(const ViewportMetrics &metrics, Serial time) -> bool {
+    const auto &snap = style_.motion.snap;
+    if (!snap.enabled()) return false;
+    const auto from = bounded(metrics.offset, metrics.maximum);
+    const ScrollSnapRequest request{metrics, from, fling_velocity_, snap.alignment};
+    const auto gesture = gesture_;
+    Option<Point> chosen;
+    if (snap.target) chosen = snap.target(request);
+    else if (snap_layout_ && snap.alignment != ScrollSnapAlignment::None) chosen = (**snap_layout_)(request);
+    if (!chosen && !snap.target && snap.interval != Point{}) {
+        const auto nearest = [](Scalar value, Scalar step) { return step > 0 ? __builtin_round(value / step) * step : value; };
+        chosen = Some(Point{nearest(from.x, snap.interval.x), nearest(from.y, snap.interval.y)});
+    }
+    if (gesture != gesture_ || !chosen || !finite(chosen->x) || !finite(chosen->y)) return false;
+    const auto target = bounded(masked(*chosen), metrics.maximum);
+    if (target == from || !acquire()) return false;
+    auto status = rstd::rc::make_rc<ScrollAnimationStatus>(ScrollAnimationStatus::Running);
+    animation_ = Some(OffsetAnimation{rstd::move(status), from, target, time, snap.duration_ns, true});
+    mode_ = Mode::Programmatic;
+    velocity_ = {};
+    written_ = metrics.offset;
+    return true;
+}
+
+void ScrollInteraction::finish_fling() {
+    if (!nested_scroll_ || post_fling_delivered_ || fling_velocity_ == Point{}) return;
+    post_fling_delivered_ = true;
+    NestedRoute route{ScrollNestedPhase::PostFling, root_, fling_velocity_, {}};
+    (void)ancestor({}, nullptr, true, &route);
+}
+
 auto ScrollInteraction::sample_axis(Axis &axis,Scalar maximum,Serial time) -> ScalarMotion {
     auto elapsed=time>=axis.started ? time-axis.started : 0;
     if (axis.phase==Phase::Decay) {
-        auto drag=-__builtin_log(style_.motion.deceleration_rate);
         auto result = decay_sample(axis, elapsed);
+        if (!finite(result.value) || !finite(result.velocity)) {
+            error_ = Some(UiError::InvalidValue);
+            axis = {Phase::Rest, {bounded(axis.initial.value, maximum), 0}, 0, time};
+            return axis.initial;
+        }
         if (result.value<0 || result.value>maximum) {
             auto target=bounded(result.value,maximum);
             if (style_.motion.movement==ScrollMovement::Clamped) {axis={Phase::Rest,{target,0},target,time};return axis.initial;}
-            auto seconds=drag>0 ? -__builtin_log(1-(target-axis.initial.value)*drag/axis.initial.velocity)/drag : (target-axis.initial.value)/axis.initial.velocity;
-            auto hit=static_cast<Serial>(bounded(seconds*1e9,Scalar(elapsed)));
-            auto speed=drag>0 ? axis.initial.velocity*__builtin_exp(-drag*Scalar(hit)/1e9) : axis.initial.velocity;
+            const auto hit = decay_hit_time(axis, target, elapsed);
+            const auto speed = decay_sample(axis, hit).velocity;
             spring(axis,target,speed,target,axis.started+hit);elapsed=time-axis.started;
         } else {
             if (__builtin_fabs(result.velocity)<1) {axis={Phase::Rest,{result.value,0},result.value,time};result.velocity=0;}
@@ -457,16 +623,11 @@ auto ScrollInteraction::sample_edge_spring(const ViewportMetrics &metrics, Seria
     return position == offset || write(main_axis(position), metrics);
 }
 
-auto ScrollInteraction::boundary_hit(Point remaining, Serial time) const -> BoundaryHit {
-    const auto &decay = style_.axes.horizontal ? x_ : y_;
-    if (decay.phase != Phase::Decay) return {0, time};
-    const auto elapsed = time >= decay.started ? time - decay.started : 0;
-    const auto edge = along(decay_position_) - along(remaining);
-    auto seconds = (edge - decay.initial.value) / decay.initial.velocity;
-    const auto drag = -__builtin_log(style_.motion.deceleration_rate);
-    if (drag > 0) seconds = -__builtin_log1p(-bounded(seconds * drag, 1)) / drag;
-    const auto hit = static_cast<Serial>(bounded(seconds * 1e9, Scalar(elapsed)));
-    return {decay_sample(decay, hit).velocity, decay.started + hit};
+auto ScrollInteraction::boundary_hit(const Axis &axis, Scalar edge, Serial time) const -> BoundaryHit {
+    if (axis.phase != Phase::Decay) return {0, time};
+    const auto elapsed = time >= axis.started ? time - axis.started : 0;
+    const auto hit = decay_hit_time(axis, edge, elapsed);
+    return {decay_sample(axis, hit).velocity, axis.started + hit};
 }
 
 auto ScrollInteraction::start_boundary_spring(Scalar remaining, const ViewportMetrics &metrics, BoundaryHit hit, Serial time) -> bool {
@@ -476,10 +637,10 @@ auto ScrollInteraction::start_boundary_spring(Scalar remaining, const ViewportMe
     return sample_edge_spring(metrics, time);
 }
 
-auto ScrollInteraction::handoff_fling(Point remaining, const ViewportMetrics &metrics, BoundaryHit hit, Serial time) -> bool {
-    const auto velocity = main_axis(hit.velocity);
-    if (!nested_scroll_ || !ancestor(velocity, nullptr)) return false;
-    auto queued = ui().defer([weak = owner_, gesture = gesture_, remaining, metrics, hit, time, velocity](UiDocument &doc)
+auto ScrollInteraction::handoff_fling(Point velocity, Point remaining, const ViewportMetrics &metrics,
+                                      Serial hit, Serial time, bool complete) -> bool {
+    if (!nested_scroll_ || (!ancestor(velocity, nullptr) && !has_nested_connection())) return false;
+    auto queued = ui().defer([weak = owner_, gesture = gesture_, remaining, metrics, hit, time, velocity, complete](UiDocument &doc)
             -> Result<empty, UiError> {
         auto live = weak.upgrade();
         if (!live || (*live)->gesture_ != gesture || (*live)->mode_ != Mode::Animate || !(*live)->lease_.active())
@@ -490,23 +651,36 @@ auto ScrollInteraction::handoff_fling(Point remaining, const ViewportMetrics &me
             source.stop(true, false, false);
             return Ok(empty{});
         }
-        if (auto next = source.ancestor(velocity, nullptr); next) {
+        source.post_fling_delivered_ = true;
+        NestedRoute route{ScrollNestedPhase::PostFling, source.root_, difference(source.fling_velocity_, velocity), velocity};
+        auto next = source.ancestor(velocity, nullptr, true, &route);
+        UiId basis = source.root_;
+        for (unsigned depth{}; next && depth < 256 && source.gesture_ == gesture; ++depth) {
             auto &target = *next->owner.get();
+            basis = target.root_;
+            auto available = next->delta;
             if (target.style_.motion.movement == ScrollMovement::Elastic) {
                 auto boundary = doc.set_viewport_boundary(target.viewport_, ViewportBoundary::Unclamped);
                 if (boundary.is_err()) return boundary;
                 target.boundary_owned_ = true;
             }
-            target.nested_scroll_ = target.ancestor(next->delta, nullptr, false).is_some();
-            target.begin_motion(next->metrics, next->delta, hit.time);
-            if (target.mode_ == Mode::Animate) {
-                source.stop(true, false, false);
-                return Ok(empty{});
-            }
+            target.nested_scroll_ = target.has_nested_connection() || target.ancestor(available, nullptr, false).is_some();
+            target.begin_motion(next->metrics, available, hit, true);
+            const bool accepted = target.mode_ == Mode::Animate;
+            route.remaining = accepted ? next->remainder : sum(available, next->remainder);
+            route.consumed = accepted ? sum(next->consumed, available) : next->consumed;
+            next = target.ancestor(route.remaining, nullptr, true, &route);
         }
-        if (source.uses_elastic_deltas() && source.start_boundary_spring(source.along(remaining), metrics, hit, time))
-            return Ok(empty{});
-        source.stop(true, false, false);
+        if (source.gesture_ != gesture || !complete) return Ok(empty{});
+        if (source.uses_elastic_deltas() && route.remaining != Point{}) {
+            auto snapshot = source.session_.input().snapshot();
+            auto available = snapshot ? transfer_delta(*snapshot, basis, source.root_, route.remaining) : None<Point>();
+            if (available && __builtin_fabs(source.along(*available)) >= 1 &&
+                source.start_boundary_spring(source.along(remaining), metrics, {source.along(*available), hit}, time))
+                return Ok(empty{});
+        }
+        if (source.begin_snap(metrics, time)) source.wake();
+        else if (source.gesture_ == gesture) source.stop(true, false, false);
         return Ok(empty{});
     });
     handoff_pending_ = queued.is_ok();
@@ -514,14 +688,35 @@ auto ScrollInteraction::handoff_fling(Point remaining, const ViewportMetrics &me
 }
 
 auto ScrollInteraction::reached_boundary(Point remaining, const ViewportMetrics &metrics, Serial time) -> bool {
-    const auto delta = along(remaining);
-    if (!single_axis() || __builtin_fabs(delta) <= 1e-6) return true;
-    if (mode_ == Mode::Drag || mode_ == Mode::NestedDrag) return offer_drag(remaining, metrics);
-    if (mode_ != Mode::Animate) return true;
-    const auto hit = boundary_hit(remaining, time);
-    if (handoff_fling(remaining, metrics, hit, time)) return true;
-    if (uses_elastic_deltas()) return start_boundary_spring(delta, metrics, hit, time);
-    stop(true, false, false);
+    if (mode_ == Mode::Drag || mode_ == Mode::NestedDrag) {
+        if (!nested_scroll_ && mode_ != Mode::NestedDrag)
+            return !uses_elastic_deltas() || remaining == Point{} || write_pull(along(remaining), metrics);
+        return offer_drag(remaining, metrics);
+    }
+    if (mode_ != Mode::Animate || remaining == Point{}) return true;
+    if (single_axis()) {
+        const auto delta = along(remaining);
+        if (__builtin_fabs(delta) <= 1e-6) return true;
+        const auto &axis = style_.axes.horizontal ? x_ : y_;
+        const auto hit = boundary_hit(axis, along(decay_position_) - delta, time);
+        if (handoff_fling(main_axis(hit.velocity), remaining, metrics, hit.time, time, true)) return true;
+        if (uses_elastic_deltas()) return start_boundary_spring(delta, metrics, hit, time);
+        return true;
+    }
+    Point velocity;
+    Serial hit = time;
+    auto cut_axis = [&](Axis &axis, Scalar remainder, Scalar &position, Scalar offset, Scalar &available) {
+        if (axis.phase != Phase::Decay || __builtin_fabs(remainder) <= 1e-6) return;
+        const auto boundary = boundary_hit(axis, position - remainder, time);
+        available = boundary.velocity;
+        hit = rstd::cmp::min(hit, boundary.time);
+        axis = {Phase::Rest, {offset, 0}, offset, time};
+        position = offset;
+    };
+    cut_axis(x_, remaining.x, decay_position_.x, metrics.offset.x, velocity.x);
+    cut_axis(y_, remaining.y, decay_position_.y, metrics.offset.y, velocity.y);
+    if (velocity != Point{})
+        (void)handoff_fling(velocity, remaining, metrics, hit, time, x_.phase == Phase::Rest && y_.phase == Phase::Rest);
     return true;
 }
 
@@ -533,7 +728,12 @@ auto ScrollInteraction::sample_scroll_deltas(MotionContext &context, const Viewp
         return Ok(MotionStatus::Running);
     };
     const auto finish = [&] {
-        stop(true, false, false);
+        const auto gesture = gesture_;
+        finish_fling();
+        if (gesture != gesture_) return Ok(MotionStatus::Idle);
+        auto current = ui().viewport_metrics(viewport_);
+        if (!error_ && current.is_ok() && begin_snap(*current, time)) return tick();
+        if (gesture == gesture_) stop(true, false, false);
         return Ok(MotionStatus::Idle);
     };
     if (handoff_pending_) return tick();
@@ -551,6 +751,10 @@ auto ScrollInteraction::sample_scroll_deltas(MotionContext &context, const Viewp
     }
     const auto x = decay_sample(x_, time >= x_.started ? time - x_.started : 0);
     const auto y = decay_sample(y_, time >= y_.started ? time - y_.started : 0);
+    if (!finite(x.value) || !finite(x.velocity) || !finite(y.value) || !finite(y.velocity)) {
+        error_ = Some(UiError::InvalidValue);
+        return finish();
+    }
     const auto value = masked({x.value, y.value});
     velocity_ = masked({x.velocity, y.velocity});
     const Point delta{value.x - decay_position_.x, value.y - decay_position_.y};
@@ -574,7 +778,8 @@ auto ScrollInteraction::sample_scroll_deltas(MotionContext &context, const Viewp
             auto at_edge = metrics;
             at_edge.offset = offset;
             if (!reached_boundary(difference(delta, moved), at_edge, time)) return finish();
-            return edge_spring_ || handoff_pending_ ? tick() : finish();
+            if (edge_spring_ || handoff_pending_) return tick();
+            if (single_axis() || (x_.phase == Phase::Rest && y_.phase == Phase::Rest)) return finish();
         }
     } else {
         const auto offset = bounded({metrics.offset.x + delta.x, metrics.offset.y + delta.y}, metrics.maximum);
@@ -599,9 +804,10 @@ void ScrollInteraction::pending_up(EventContext &,const RoutedEvent &event) {
 }
 
 auto ScrollInteraction::make(UiSession &session, UiId root, UiId viewport, ScrollStyle &style,
-                             Signal<void(UserScroll)> &changed, Option<Box<ScrollDeltaResolver>> &resolve_delta)
+                             Signal<void(UserScroll)> &changed, Option<Box<ScrollDeltaResolver>> &resolve_delta,
+                             Option<Box<ScrollSnapLayout>> &snap_layout)
     -> Result<rstd::rc::Rc<ScrollInteraction>, ControlError> {
-    auto owner = rstd::rc::make_rc<ScrollInteraction>(session, root, viewport, style, changed, resolve_delta);
+    auto owner = rstd::rc::make_rc<ScrollInteraction>(session, root, viewport, style, changed, resolve_delta, snap_layout);
     auto self = owner.downgrade();
     owner.get()->owner_ = self;
     auto participant=session.input().arena().bind(root,self);if (participant.is_err()) return Err(ControlError{{},Some(participant.unwrap_err())});
@@ -639,6 +845,11 @@ void ScrollInteraction::stop(bool clamp,bool release,bool request) {
     edge_spring_ = None();
     edge_pull_ = 0;
     nested_origin_ = None();
+    drag_delta_ = {};
+    nested_remaining_ = {};
+    nested_consumed_ = {};
+    fling_velocity_ = {};
+    post_fling_delivered_ = false;
     nested_scroll_ = false;
     handoff_pending_ = false;
     ++gesture_;
@@ -670,7 +881,7 @@ auto ScrollInteraction::handle(EventContext &context,const RoutedEvent &event) -
         if (mode_ == Mode::Programmatic) stop(false, false);
         if (!acquire()) return true;
         pointer_ = Some(PointerKey{event.input.device, event.input.pointer});
-        nested_scroll_ = ancestor(main_axis(1), this, false).is_some();
+        nested_scroll_ = has_nested_connection() || ancestor(masked({1, 1}), this, false).is_some();
         mode_ = Mode::Drag;
         anchor_ = local->position;
         last_local_ = uses_scroll_deltas() ? map_delta(*inverse_, event.input.position) : local->position;
@@ -695,6 +906,7 @@ auto ScrollInteraction::handle(EventContext &context,const RoutedEvent &event) -
         rebase_ = false;
     }
     if (event.input.type==EventType::PointerMove) {
+        const auto gesture = gesture_;
         auto value = metrics->offset;
         if (measured) {
             const auto delta = masked(difference(last_local_, map_delta(*inverse_, event.input.position)));
@@ -703,6 +915,7 @@ auto ScrollInteraction::handle(EventContext &context,const RoutedEvent &event) -
             value = drag_value(local->position, *metrics);
             if (value != metrics->offset && !write(value, *metrics)) { stop(true, false); return true; }
         }
+        if (gesture != gesture_) return true;
         track(rstd::move(local).unwrap(), *metrics, value, measured);
         last_local_ = measured ? map_delta(*inverse_, event.input.position) : inverse_->map(event.input.position);
     } else {
@@ -731,7 +944,15 @@ auto ScrollInteraction::sample(MotionContext &context,FrameTiming) -> Result<Mot
     PresentationBatch batch;Point value{x.value,y.value};batch.viewport_offset(viewport_,value);auto written=context.write(lease_,batch);
     if (written.is_err()) {error_=Some(UiError::PropertyOwned);stop(true,false,false);return Ok(MotionStatus::Idle);}
     written_=value;if (value!=metrics->offset) changed_.emit({value,metrics->maximum}).unwrap();
-    if (x_.phase==Phase::Rest && y_.phase==Phase::Rest) {stop(true,false,false);return Ok(MotionStatus::Idle);}
+    if (x_.phase == Phase::Rest && y_.phase == Phase::Rest) {
+        const auto gesture = gesture_;
+        auto current = *metrics;
+        current.offset = value;
+        if (error_ || !begin_snap(current, context.now_ns())) {
+            if (gesture == gesture_) stop(true, false, false);
+            return Ok(MotionStatus::Idle);
+        }
+    }
     context.request_tick(context.now_ns()+8'333'333).unwrap();return Ok(MotionStatus::Running);
 }
 
@@ -770,7 +991,7 @@ auto ScrollState::finish_configuration() -> Result<empty, UiError> {
 }
 
 auto ScrollState::connect(UiSession &session, UiId root) -> Result<empty, ControlError> {
-    auto value = ScrollInteraction::make(session, root, viewport_, style_, user_scrolled_, resolve_delta_);
+    auto value = ScrollInteraction::make(session, root, viewport_, style_, user_scrolled_, resolve_delta_, snap_layout_);
     if (value.is_err()) return Err(value.unwrap_err());
     auto described = (*value)->describe_semantics();
     if (described.is_err()) return Err(ControlError{Some(described.unwrap_err()), {}});
@@ -1002,6 +1223,30 @@ auto ScrollView::set_delta_resolver(UiDocument &ui, UiId id, Option<Box<ScrollDe
     if (!state) return Err(UiError::InvalidId);
     state->resolve_delta_ = rstd::move(resolver);
     return Ok(empty{});
+}
+
+auto ScrollView::set_snap_layout(UiDocument &ui, UiId id, Option<Box<ScrollSnapLayout>> layout)
+    -> Result<empty, UiError> {
+    auto state = ui.state<ScrollState>(id);
+    if (!state) return Err(UiError::InvalidId);
+    state->snap_layout_ = rstd::move(layout);
+    return Ok(empty{});
+}
+
+auto ScrollView::bind_nested_scroll(UiDocument &ui, UiId id, Box<ScrollNestedCallback> callback)
+    -> Result<ScrollNestedBinding, UiError> {
+    const NodeStateKey key{rstd::any::TypeId::of<NestedConnection>(), 0};
+    auto previous = ui.state<NestedConnection>(id, key);
+    if (previous && previous->guard.alive()) return Err(UiError::PropertyOwned);
+    auto owner = rstd::rc::make_rc<ScrollNestedReceiver>(rstd::move(callback));
+    auto binding = ui.bindings().make();
+    NestedConnection entry{owner.downgrade(), binding.guard()};
+    if (previous) *previous = rstd::move(entry);
+    else {
+        auto attached = ui.attach_state(id, rstd::move(entry), key);
+        if (attached.is_err()) return Err(attached.unwrap_err());
+    }
+    return Ok(ScrollNestedBinding(rstd::move(owner), rstd::move(binding)));
 }
 
 auto ScrollView::metrics(UiDocument &ui, UiId id) -> Result<ViewportMetrics, UiError> {

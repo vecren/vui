@@ -4,11 +4,38 @@ using namespace rstd::prelude;
 export namespace vui {
 enum class ScrollWheelMode { Direct, SingleAxis };
 enum class ScrollMovement { Clamped, Elastic };
+enum class ScrollSnapAlignment { None, Start, Center, End };
+struct ScrollSnapRequest {
+    ViewportMetrics metrics;
+    Point proposed, velocity;
+    ScrollSnapAlignment alignment{};
+};
+struct ScrollSnapOptions {
+    friend auto operator==(const ScrollSnapOptions &, const ScrollSnapOptions &) -> bool = default;
+    ScrollSnapAlignment alignment{};
+    Point interval;
+    Serial duration_ns{180'000'000};
+    Option<Point> (*target)(const ScrollSnapRequest &){};
+    auto enabled() const -> bool {
+        return target || interval != Point{} || alignment != ScrollSnapAlignment::None;
+    }
+    auto valid() const -> bool;
+};
+// A custom curve samples a monotone offset and velocity from its release time.
+using ScrollFlingCurve = ScalarMotion (*)(ScalarMotion initial, Scalar rate, Serial elapsed_ns);
+enum class ScrollNestedPhase { PreScroll, PostScroll, PreFling, PostFling };
+// Scroll deltas and fling velocities are expressed in the connection node's axes.
+struct ScrollNestedOffer {
+    UiId source;
+    Point consumed, available;
+};
 struct ScrollMotionOptions {
     friend auto operator==(const ScrollMotionOptions &, const ScrollMotionOptions &) -> bool = default;
     bool enabled{}, inertia{true};
     ScrollMovement movement{ScrollMovement::Clamped};
     Scalar threshold{8}, deceleration_rate{.135}, elasticity{.1}, rubber_scale{1};
+    ScrollFlingCurve fling{};
+    ScrollSnapOptions snap;
     auto valid() const -> bool;
 };
 struct ScrollStyle {

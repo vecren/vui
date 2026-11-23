@@ -1,6 +1,7 @@
 export module vui.compose;
 export import :types;
 export import :environment;
+export import :saveable;
 export import :element;
 export import :behavior;
 export import :runtime;

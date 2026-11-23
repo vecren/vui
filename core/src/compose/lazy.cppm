@@ -7,6 +7,15 @@ export import :lazy_grid;
 export namespace vui::compose {
 using namespace rstd::prelude;
 
+struct LazyCacheWindow {
+    Scalar ahead{}, behind{};
+    Index nested_prefetch{2};
+    auto valid() const -> bool {
+        return finite(ahead) && finite(behind) && ahead >= 0 && behind >= 0;
+    }
+    friend auto operator==(const LazyCacheWindow &, const LazyCacheWindow &) -> bool = default;
+};
+
 struct LazyOptions {
     Insets padding;
     Scalar spacing{}, cross_spacing{};
@@ -18,6 +27,8 @@ struct LazyOptions {
     LazyArrangement main_arrangement{}, cross_arrangement{};
     bool prefetch{true};
     Index retained_slots_per_type{7};
+    Option<LazyCacheWindow> cache_window;
+    Index saved_state_capacity{128};
     friend auto operator==(const LazyOptions &, const LazyOptions &) -> bool = default;
 };
 

@@ -82,17 +82,24 @@ auto level_item(cx::Borrowed<LevelRows> rows, Level level) -> cx::Element {
             -> cx::ComposeResult<cx::Element> {
         auto selected = context.read(rows->selected.value());
         if (selected.is_err()) return Err(selected.unwrap_err());
+        auto expanded = context.saved_state(cx::Key{"expanded"_str}, bool(level.bonus));
+        if (expanded.is_err()) return Err(expanded.unwrap_err());
+        auto details = context.read(expanded->value());
+        if (details.is_err()) return Err(details.unwrap_err());
         const auto active = selected->value() == level.id;
         auto name = rstd::format("Level {:04}", level.id);
         auto title = label(name.as_str(), 15, foreground, true);
-        if (level.bonus) {
-            title = cx::column({rstd::move(title), label("Bonus stage"_str, 12, muted)})
+        if (details->value()) {
+            title = cx::column({rstd::move(title), label(level.bonus ? "Bonus stage"_str : "Standard stage"_str, 12, muted)})
                 .style(NodeStyleBuilder{}.horizontal(Alignment::Stretch).vertical(Alignment::Center)
                     .hit_test_visible(false).build()).gap(3);
         }
         auto appearance = ButtonStyleBuilder{}.normal(active ? selected_surface : white(.014f))
             .pressed(pressed_surface).focused(active ? pressed_surface : control_surface).radius(8).build();
-        auto button = control_finish(cx::button(rstd::move(title), [rows, id = level.id] { rows->selected.set(id).unwrap(); }, appearance)
+        auto button = control_finish(cx::button(rstd::move(title), [rows, id = level.id, expanded = expanded.unwrap()] {
+            rows->selected.set(id).unwrap();
+            expanded.update([](bool visible) { return !visible; }).unwrap();
+        }, appearance)
             .style(NodeStyleBuilder{}.horizontal(Alignment::Stretch).min_height(44).padding(10).build()), active);
         auto semantics = Button::default_semantics();
         semantics.label = rstd::move(name);

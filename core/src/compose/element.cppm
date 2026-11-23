@@ -2,6 +2,7 @@ export module vui.compose:element;
 import :types;
 import :behavior;
 import :environment;
+import :saveable;
 using namespace rstd::prelude;
 using namespace rstd::literals;
 
@@ -66,6 +67,7 @@ class [[clang::annotate("vui.compose.element.v1")]] Element {
     rstd::rc::Rc<ElementData> data_;
     auto copy() const -> Element;
     auto owned() && -> Element;
+    friend auto with_saved_item(Element, rstd::rc::Rc<SaveableStateHolder>, Key) -> Element;
   public:
     Element();
     explicit Element(rstd::rc::Rc<ElementData> data);
@@ -119,7 +121,9 @@ struct ElementData {
     rstd::rc::Rc<AdapterFunction> adapter;
     Option<NodeRef> reference;
     Option<LayoutConstraints> premeasure;
+    Option<SavedItemSource> saved_item;
     bool retain_native{};
+    bool recycle_children{};
     bool precompose{};
     bool invalid{};
     rstd::source_location source;
@@ -199,4 +203,5 @@ auto element(T config, Vec<Element> children = {}, rstd::source_location source 
     data.get()->children = rstd::move(children); return Element(rstd::move(data));
 }
 auto apply_modifiers(Element value, const Vec<ElementModifier> &modifiers) -> ComposeResult<Element>;
+auto with_saved_item(Element value, rstd::rc::Rc<SaveableStateHolder> holder, Key key) -> Element;
 } // namespace vui::compose

@@ -22,7 +22,8 @@ auto semantics_key() -> NodeStateKey { return NodeStateKey::of<Semantics>(); }
 auto equal_properties(const SemanticsProperties &a, const SemanticsProperties &b) -> bool {
     return a.role == b.role && a.label.as_str() == b.label.as_str() &&
            a.value.as_str() == b.value.as_str() && a.actions == b.actions &&
-           a.merge_descendants == b.merge_descendants && a.checked == b.checked && a.collection == b.collection;
+           a.merge_descendants == b.merge_descendants && a.checked == b.checked && a.collection == b.collection &&
+           a.exclude_subtree == b.exclude_subtree;
 }
 
 auto map_bounds(Rect rect, Transform transform) -> Rect {
@@ -163,6 +164,7 @@ auto Semantics::snapshot() const -> SemanticsSnapshot {
         enabled = enabled && visual->enabled;
         auto stored = document_.state<StoredSemantics>(id, semantics_key());
         auto description = stored ? stored->get() : nullptr;
+        if (description && description->exclude_subtree) return;
         if (description && input_.allows_semantics(*snapshot, id)) {
             auto bounds = project(visual->layout_bounds, transform, clip, chain);
             auto mount = document_.mount_state(id);

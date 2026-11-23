@@ -1,21 +1,13 @@
 export module vui.compose:runtime;
 import :element;
 import :environment;
+import :saveable;
 import :types;
 using namespace rstd::prelude;
 using namespace rstd::literals;
 
 export namespace vui::compose {
-struct MemoryPayload {
-    virtual ~MemoryPayload() = default;
-    virtual auto type() const -> rstd::any::TypeId = 0;
-};
-template <class T> struct MemoryValue final : MemoryPayload {
-    T value;
-    explicit MemoryValue(T source) : value(rstd::move(source)) {}
-    auto type() const -> rstd::any::TypeId override { return rstd::any::TypeId::of<T>(); }
-};
-enum class MemoryKind { Remember, State, Node };
+enum class MemoryKind { Remember, State, SavedState, Node };
 struct MemorySlot {
     Key key;
     MemoryKind kind;
@@ -89,10 +81,28 @@ struct DependencyWatch {
     DependencyWatch(vui::state::NodeId value, vui::state::Subscription watch)
         : id(value), subscription(rstd::move(watch)) {}
 };
+class ComposeBuild;
+struct SavedPathFrame {
+    const SavedPathFrame *parent;
+    const ElementData *element;
+    usize position;
+};
+struct SavedScopeCursor {
+    const SavedItemSource *item{};
+    const SavedItemValues *restore{};
+    const SavedPathFrame *path{};
+    auto address(Key key) const -> SavedAddress;
+};
+struct SavedStateSlot {
+    SavedAddress address;
+    const MemorySlot *slot;
+    ComposeResult<rstd::rc::Rc<MemoryPayload>> (*capture)(ComposeBuild &, const MemorySlot &);
+};
 using CommitAction = Box<rstd::dyn<rstd::FnMut<ComposeResult<empty>(CommittedContext &)>>>;
 struct ScopeState {
     bool dirty{true}, alive{true}, precomposed{};
     Vec<rstd::rc::Rc<MemorySlot>> memories;
+    Vec<SavedStateSlot> saved_slots;
     Vec<rstd::rc::Rc<EffectSlot>> effects;
     Vec<rstd::rc::Rc<DependencyWatch>> reads;
     Vec<LocalRead> local_reads;
@@ -101,6 +111,7 @@ struct ScopeState {
 struct ScopeDraft {
     rstd::rc::Rc<ScopeState> scope;
     Vec<rstd::rc::Rc<MemorySlot>> memories;
+    Vec<SavedStateSlot> saved_slots;
     Vec<rstd::rc::Rc<EffectSlot>> effects;
     Vec<rstd::rc::Rc<DependencyWatch>> reads;
     Vec<LocalRead> local_reads;
@@ -159,11 +170,14 @@ struct ComposeInstance {
     Option<Element> output;
     Option<UiId> id;
     rstd::rc::Rc<ScopeState> scope;
+    rstd::rc::Rc<SavedItemActivation> saved_activation;
+    rstd::rc::Rc<SavedItemValues> saved_preview;
     Vec<rstd::rc::Rc<NativePayload>> native;
     Vec<rstd::rc::Rc<ComposeInstance>> children;
     Vec<rstd::rc::Rc<EffectSlot>> mounts;
     Vec<rstd::rc::Rc<AttachedBehaviorSlot>> attached;
     bool owns_children{};
+    bool detached{}, native_active{};
     rstd::rc::Rc<NodeLink> link{rstd::rc::make_rc<NodeLink>()};
 };
 struct ComposeRoot {
@@ -184,6 +198,7 @@ struct ComposeDraft {
     Option<Element> output;
     rstd::rc::Rc<ComposeInstance> instance;
     Option<Box<ScopeDraft>> scope;
+    rstd::rc::Rc<SavedItemValues> saved_preview;
     Vec<rstd::rc::Rc<NativePayload>> native;
     Vec<rstd::rc::Rc<ComposeDraft>> children;
     Vec<rstd::rc::Rc<ComposeInstance>> reused_children;
@@ -194,13 +209,21 @@ struct ComposeDraft {
     Vec<rstd::rc::Rc<EffectSlot>> mounts;
     Vec<AttachedBehaviorDraft> attached;
     usize position{};
-    bool fresh{}, reused{}, owns_children{}, promoted{}, precompose_failed{};
+    CompositionEnvironment precompose_environment;
+    bool fresh{}, reused{}, owns_children{}, promoted{}, precompose_failed{}, precompose_reserved{};
 };
 class ComposeBuild {
     struct Observation {
         vui::state::GraphView graph;
         vui::state::ObservationBatch batch;
     };
+    struct ItemSave {
+        rstd::rc::Rc<SaveableStateHolder> holder;
+        rstd::rc::Rc<SavedItemActivation> activation;
+        rstd::rc::Rc<SavedItemValues> values;
+    };
+    Vec<ItemSave> saved_items_;
+    auto capture_item_state(const ComposeInstance &instance) -> ComposeResult<empty>;
   public:
     UiSession &session;
     const UiTreeOwner &tree_owner;
@@ -209,6 +232,7 @@ class ComposeBuild {
     UiEditBatch edit;
     Vec<Observation> observations;
     Vec<rstd::rc::Rc<ComposeInstance>> retired;
+    Vec<rstd::rc::Rc<ComposeInstance>> parked;
     Vec<MovableEntry> movable;
     Vec<MovableClaim> claims;
     Vec<rstd::rc::Rc<AttachedBehaviorSlot>> retired_behaviors;
@@ -217,8 +241,12 @@ class ComposeBuild {
     Vec<Box<rstd::dyn<rstd::FnMut<Result<empty, InputError>(EventRouter &, EventRouter::BehaviorEdit &, const UiDocument::PreparedEdit &)>>>> behaviors;
     Serial evaluations{}, comparisons{}, skipped{};
     usize nodes{};
-    ComposeBuild(UiSession &ui, vui::state::GraphView graph, rstd::rc::Rc<ComposeSignal> source, const UiTreeOwner &owner)
-        : session(ui), tree_owner(owner), local(graph), signal(rstd::move(source)), edit(owner.access()) {}
+    usize &precompose_budget;
+    bool speculative{};
+    ComposeBuild(UiSession &ui, vui::state::GraphView graph, rstd::rc::Rc<ComposeSignal> source, const UiTreeOwner &owner,
+                 usize &budget)
+        : session(ui), tree_owner(owner), local(graph), signal(rstd::move(source)), edit(owner.access()),
+          precompose_budget(budget) {}
     auto observe(vui::state::GraphView graph) -> ComposeResult<vui::state::ObservationBatch *>;
     void retire(rstd::rc::Rc<ComposeInstance> instance) {
         retired.push(instance.clone());
@@ -230,6 +258,8 @@ class ComposeBuild {
     auto retains(const rstd::rc::Rc<ComposeInstance> &) const -> bool;
     auto preserve_moves() -> ComposeResult<empty>;
     auto retired_roots() const -> Vec<UiId>;
+    auto stage_saved_items(const ComposeDraft &draft) -> ComposeResult<empty>;
+    void apply_saved_items(ComposeDraft &draft);
     static auto dirty(const ComposeInstance &instance, const CompositionEnvironment &environment) -> bool;
     static void committed_roots(const ComposeInstance &instance, Vec<ComposeRoot> &roots) {
         if (instance.element.data().precompose) return;
@@ -239,18 +269,60 @@ class ComposeBuild {
     static auto same_roots(const Vec<ComposeRoot> &before, const Vec<ComposeRoot> &after) -> bool;
     void children(UiNodeRef node, const Vec<ComposeRoot> &roots);
     auto reconcile(Element value, rstd::rc::Rc<ComposeInstance> previous, bool force, Index depth = 0,
-                   CompositionEnvironment environment = {})
+                   CompositionEnvironment environment = {}, SavedScopeCursor saved = {})
         -> ComposeResult<rstd::rc::Rc<ComposeDraft>>;
 };
 class CompositionContext {
     ComposeBuild &build_;
     ScopeDraft &draft_;
     CompositionEnvironment environment_;
+    SavedScopeCursor saved_;
     Vec<Key> groups_;
     struct Occurrence { CallIdentity identity; Serial next{}; };
     Vec<Occurrence> occurrences_;
     Vec<CallIdentity> groups_seen_;
     Option<ComposeError> failure_;
+
+    template <bool Save, class T> auto open_state(Key key, T initial) -> ComposeResult<State<T>> {
+        Option<SavedAddress> address;
+        if constexpr (Save)
+            if (saved_.item) address = Some(saved_.address(Key(key)));
+        auto slot = draft_.memory<vui::state::Cell<T>>(address ? MemoryKind::SavedState : MemoryKind::State,
+            rstd::move(key), [&]() -> ComposeResult<vui::state::Cell<T>> {
+                if constexpr (Save) {
+                    if (address && saved_.restore)
+                        if (auto restored = saved_.restore->find(*address)) {
+                            using Snapshot = vui::state::ValueSnapshot<T>;
+                            if (restored->type() != rstd::any::TypeId::of<Snapshot>())
+                                return Err(ComposeError(ComposeStage::Type));
+                            const auto &value = static_cast<const MemoryValue<Snapshot> &>(*restored).value.value();
+                            if constexpr (rstd::mtp::same_as<T, String>) initial = value.clone();
+                            else initial = value;
+                        }
+                }
+                auto observation = build_.observe(build_.local);
+                if (observation.is_err()) return Err(observation.unwrap_err());
+                auto cell = observation.unwrap()->cell(rstd::move(initial));
+                if (cell.is_err()) return Err(state_error(cell.unwrap_err()));
+                return Ok(cell.unwrap());
+            });
+        if (slot.is_err()) return Err(slot.unwrap_err());
+        auto owned = slot.unwrap();
+        auto &cell = static_cast<MemoryValue<vui::state::Cell<T>> &>(*owned.get()->payload.get()).value;
+        if constexpr (Save) {
+            if (address) draft_.saved_slots.push({address.unwrap(), owned.get(),
+                [](ComposeBuild &build, const MemorySlot &source) -> ComposeResult<rstd::rc::Rc<MemoryPayload>> {
+                    const auto &cell = static_cast<const MemoryValue<vui::state::Cell<T>> &>(*source.payload).value;
+                    auto value = cell.value();
+                    auto observation = build.observe(value.graph());
+                    if (observation.is_err()) return Err(observation.unwrap_err());
+                    auto snapshot = observation.unwrap()->read(value);
+                    if (snapshot.is_err()) return Err(state_error(snapshot.unwrap_err()));
+                    return Ok(rstd::rc::Rc<MemoryPayload>(new MemoryValue<vui::state::ValueSnapshot<T>>(snapshot.unwrap())));
+                }});
+        }
+        return Ok(State<T>(owned.downgrade(), cell.value()));
+    }
   public:
     class GroupGuard {
         CompositionContext *context_{};
@@ -261,8 +333,9 @@ class CompositionContext {
         GroupGuard(GroupGuard &&other) : context_(rstd::exchange(other.context_, nullptr)), depth_(other.depth_) {}
         ~GroupGuard() { if (context_) context_->groups_.truncate(depth_); }
     };
-    CompositionContext(ComposeBuild &build, ScopeDraft &draft, CompositionEnvironment environment = {})
-        : build_(build), draft_(draft), environment_(rstd::move(environment)) {}
+    CompositionContext(ComposeBuild &build, ScopeDraft &draft, CompositionEnvironment environment = {},
+                       SavedScopeCursor saved = {})
+        : build_(build), draft_(draft), environment_(rstd::move(environment)), saved_(saved) {}
     CompositionContext(const CompositionContext &) = delete;
     auto session() -> UiSession & { return build_.session; }
     template <class F> void on_commit(F action) {
@@ -284,18 +357,10 @@ class CompositionContext {
         return Ok(Remembered<T>(slot.unwrap().downgrade()));
     }
     template <class T> auto state(Key key, T initial) -> ComposeResult<State<T>> {
-        auto slot = draft_.memory<vui::state::Cell<T>>(MemoryKind::State, rstd::move(key),
-            [&]() -> ComposeResult<vui::state::Cell<T>> {
-                auto observation = build_.observe(build_.local);
-                if (observation.is_err()) return Err(observation.unwrap_err());
-                auto cell = observation.unwrap()->cell(rstd::move(initial));
-                if (cell.is_err()) return Err(state_error(cell.unwrap_err()));
-                return Ok(cell.unwrap());
-            });
-        if (slot.is_err()) return Err(slot.unwrap_err());
-        auto owned = slot.unwrap();
-        auto &cell = static_cast<MemoryValue<vui::state::Cell<T>> &>(*owned.get()->payload.get()).value;
-        return Ok(State<T>(owned.downgrade(), cell.value()));
+        return open_state<false>(rstd::move(key), rstd::move(initial));
+    }
+    template <SaveableStateValue T> auto saved_state(Key key, T initial) -> ComposeResult<State<T>> {
+        return open_state<true>(rstd::move(key), rstd::move(initial));
     }
     auto node(Key key) -> ComposeResult<NodeRef>;
     template <class T> auto read(const CompositionLocal<T> &local) -> ComposeResult<LocalSnapshot<T>> {
@@ -377,6 +442,8 @@ class PrepareContext {
     }
     auto signal() -> rstd::rc::Weak<ComposeSignal> { return build_.signal.downgrade(); }
     auto created() const -> bool { return draft_.fresh; }
+    auto first_activation() const -> bool { return !draft_.instance->native_active; }
+    auto activating() const -> bool { return draft_.fresh || draft_.promoted; }
     auto source() const -> rstd::source_location { return draft_.element.data().source; }
     auto target() -> NodeRef { return NodeRef(draft_.instance->link.clone()); }
     void owns_children() { draft_.owns_children = true; }
@@ -390,18 +457,18 @@ class PrepareContext {
     }
 
     template <class F> void on_commit(F action) {
-        build_.actions.push(Box<rstd::dyn<rstd::FnMut<ComposeResult<empty>(CommittedContext &)>>>::make(rstd::move(action)));
+        if (!build_.speculative) build_.actions.push(CommitAction::make(rstd::move(action)));
     }
     template <class F> void on_prepared(F prepare) {
         build_.preparers.push(Box<rstd::dyn<rstd::FnMut<ComposeResult<empty>(UiDocument::PreparedEdit &)>>>::make(rstd::move(prepare)));
     }
     template <class F> void on_mount(F start, rstd::source_location source = rstd::source_location::current()) {
-        if (draft_.fresh) draft_.mounts.push(rstd::rc::make_rc<EffectSlot>(Key{draft_.mounts.len().to_primitive()}, EffectKeys{},
+        if (activating()) draft_.mounts.push(rstd::rc::make_rc<EffectSlot>(Key{draft_.mounts.len().to_primitive()}, EffectKeys{},
             rstd::rc::make_rc<EffectFunction>(rstd::move(start), source)));
     }
     template <class T> requires rstd::Impled<T, Behavior>
     void behavior(UiNodeRef node, NodeStateKey role = {}) {
-        if (!draft_.fresh) return;
+        if (build_.speculative || !first_activation()) return;
         build_.behaviors.push(Box<rstd::dyn<rstd::FnMut<Result<empty, InputError>(EventRouter &, EventRouter::BehaviorEdit &, const UiDocument::PreparedEdit &)>>>::make(
             [node, role](EventRouter &input, EventRouter::BehaviorEdit &edit, const UiDocument::PreparedEdit &document) {
                 return input.prepare_behavior<T>(edit, document, node, role);
@@ -444,8 +511,9 @@ class CompositionRuntime {
                                     Vec<NodeLink *> &references) -> ComposeResult<empty>;
     static auto resolve(ComposeDraft &draft, UiDocument &document, const UiDocument::PreparedEdit &prepared,
                         Vec<Element> &old_elements, Vec<NodeLink *> &references, usize &scopes) -> ComposeResult<empty>;
-    static void commit(ComposeDraft &draft, Vec<OldScope> &old);
-    void prepare_native(ComposeDraft &draft, UiSession &session, UiCommitReport &report);
+    static void commit(ComposeDraft &draft, Vec<OldScope> &old, bool speculative = false);
+    static void park(const rstd::rc::Rc<ComposeInstance> &instance, const ComposeBuild &retained);
+    void prepare_native(ComposeDraft &draft, UiSession &session, UiCommitReport &report, usize &budget);
     void activate(ComposeDraft &draft, CommittedContext &context);
     static auto locate(ComposeDraft &draft, UiNodeRef ref, ComposeError &error) -> bool;
     auto perform(UiSession &session) -> ComposeResult<CommitReport>;

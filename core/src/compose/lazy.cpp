@@ -1,6 +1,7 @@
 module vui.compose;
 import :lazy;
 import :lazy_item_motion;
+import :saveable;
 import :controls;
 import :runtime;
 
@@ -155,14 +156,32 @@ struct LazyAnchor {
 };
 
 struct LazySlot {
-    enum class Kind { Active, Probe, Pinned, Prefetched, Spare };
+    enum class Kind { Active, Probe, Pinned, Moving, Prefetched, Spare };
     Key key;
+    Option<Key> saved_key;
     Option<Key> content_type;
     Index index;
     Serial id{};
     Kind kind{Kind::Active};
     Option<LayoutConstraints> premeasure;
-    auto placed() const -> bool { return kind == Kind::Active || kind == Kind::Probe || kind == Kind::Pinned; }
+    bool recycle{};
+    Option<bool> moving_before;
+    auto placed() const -> bool { return kind <= Kind::Moving; }
+};
+
+class LazyRuntime;
+
+struct LazyPinTarget {
+    rstd::rc::Weak<LazyRuntime> owner;
+    Serial container;
+    Key slot;
+    friend auto operator==(const LazyPinTarget &a, const LazyPinTarget &b) -> bool {
+        return a.container == b.container && a.slot == b.slot;
+    }
+};
+
+const CompositionLocal<StableValue<Option<LazyPinTarget>>> lazy_parent_pin{
+    StableValue<Option<LazyPinTarget>>{None()}
 };
 
 class LazyRuntime {
@@ -172,6 +191,7 @@ class LazyRuntime {
     Option<GridCells> grid_;
     Rc<LazyStateData> state_;
     Rc<LazyStateData> default_state_;
+    Rc<SaveableStateHolder> saved_state_{rstd::rc::make_rc<SaveableStateHolder>()};
     Option<State<Serial>> signal_;
     Serial revision_{};
 
@@ -194,6 +214,9 @@ class LazyRuntime {
         rstd::rc::Weak<LazyPinLease> lease;
     };
     Vec<Pin> pins_;
+    Serial pin_container_{new_session()};
+    Option<LazyPinTarget> parent_pin_target_;
+    Option<LazyItemPin> parent_pin_;
     Vec<Index> focus_items_;
     Option<Index> focus_line_;
     bool focus_invalidated_{};
@@ -201,13 +224,14 @@ class LazyRuntime {
     Serial next_slot_{1};
     struct Prefetch {
         Index index;
+        Index line;
         Option<LayoutConstraints> constraints;
     };
     Vec<Prefetch> prefetched_;
-    Option<Index> prefetch_line_;
+    Option<Index> prefetch_line_, prefetch_start_, prefetch_end_;
     Option<Scalar> prefetch_offset_;
     Option<bool> prefetch_forward_;
-    Index prefetch_item_start_{}, prefetch_item_count_{};
+    Index prefetch_item_start_{}, prefetch_item_count_{}, prefetch_item_offset_{};
     Index demand_begin_{}, demand_end_{};
     Serial prefetch_generation_{1};
     bool prefetch_queued_{};
@@ -233,6 +257,9 @@ class LazyRuntime {
     Option<Index> sticky_, next_sticky_line_;
     Scalar sticky_offset_{};
     LazyItemAnimator item_animator_;
+    Scalar moving_origin_{}, moving_extent_{};
+    Rc<Box<LazyMoveCompletion>> move_completion_;
+    Vec<Serial> completed_moves_;
     Scalar item_rebase_delta_{};
     Option<Serial> item_window_revision_;
 
@@ -310,6 +337,13 @@ class LazyRuntime {
         for (const auto &pin : pins_)
             if (auto lease = pin.lease.upgrade(); lease) lease->get()->active = false;
         pins_.clear();
+        parent_pin_ = None();
+    }
+
+    void pin_released() {
+        pins_.retain([](const Pin &pin) { return !pin.lease.expired(); });
+        if (pins_.is_empty()) parent_pin_ = None();
+        (void)refresh_slots();
     }
 
     auto refresh_slots() -> bool { return signal_ && signal_->set(++revision_).is_ok(); }
@@ -318,13 +352,29 @@ class LazyRuntime {
         return usize(rstd::cmp::min(Index(64), options.max_materialized / 2));
     }
 
+    auto pin_parent() -> Result<empty, UiError> {
+        if (!parent_pin_target_ || (parent_pin_ && parent_pin_->active())) return Ok(empty{});
+        auto parent = parent_pin_target_->owner.upgrade();
+        if (!parent || parent->get() == this) return Err(UiError::InvalidId);
+        for (const auto &slot : (*parent)->slots_in_use_) {
+            if (!slot.placed() || slot.key != parent_pin_target_->slot) continue;
+            auto pinned = parent->get()->make_pin(*parent, slot.index);
+            if (pinned.is_err()) return Err(pinned.unwrap_err());
+            parent_pin_ = Some(pinned.unwrap());
+            return Ok(empty{});
+        }
+        return Err(UiError::Cancelled);
+    }
+
     auto make_pin(const Rc<LazyRuntime> &owner, Index index) -> Result<LazyItemPin, UiError> {
         if (!document_ || !state_) return Err(UiError::InvalidId);
         if (index >= content_.count()) return Err(UiError::InvalidValue);
         pins_.retain([](const Pin &pin) { return !pin.lease.expired(); });
         if (pins_.len() >= pin_limit(options_)) return Err(UiError::Limit);
+        auto parent = pin_parent();
+        if (parent.is_err()) return Err(parent.unwrap_err());
         auto wake = Box<rstd::dyn<rstd::FnMut<void()>>>::make([weak = owner.downgrade()] {
-            if (auto live = weak.upgrade(); live) (void)live->get()->refresh_slots();
+            if (auto live = weak.upgrade(); live) live->get()->pin_released();
         });
         auto lease = rstd::rc::make_rc<LazyPinLease>(rstd::move(wake));
         pins_.push({index, content_.describe(index).key, lease.downgrade()});
@@ -332,8 +382,23 @@ class LazyRuntime {
         return Ok(LazyStateAccess::pin(rstd::move(lease)));
     }
 
-    auto extend_focus(bool backwards) -> bool {
+    auto extend_focus(const InputSnapshot &snapshot, FocusDirection direction) -> bool {
         if (focus_invalidated_ || !geometry_ready_ || requested_.is_empty()) return false;
+        bool backwards = direction == FocusDirection::Previous;
+        if (direction != FocusDirection::Next && direction != FocusDirection::Previous) {
+            auto transform = snapshot.local_to_surface(node_);
+            if (transform.is_err()) return false;
+            auto inverse = transform->inverse();
+            if (!inverse) return false;
+            const bool horizontal = direction == FocusDirection::Left || direction == FocusDirection::Right;
+            const auto sign = direction == FocusDirection::Left || direction == FocusDirection::Up ? -1 : 1;
+            const Point local = horizontal ? Point{sign * inverse->a, sign * inverse->b}
+                                           : Point{sign * inverse->c, sign * inverse->d};
+            const auto main = axis(local);
+            const auto cross = horizontal_ ? local.y : local.x;
+            if (main == 0 || __builtin_fabs(main) < __builtin_fabs(cross)) return false;
+            backwards = (main < 0) != options_.reverse_layout;
+        }
         const auto line = focus_line_ ? *focus_line_ : backwards ? demand_begin_ : demand_end_;
         if (backwards ? line == 0 : line + 1 >= line_count()) return false;
         const auto next = backwards ? line - 1 : line + 1;
@@ -364,7 +429,7 @@ class LazyRuntime {
             const auto &slot = slots_in_use_[i];
             if (slot.kind == LazySlot::Kind::Active || !input_descendant(snapshot, placements_[i].node, target))
                 continue;
-            if (slot.kind == LazySlot::Kind::Pinned) return false;
+            if (slot.kind != LazySlot::Kind::Probe) return false;
             for (const auto index : focus_items_)
                 if (index == slot.index) return true;
             return false;
@@ -375,11 +440,22 @@ class LazyRuntime {
     auto request_window(Index first, Scalar logical, Scalar viewport, Option<Index> measure = {}) -> Result<empty, UiError> {
         Vec<Index> wanted;
         const auto visible_begin = geometry_.line_at(larger(0, logical - start_padding()), line_count());
-        const auto begin = visible_begin > options_.overscan ? visible_begin - options_.overscan : 0;
+        auto begin = visible_begin > options_.overscan ? visible_begin - options_.overscan : 0;
         const auto end = geometry_.line_at(larger(0, logical + viewport - start_padding()), line_count());
         const auto overscan_end = Serial(end) + options_.overscan;
+        auto keep_end = overscan_end;
+        if (options_.cache_window && options_.cache_window->behind > 0) {
+            const bool forward = !prefetch_offset_ || logical == *prefetch_offset_
+                ? prefetch_forward_.unwrap_or(true) : logical > *prefetch_offset_;
+            if (forward)
+                begin = rstd::cmp::min(begin, geometry_.line_at(larger(0, logical - start_padding() -
+                    options_.cache_window->behind), line_count()));
+            else
+                keep_end = rstd::cmp::max(keep_end, Serial(geometry_.line_at(larger(0, logical + viewport -
+                    start_padding() + options_.cache_window->behind), line_count())));
+        }
         demand_begin_ = begin;
-        demand_end_ = Index(smaller(Scalar(overscan_end), Scalar(line_count() ? line_count() - 1 : 0)));
+        demand_end_ = Index(smaller(Scalar(keep_end), Scalar(line_count() ? line_count() - 1 : 0)));
         const auto limit = usize(options_.max_materialized);
         auto first_item = first_in(first);
         if (first_item.is_err()) return Err(first_item.unwrap_err());
@@ -405,13 +481,17 @@ class LazyRuntime {
             auto added = add_line(line);
             if (added.is_err()) return Err(added.unwrap_err());
         }
-        if (measure && (*measure < begin || Serial(*measure) > overscan_end) && wanted.len() < regular_limit) {
+        if (measure && (*measure < begin || Serial(*measure) > keep_end) && wanted.len() < regular_limit) {
             auto added = add_line(*measure);
             if (added.is_err()) return added;
         }
         for (auto line = visible_begin; line > begin && wanted.len() < regular_limit;) {
             auto added = add_line(--line);
             if (added.is_err()) return Err(added.unwrap_err());
+        }
+        for (auto line = overscan_end + 1; line < line_count() && line <= keep_end && wanted.len() < regular_limit; ++line) {
+            auto added = add_line(Index(line));
+            if (added.is_err()) return added;
         }
         rstd::slice_::sort_unstable_by(wanted.as_mut_slice().as_mut_ref(), [](Index a, Index b) { return a < b; });
         if (active_header) {
@@ -444,10 +524,15 @@ class LazyRuntime {
     }
 
     void clear_prefetch() {
+        ++prefetch_generation_;
+        prefetch_queued_ = false;
         prefetch_line_ = None();
+        prefetch_start_ = None();
+        prefetch_end_ = None();
         prefetch_offset_ = None();
         prefetch_forward_ = None();
         prefetch_item_count_ = 0;
+        prefetch_item_offset_ = 0;
         prefetched_.clear();
     }
 
@@ -465,24 +550,37 @@ class LazyRuntime {
     auto precompose_next() -> bool {
         if (!prefetch_line_ || requested_.len() + prefetched_.len() >= usize(options_.max_materialized))
             return false;
-        if (!prefetch_item_count_) {
-            if (grid_) {
-                auto row = lines_.line_at(*prefetch_line_, span());
-                if (row.is_err() || row->spans.is_empty()) return false;
-                prefetch_item_start_ = row->first;
-                prefetch_item_count_ = Index(row->spans.len().to_primitive());
-            } else {
-                prefetch_item_start_ = *prefetch_line_;
-                prefetch_item_count_ = 1;
+        while (prefetch_line_) {
+            const auto line = *prefetch_line_;
+            if (!prefetch_item_count_) {
+                if (grid_) {
+                    auto row = lines_.line_at(line, span());
+                    if (row.is_err() || row->spans.is_empty()) return false;
+                    prefetch_item_start_ = row->first;
+                    prefetch_item_count_ = Index(row->spans.len().to_primitive());
+                } else {
+                    prefetch_item_start_ = line;
+                    prefetch_item_count_ = 1;
+                }
             }
+            const auto index = prefetch_item_start_ + prefetch_item_offset_++;
+            if (prefetch_item_offset_ == prefetch_item_count_) {
+                if (prefetch_line_ == prefetch_end_) prefetch_line_ = None();
+                else prefetch_line_ = Some(Index(prefetch_forward_.unwrap_or(true) ? line + 1 : line - 1));
+                prefetch_item_count_ = 0;
+                prefetch_item_offset_ = 0;
+            }
+            bool cached{};
+            for (const auto &item : prefetched_) cached |= item.index == index;
+            if (cached) continue;
+            prefetched_.push({index, line, premeasure_constraints(index)});
+            queue_prefetch();
+            return signal_->set(++revision_).is_ok();
         }
-        const auto index = prefetch_item_start_ + Index(prefetched_.len().to_primitive());
-        prefetched_.push({index, premeasure_constraints(index)});
-        if (prefetched_.len() < usize(prefetch_item_count_)) queue_prefetch();
-        return signal_->set(++revision_).is_ok();
+        return false;
     }
 
-    auto update_prefetch(Scalar logical) -> Result<empty, UiError> {
+    auto update_prefetch(Scalar logical, Scalar viewport) -> Result<empty, UiError> {
         if (!options_.prefetch || !session_ || requested_.is_empty()) return Ok(empty{});
         if (rstd::exchange(prefetch_constraints_changed_, false)) {
             if (!prefetched_.is_empty()) {
@@ -494,16 +592,41 @@ class LazyRuntime {
         const auto previous = prefetch_offset_;
         prefetch_offset_ = Some(logical);
         if (previous && *previous != logical) prefetch_forward_ = Some(bool(logical > *previous));
-        if (!prefetch_forward_) return Ok(empty{});
-        const auto forward = *prefetch_forward_;
+        if (!prefetch_forward_ && !options_.cache_window) return Ok(empty{});
+        const bool forward = prefetch_forward_.unwrap_or(true);
         Option<Index> next;
         if (forward && demand_end_ + 1 < line_count()) next = Some(Index(demand_end_ + 1));
         if (!forward && demand_begin_) next = Some(Index(demand_begin_ - 1));
-        if (next == prefetch_line_) return Ok(empty{});
+        auto end = next;
+        if (next && options_.cache_window) {
+            const auto ahead = options_.cache_window->ahead;
+            if (ahead == 0) {
+                next = None();
+                end = None();
+            } else {
+                auto edge = geometry_.line_at(larger(0, (forward ? logical + viewport + ahead : logical - ahead) -
+                    start_padding()), line_count());
+                if (forward ? edge < *next : edge > *next) {
+                    next = None();
+                    end = None();
+                } else end = Some(Index(edge));
+            }
+        }
+        if (next == prefetch_start_ && end == prefetch_end_) {
+            if (requested_.len() + prefetched_.len() < usize(options_.max_materialized)) queue_prefetch();
+            return Ok(empty{});
+        }
+        prefetch_start_ = next;
+        prefetch_end_ = end;
         prefetch_line_ = next;
         prefetch_item_count_ = 0;
-        if (!prefetched_.is_empty()) {
-            prefetched_.clear();
+        prefetch_item_offset_ = 0;
+        const auto count = prefetched_.len();
+        prefetched_.retain([&](const Prefetch &item) {
+            if (!next || !end) return false;
+            return forward ? *next <= item.line && item.line <= *end : *end <= item.line && item.line <= *next;
+        });
+        if (count != prefetched_.len()) {
             auto invalidated = signal_->set(++revision_);
             if (invalidated.is_err()) return Err(UiError::InvalidValue);
         }
@@ -524,6 +647,9 @@ class LazyRuntime {
         const auto rank = options_.reverse_layout ? count - 1 - place.cell.line : place.cell.line;
         along += arrangement_offset(options_.main_arrangement, arranged_extent_ - extent_, rank, count,
                                     options_.reverse_layout);
+        const auto &slot = slots_in_use_[child];
+        if (slot.moving_before)
+            along = moving_origin_ + (*slot.moving_before ? -place.extent : moving_extent_);
         auto across = cross_start();
         if (grid_) across += slots_.positions[usize(place.cell.lane)];
         else if (options_.cross_alignment == Alignment::Center) across += (cross_ - place.cross) * .5;
@@ -543,13 +669,15 @@ class LazyRuntime {
             auto bounds = item_bounds(child);
             auto &position = horizontal_ ? bounds.x : bounds.y;
             position -= displayed;
-            if (position >= viewport_extent || position + placements_[child].extent <= 0) continue;
+            const bool leaving = slots_in_use_[child].kind == LazySlot::Kind::Moving;
+            if (!leaving && (position >= viewport_extent || position + placements_[child].extent <= 0)) continue;
             const auto index = rendered_[child];
             const auto &placement = placements_[child];
             auto metadata = content_.describe(index);
             const bool sticky = sticky_ == Some(index);
             if (metadata.animation)
-                animated.push({placement.node, index, bounds, copy_key(metadata.key), *metadata.animation, sticky});
+                animated.push({placement.node, index, bounds, copy_key(metadata.key), *metadata.animation, sticky, leaving});
+            if (leaving) continue;
             if (!sticky) {
                 if (!animation_viewport.first || index < *animation_viewport.first)
                     animation_viewport.first = Some(Index(index));
@@ -569,7 +697,62 @@ class LazyRuntime {
         });
         if (layout.is_err()) return layout;
         return item_animator_.update(*document_, content_, rstd::move(animated), *visible, animation_viewport,
-                                     point(rstd::exchange(item_rebase_delta_, 0)));
+                                     point(rstd::exchange(item_rebase_delta_, 0)), move_completion_);
+    }
+
+    auto place_moving_items(Index first_line, Scalar physical, Scalar viewport) -> Result<empty, UiError> {
+        const auto viewport_changed = moving_origin_ != physical || moving_extent_ != viewport;
+        moving_origin_ = physical;
+        moving_extent_ = viewport;
+        bool dirty{};
+        for (usize child{}; child < placements_.len(); ++child) {
+            auto &slot = slots_in_use_[child];
+            if (slot.kind != LazySlot::Kind::Moving) continue;
+            dirty |= viewport_changed || !slot.moving_before;
+            if (!slot.moving_before)
+                slot.moving_before = Some(bool((placements_[child].cell.line < first_line) != options_.reverse_layout));
+        }
+        return dirty ? document_->invalidate_placement(node_) : Result<empty, UiError>(Ok(empty{}));
+    }
+
+    void finish_move(UiId node) {
+        for (usize child{}; child < placements_.len(); ++child) {
+            const auto &slot = slots_in_use_[child];
+            if (slot.kind != LazySlot::Kind::Moving || placements_[child].node != node) continue;
+            for (auto id : completed_moves_) if (id == slot.id) return;
+            completed_moves_.push(Serial(slot.id));
+            (void)refresh_slots();
+            return;
+        }
+    }
+
+    auto snap_to_line(const ScrollSnapRequest &request) const -> Option<Point> {
+        const auto viewport = main(request.metrics.viewport);
+        const auto maximum = axis(request.metrics.maximum);
+        const auto proposed = axis(request.proposed);
+        const auto velocity = axis(request.velocity);
+        Option<Scalar> nearest;
+        Scalar distance{};
+        for (const auto &line : measured_lines_) {
+            if (!line.complete()) continue;
+            const auto logical = start_padding() + geometry_.position(line.index);
+            auto start = options_.reverse_layout ? extent_ - logical - line.extent : logical;
+            const auto rank = options_.reverse_layout ? line_count() - 1 - line.index : line.index;
+            start += arrangement_offset(options_.main_arrangement, arranged_extent_ - extent_, rank,
+                                        line_count(), options_.reverse_layout);
+            auto target = start;
+            const auto free = viewport - line.extent;
+            if (request.alignment == ScrollSnapAlignment::Center) target -= free * .5;
+            else if ((request.alignment == ScrollSnapAlignment::End) != options_.reverse_layout) target -= free;
+            target = smaller(larger(0, target), maximum);
+            const auto gap = __builtin_fabs(target - proposed);
+            if (gap > viewport) continue;
+            if (!nearest || gap < distance || (gap == distance && (target - *nearest) * velocity > 0)) {
+                nearest = Some(Scalar(target));
+                distance = gap;
+            }
+        }
+        return nearest ? Some(point(*nearest)) : None<Point>();
     }
 
     auto scroll_step(Scalar logical, Scalar delta, Scalar viewport) const -> LazyScrollStep {
@@ -664,7 +847,7 @@ class LazyRuntime {
         if (!step.measure) {
             const auto remaining = scroll_delta_->remaining;
             const bool boundary = __builtin_fabs(remaining) > 1e-6;
-            if (boundary && scroll_delta_->lease) {
+            if (scroll_delta_->lease) {
                 metrics.offset = physical_offset(logical, axis(metrics.maximum));
                 auto stretched = scroll_delta_->lease->reached_boundary(point(oriented(remaining)), metrics);
                 if (stretched.is_err()) return stretched;
@@ -784,15 +967,37 @@ class LazyRuntime {
         if (scroll_delta_ && !item_window_revision_) finish_scroll_delta();
         item_rebase_delta_ += rebase_delta;
         if (old_line_count != line_count()) return document_->invalidate_layout(node_);
-        auto published = publish_geometry(metrics->viewport, axis(physical_offset(logical, maximum)), stretch, maximum);
+        const auto physical = axis(physical_offset(logical, maximum));
+        if (!item_window_revision_) {
+            auto placed = place_moving_items(first, physical + stretch, viewport);
+            if (placed.is_err()) return placed;
+        }
+        auto published = publish_geometry(metrics->viewport, physical, stretch, maximum);
         if (published.is_err()) return published;
-        auto prefetch = update_prefetch(logical);
+        auto prefetch = update_prefetch(logical, viewport);
         if (prefetch.is_err()) return prefetch;
         return Ok(empty{});
     }
 
   public:
     ~LazyRuntime() { unbind_state(); }
+
+    auto pin_context(const Rc<LazyRuntime> &owner, const Key &slot) const -> StableValue<Option<LazyPinTarget>> {
+        return {Some(LazyPinTarget{owner.downgrade(), pin_container_, Key(slot)})};
+    }
+
+    auto set_parent_pin_target(Option<LazyPinTarget> target) -> Result<empty, UiError> {
+        if (parent_pin_target_ == target) return Ok(empty{});
+        parent_pin_target_ = rstd::move(target);
+        auto previous = rstd::exchange(parent_pin_, None<LazyItemPin>());
+        if (pins_.is_empty()) return Ok(empty{});
+        auto updated = pin_parent();
+        if (updated.is_err()) {
+            clear_pins();
+            (void)refresh_slots();
+        }
+        return updated;
+    }
 
     auto state_for(const Rc<LazyStateData> &supplied) -> Rc<LazyStateData> {
         if (supplied) return supplied.clone();
@@ -802,9 +1007,12 @@ class LazyRuntime {
 
     auto item_animator() -> LazyItemAnimator & { return item_animator_; }
 
-    auto capture_item_changes(UiDocument &document, const LazyContent &content) const -> Option<Vec<LazyItemGhost>> {
+    auto capture_item_changes(UiDocument &document, const LazyContent &content, const Vec<LazySlot> &slots) const
+        -> Option<Vec<LazyItemGhost>> {
         if (content_.identity() == content.identity()) return None();
-        return Some(item_animator_.capture_changes(document, content));
+        Vec<Index> retained;
+        for (const auto &slot : slots) if (slot.kind == LazySlot::Kind::Moving) retained.push(Index(slot.index));
+        return Some(item_animator_.capture_changes(document, content, retained));
     }
 
     void scroll_to_position(EventContext &context, const RoutedEvent &event) {
@@ -835,7 +1043,7 @@ class LazyRuntime {
         if (state_.get()->request(index, 0, 0).is_ok()) context.prevent_default();
     }
 
-    auto compose_slots(const LazyContent &content, const LazyOptions &options) const -> ComposeResult<Vec<LazySlot>> {
+    auto compose_slots(const LazyContent &content, const LazyOptions &options, bool nested) const -> ComposeResult<Vec<LazySlot>> {
         const auto shift = anchor_ && content.identity() != content_.identity()
             ? rstd::int64_t(anchor_index(content)) - anchor_->index : 0;
         Vec<LazySlot> slots;
@@ -862,9 +1070,14 @@ class LazyRuntime {
                 if (previous.kind == LazySlot::Kind::Spare && previous.content_type != metadata.content_type) continue;
                 id = previous.id;
                 claimed[i] = true;
+                if (kind == LazySlot::Kind::Moving && previous.kind == kind && previous.index == index) {
+                    slots.push({rstd::move(key), rstd::move(metadata.key), rstd::move(metadata.content_type), index, id, kind,
+                                limits, false, previous.moving_before});
+                    return Ok(empty{});
+                }
                 break;
             }
-            slots.push({rstd::move(key), rstd::move(metadata.content_type), index, id, kind, limits});
+            slots.push({rstd::move(key), rstd::move(metadata.key), rstd::move(metadata.content_type), index, id, kind, limits});
             return Ok(empty{});
         };
         auto kept_pins = usize();
@@ -891,6 +1104,21 @@ class LazyRuntime {
                 auto added = add(index, LazySlot::Kind::Probe);
                 if (added.is_err()) return Err(added.unwrap_err());
             }
+            for (const auto &slot : slots_in_use_) {
+                if (slots.len() >= usize(options.max_materialized)) break;
+                if (slot.kind != LazySlot::Kind::Moving) continue;
+                bool completed{};
+                for (auto id : completed_moves_) completed |= id == slot.id;
+                if (completed) continue;
+                auto added = add(slot.index, LazySlot::Kind::Moving);
+                if (added.is_err()) return Err(added.unwrap_err());
+            }
+        } else {
+            for (auto index : item_animator_.moved_items(content)) {
+                if (slots.len() >= usize(options.max_materialized)) break;
+                auto added = add(index, LazySlot::Kind::Moving);
+                if (added.is_err()) return Err(added.unwrap_err());
+            }
         }
         const auto sticky = sticky_ ? rstd::int64_t(*sticky_) + shift : -1;
         rstd::slice_::sort_unstable_by(slots.as_mut_slice().as_mut_ref(), [sticky](const LazySlot &a, const LazySlot &b) {
@@ -905,6 +1133,13 @@ class LazyRuntime {
                 if (added.is_err()) continue;
             }
         }
+        if (nested && options.prefetch && !geometry_ready_ && requested_.is_empty()) {
+            const auto count = rstd::cmp::min(content.count(), options.cache_window ? options.cache_window->nested_prefetch : Index(2));
+            for (Index i{}; i < count && slots.len() < usize(options.max_materialized); ++i) {
+                auto added = add(i, LazySlot::Kind::Prefetched);
+                if (added.is_err()) return Err(added.unwrap_err());
+            }
+        }
         auto next = next_slot_;
         for (usize i{}; i < slots.len(); ++i) {
             auto &slot = slots[i];
@@ -914,6 +1149,7 @@ class LazyRuntime {
                 if (claimed[i] || previous.kind != LazySlot::Kind::Spare ||
                     previous.content_type != slot.content_type) continue;
                 slot.id = previous.id;
+                slot.recycle = previous.key != slot.key;
                 claimed[i] = true;
                 break;
             }
@@ -931,7 +1167,7 @@ class LazyRuntime {
             for (auto slot = active_and_prefetched; slot < slots.len(); ++slot)
                 if (slots[slot].content_type == previous.content_type) ++retained;
             if (retained >= options.retained_slots_per_type) continue;
-            slots.push({Key(previous.key), copy_key(previous.content_type), previous.index, previous.id, LazySlot::Kind::Spare});
+            slots.push({Key(previous.key), {}, copy_key(previous.content_type), previous.index, previous.id, LazySlot::Kind::Spare});
         }
         return Ok(rstd::move(slots));
     }
@@ -946,7 +1182,9 @@ class LazyRuntime {
         const bool changed = content_.identity() != content.identity() || options_ != options ||
                              horizontal_ != horizontal || grid_ != grid;
         auto previous_rendered = rstd::move(rendered_);
+        auto previous_slots = rstd::move(slots_in_use_);
         if (changed) {
+            completed_moves_.clear();
             clear_prefetch();
             if (focus_line_) {
                 focus_invalidated_ = true;
@@ -968,9 +1206,11 @@ class LazyRuntime {
                 auto lease = pin.lease.upgrade();
                 return lease && (*lease)->active;
             });
+            if (pins_.is_empty()) parent_pin_ = None();
         }
         content_ = rstd::move(content);
         options_ = options;
+        saved_state_.get()->set_capacity(options.saved_state_capacity);
         horizontal_ = horizontal;
         grid_ = grid;
         slots_in_use_ = rstd::move(slots);
@@ -980,6 +1220,7 @@ class LazyRuntime {
             switch (slot.kind) {
             case LazySlot::Kind::Active:
             case LazySlot::Kind::Probe:
+            case LazySlot::Kind::Moving:
             case LazySlot::Kind::Pinned: rendered_.push(Index(slot.index)); break;
             case LazySlot::Kind::Spare: ++spares; break;
             case LazySlot::Kind::Prefetched: ++prefetched; break;
@@ -987,7 +1228,9 @@ class LazyRuntime {
             if (next_slot_ <= slot.id) next_slot_ = slot.id + 1;
         }
         bool placed_changed = previous_rendered.len() != rendered_.len();
-        for (usize i{}; !placed_changed && i < rendered_.len(); ++i) placed_changed = previous_rendered[i] != rendered_[i];
+        for (usize i{}; !placed_changed && i < rendered_.len(); ++i)
+            placed_changed = previous_rendered[i] != rendered_[i] ||
+                (previous_slots[i].kind == LazySlot::Kind::Moving) != (slots_in_use_[i].kind == LazySlot::Kind::Moving);
         signal_ = Some(rstd::move(signal));
         if (state_.get() != state.get()) {
             if (document_ && scroll_animation_) (void)ScrollView::stop(*document_, scroll_);
@@ -1007,6 +1250,8 @@ class LazyRuntime {
                     if (!live) return Err(UiError::Cancelled);
                     return live->get()->make_pin(*live, index);
                 }));
+            state_.get()->forget_item_state = Some(Box<rstd::dyn<rstd::FnMut<void(const Key &)>>>::
+                make([holder = saved_state_.clone()](const Key &key) mutable { holder.get()->forget(key); }));
         }
         const bool slot_counts_changed = prefetched_count_ != prefetched || retained_count_ != spares;
         prefetched_count_ = prefetched;
@@ -1017,6 +1262,10 @@ class LazyRuntime {
             rebase_ = true;
             lines_.reset(content_.count(), slots_.count(), content_.has_spans());
             if (document_) return document_->invalidate_layout(node_);
+        }
+        if (document_ && placed_changed) {
+            auto invalidated = document_->invalidate_layout(node_);
+            if (invalidated.is_err()) return invalidated;
         }
         return document_ && (rebase_ || placed_changed || window_committed || slot_counts_changed)
             ? document_->invalidate_viewport_observation(viewport_) : Result<empty, UiError>(Ok(empty{}));
@@ -1043,9 +1292,9 @@ class LazyRuntime {
         if (observed.is_err()) return Err(observed.unwrap_err());
         const auto weak = owner.downgrade();
         auto focus = session.input().on_focus_search(scroll,
-            [weak](bool backwards) {
+            [weak](const InputSnapshot &snapshot, FocusDirection direction) {
                 auto live = weak.upgrade();
-                return live && live->get()->extend_focus(backwards);
+                return live && live->get()->extend_focus(snapshot, direction);
             },
             [weak]() {
                 auto live = weak.upgrade();
@@ -1065,6 +1314,15 @@ class LazyRuntime {
         });
         auto resolved = ScrollView::set_delta_resolver(document, scroll, Some(rstd::move(delta_resolver)));
         if (resolved.is_err()) return resolved;
+        auto snap = ScrollView::set_snap_layout(document, scroll, Some(Box<ScrollSnapLayout>::make(
+            [weak](const ScrollSnapRequest &request) -> Option<Point> {
+                if (auto live = weak.upgrade(); live) return (*live)->snap_to_line(request);
+                return None();
+            })));
+        if (snap.is_err()) return snap;
+        move_completion_ = rstd::rc::make_rc<Box<LazyMoveCompletion>>(Box<LazyMoveCompletion>::make([weak](UiId item) {
+            if (auto live = weak.upgrade(); live) live->get()->finish_move(item);
+        }));
         document_ = &document;
         session_ = &session;
         prefetch_owner_ = owner.downgrade();
@@ -1076,8 +1334,6 @@ class LazyRuntime {
         return Ok(empty{});
     }
     void detach() {
-        ++prefetch_generation_;
-        prefetch_queued_ = false;
         clear_prefetch();
         focus_search_ = None();
         focus_items_.clear();
@@ -1086,10 +1342,15 @@ class LazyRuntime {
         session_ = nullptr;
         metrics_ = None();
         if (scroll_delta_) finish_scroll_delta();
-        if (document_) (void)ScrollView::set_delta_resolver(*document_, scroll_, {});
+        if (document_) {
+            (void)ScrollView::set_delta_resolver(*document_, scroll_, {});
+            (void)ScrollView::set_snap_layout(*document_, scroll_, {});
+        }
         unbind_state();
         state_.reset();
         item_animator_.reset();
+        move_completion_.reset();
+        completed_moves_.clear();
         item_window_revision_ = None();
         item_rebase_delta_ = 0;
         document_ = nullptr;
@@ -1105,6 +1366,7 @@ class LazyRuntime {
             state_.get()->owner = nullptr;
             state_.get()->wake = None();
             state_.get()->pin = None();
+            state_.get()->forget_item_state = None();
             if (!pins_.is_empty()) {
                 clear_pins();
                 if (document_ && session_) (void)refresh_slots();
@@ -1150,6 +1412,10 @@ class LazyRuntime {
         return Some(LayoutConstraints{constraints->max_width, constraints->max_height});
     }
 
+    auto saved_item(Element item, const Key &key) const -> Element {
+        return with_saved_item(rstd::move(item), saved_state_.clone(), Key(key));
+    }
+
     auto measure(LayoutMeasureContext &context, LayoutConstraints limits) -> Result<Size, UiError> {
         const auto cross_limit = horizontal_ ? limits.max_height : limits.max_width;
         const auto minimum = horizontal_ ? limits.min_height : limits.min_width;
@@ -1190,6 +1456,7 @@ class LazyRuntime {
             if (child_id.is_err()) return Err(child_id.unwrap_err());
             const auto extent = main(*child_size);
             placements_.push({*cell, extent, cross(*child_size), *child_id});
+            if (slots_in_use_[child].kind == LazySlot::Kind::Moving) continue;
             auto position = measured_lines_.len();
             while (position != usize() && measured_lines_[position - usize(1)].index >= cell->line) --position;
             if (position < measured_lines_.len() && measured_lines_[position].index == cell->line) {
@@ -1258,6 +1525,7 @@ struct LazyElement {
     auto prepare(PrepareContext &context, Option<UiId> previous, NodeStyle style) -> ComposeResult<UiNodeRef> {
         auto node = previous ? context.edit().existing(*previous) : context.edit().create(LayoutKind::Custom, style);
         context.style(node, style);
+        if (context.activating()) context.edit().layout(node, LazyLayout{runtime.clone()});
         context.on_mount([runtime = runtime, target = context.target()](CommittedContext &committed) mutable -> ComposeResult<EffectLease> {
             auto node = committed.resolve(target);
             if (node.is_err()) return Err(node.unwrap_err());
@@ -1274,8 +1542,6 @@ struct LazyElement {
             if (registered.is_err()) return Err(ComposeError(ComposeStage::Effect, Some(UiError::Routing)));
             auto bounded = document.set_viewport_requires_bounds(*viewport, true);
             if (bounded.is_err()) return Err(ComposeError(ComposeStage::Effect, Some(bounded.unwrap_err())));
-            auto installed = document.install_layout(*node, LazyLayout{runtime.clone()});
-            if (installed.is_err()) return Err(ComposeError(ComposeStage::Effect, Some(installed.unwrap_err())));
             auto attached = runtime.get()->attach(runtime, committed.session(), *node, *viewport, *scroll);
             if (attached.is_err()) return Err(ComposeError(ComposeStage::Effect, Some(attached.unwrap_err())));
             return Ok(EffectLease([runtime, action = rstd::move(action)]() mutable {
@@ -1295,7 +1561,8 @@ auto make_lazy_layout(LazyContent content, LazyOptions options, bool horizontal,
     return component<LazyRootTag>(Key(site.as_str()),
         [content = rstd::move(content), options, horizontal, grid,
          supplied = state ? LazyStateAccess::share(*state) : Rc<LazyStateData>{}, source](CompositionContext &context) -> ComposeResult<Element> {
-            if (!options.padding.valid() || !finite(options.spacing) || !finite(options.cross_spacing) ||
+            if (!options.padding.valid() || (options.cache_window && !options.cache_window->valid()) ||
+                !finite(options.spacing) || !finite(options.cross_spacing) ||
                 !finite(options.estimated_extent) || options.estimated_extent <= 0 ||
                 !options.max_materialized || !valid_alignment(options.cross_alignment) ||
                 !valid_arrangement(options.main_arrangement) || !valid_arrangement(options.cross_arrangement))
@@ -1311,8 +1578,12 @@ auto make_lazy_layout(LazyContent content, LazyOptions options, bool horizontal,
             if (epoch.is_err()) return Err(epoch.unwrap_err());
             auto observed = context.read(epoch->value());
             if (observed.is_err()) return Err(observed.unwrap_err());
+            auto enclosing_pin = context.read(lazy_parent_pin);
+            if (enclosing_pin.is_err()) return Err(enclosing_pin.unwrap_err());
+            const auto &pin_target = enclosing_pin->value().value;
+            auto parent_pin = pin_target ? Some(LazyPinTarget(*pin_target)) : None<LazyPinTarget>();
             Vec<Element> children;
-            auto slots = runtime->compose_slots(content, options);
+            auto slots = runtime->compose_slots(content, options, parent_pin.is_some());
             if (slots.is_err()) return Err(slots.unwrap_err());
             for (const auto &slot : *slots) {
                 Vec<Element> contents;
@@ -1334,22 +1605,34 @@ auto make_lazy_layout(LazyContent content, LazyOptions options, bool horizontal,
                         data.get()->premeasure = slot.premeasure;
                         item = Element(rstd::move(data));
                     }
+                    if (slot.saved_key) item = runtime->saved_item(rstd::move(item), *slot.saved_key);
                     contents.push(rstd::move(item));
                 }
                 auto wrapper = stack(rstd::move(contents), source).key(Key(slot.id));
+                if (slot.kind != LazySlot::Kind::Spare) {
+                    auto data = rstd::rc::make_rc<ElementData>(wrapper.data());
+                    data.get()->locals.push(lazy_parent_pin.provides(runtime->pin_context(runtime, slot.key)));
+                    data.get()->recycle_children = slot.recycle;
+                    wrapper = Element(rstd::move(data));
+                }
                 if (!slot.placed())
                     wrapper = rstd::move(wrapper).style(NodeStyleBuilder{}.visible(false).hit_test_visible(false).build());
+                else if (slot.kind == LazySlot::Kind::Moving)
+                    wrapper = with_semantics(rstd::move(wrapper).style(NodeStyleBuilder{}.enabled(false).hit_test_visible(false).build()),
+                                             {.exclude_subtree = true});
                 children.push(rstd::move(wrapper));
             }
             auto &animator = runtime.get()->item_animator();
             children.push(animator.layer(source));
-            auto ghosts = runtime->capture_item_changes(context.session().document(), content);
+            auto ghosts = runtime->capture_item_changes(context.session().document(), content, *slots);
             context.on_commit([runtime, content, options, horizontal, grid, state = runtime.get()->state_for(supplied), epoch = *epoch,
-                               slot_revision = observed->value(),
+                               slot_revision = observed->value(), parent_pin = rstd::move(parent_pin),
                                slots = slots.unwrap(), ghosts = rstd::move(ghosts)](CommittedContext &) mutable -> ComposeResult<empty> {
                 auto result = runtime.get()->configure(runtime, content, options, horizontal, grid,
                                                        rstd::move(state), epoch, slot_revision, rstd::move(slots));
                 if (result.is_err()) return Err(ComposeError(ComposeStage::Action, Some(result.unwrap_err())));
+                auto pinned = runtime.get()->set_parent_pin_target(rstd::move(parent_pin));
+                if (pinned.is_err()) return Err(ComposeError(ComposeStage::Action, Some(pinned.unwrap_err())));
                 if (ghosts) runtime.get()->item_animator().stage_changes(ghosts.unwrap());
                 return Ok(empty{});
             });

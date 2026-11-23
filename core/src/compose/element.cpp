@@ -33,7 +33,9 @@ ElementData::ElementData(const ElementData &other)
       text(other.text.is_some() ? Some(UiTextValue(*other.text)) : None<UiTextValue>()),
       component_type(other.component_type), view(other.view), movable(other.movable), parameters(other.parameters), adapter(other.adapter),
       reference(other.reference.is_some() ? Some(NodeRef(*other.reference)) : None<NodeRef>()),
-      premeasure(other.premeasure), retain_native(other.retain_native),
+      premeasure(other.premeasure), saved_item(other.saved_item ? Some(SavedItemSource(*other.saved_item)) : None<SavedItemSource>()),
+      retain_native(other.retain_native),
+      recycle_children(other.recycle_children),
       precompose(other.precompose), invalid(other.invalid), source(other.source) {
     if (other.image.is_some()) {
         const auto &source = *other.image;
@@ -44,6 +46,12 @@ ElementData::ElementData(const ElementData &other)
     for (const auto &behavior : other.behaviors) behaviors.push(BehaviorDeclaration(behavior));
     for (const auto &local : other.locals) locals.push(LocalBinding(local));
     for (const auto &child : other.children) children.push(Element(child));
+}
+
+auto with_saved_item(Element value, rstd::rc::Rc<SaveableStateHolder> holder, Key key) -> Element {
+    auto item = rstd::move(value).owned();
+    item.data_.get()->saved_item = Some(SavedItemSource{rstd::move(holder), rstd::move(key)});
+    return item;
 }
 
 auto Element::style(NodeStyle value) && -> Element {

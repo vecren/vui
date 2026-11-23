@@ -84,6 +84,12 @@ auto LazyState::pin_item(Index index) -> Result<LazyItemPin, UiError> {
     return (**data_.get()->pin)(index);
 }
 
+auto LazyState::forget_item_state(const Key &key) -> Result<empty, UiError> {
+    if (!data_->forget_item_state) return Err(UiError::InvalidId);
+    (**data_.get()->forget_item_state)(key);
+    return Ok(empty{});
+}
+
 auto LazyStateData::request(Index index, Scalar offset, Serial duration) -> Result<empty, UiError> {
     if (!finite(offset)) return Err(UiError::InvalidValue);
     requested = Some(index);

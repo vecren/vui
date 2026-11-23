@@ -33,7 +33,10 @@ auto ButtonElement::prepare(PrepareContext &context, Option<UiId> previous, Node
                 }
             });
         if (connected.is_err()) return Err(ComposeError(ComposeStage::Prepare, connected.unwrap_err().ui));
-        slot.get()->binding = Some(connected.unwrap()); context.behavior<ButtonState>(node);
+        slot.get()->binding = Some(connected.unwrap());
+    }
+    context.behavior<ButtonState>(node);
+    if (context.first_activation()) {
         context.on_commit([target = context.target()](CommittedContext &context) -> ComposeResult<empty> {
             auto id = context.resolve(target);
             if (id.is_err()) return Err(id.unwrap_err());
@@ -113,13 +116,14 @@ auto ScrollbarElement::prepare(PrepareContext &context, Option<UiId> previous, N
     });
     context.behavior<ScrollbarState>(node);
     auto target = context.target();
-    context.on_commit([target, thumb, created, options = options](CommittedContext &committed) -> ComposeResult<empty> {
+    context.on_commit([target, thumb, first = context.first_activation(), options = options](CommittedContext &committed) -> ComposeResult<empty> {
         auto id = committed.resolve(target);
         if (id.is_err()) return Err(id.unwrap_err());
         auto &ui = committed.session().document();
         auto state = ui.state<ScrollbarState>(*id);
         if (!state) return Err(ComposeError(ComposeStage::Effect, Some(UiError::InvalidId)));
-        auto configured = created ? state->connect(*id) : state->configure(*id, *thumb, options);
+        auto configured = state->configure(*id, *thumb, options);
+        if (first && configured.is_ok()) configured = state->connect(*id);
         if (configured.is_err()) {
             auto failure = configured.unwrap_err();
             ComposeError error(ComposeStage::Effect, failure.ui);

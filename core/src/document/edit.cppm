@@ -5,6 +5,7 @@ import :node.state;
 import :node.style_patch;
 import :text.types;
 import :image.types;
+import :layout.protocol;
 using namespace rstd::prelude;
 using namespace rstd::literals;
 
@@ -110,10 +111,12 @@ class UiEditBatch {
         Option<UiTreePermit> children_owner;
         Option<UiTextValue> before_text;
         Option<UiImageValue> before_image;
+        Option<Box<rstd::dyn<Layout>>> layout;
         bool preserve_mount{};
     };
     Vec<Entry> entries_;
     Vec<UiId> removed_;
+    Vec<UiId> recycled_;
     UiTreeAccess access_;
     Serial owner_{new_session()};
     Option<UiError> error_;
@@ -132,6 +135,13 @@ class UiEditBatch {
     }
     auto create(LayoutKind kind, NodeStyle style = {}) -> UiNodeRef {
         UiNodeRef result{owner_, entries_.len()}; entries_.push({{}, kind, Some(NodeStylePatch::all(style))}); return result;
+    }
+    // Each detached root is retired at publish, with compatible native slots receiving new generations.
+    void recycle_detached(UiId root) { recycled_.push(UiId(root)); }
+    template <class T> requires rstd::Impled<T, Layout>
+    void layout(UiNodeRef ref, T value) {
+        if (auto target = entry(ref))
+            target->layout = Some(Box<rstd::dyn<Layout>>::make(rstd::move(value)));
     }
     void style(UiNodeRef id, NodeStylePatch value) { if (auto target = entry(id)) target->style = Some(rstd::move(value)); }
     void style(UiNodeRef id, NodeStyle value) { style(id, NodeStylePatch::all(rstd::move(value))); }
