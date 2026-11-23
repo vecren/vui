@@ -52,7 +52,7 @@ using ScrollDeltaResolver = rstd::dyn<rstd::FnMut<Result<Option<ScrollDeltaResol
 namespace vui {
 class ScrollInteraction {
     friend class ScrollDeltaLease;
-    enum class Mode { Idle, Pending, Drag, Animate, Programmatic } mode_{Mode::Idle};
+    enum class Mode { Idle, Pending, Drag, NestedDrag, Animate, Programmatic } mode_{Mode::Idle};
     enum class Phase { Rest, Decay, Spring };
     struct Axis { Phase phase{Phase::Rest};ScalarMotion initial;Scalar target{};Serial started{}; } x_,y_;
     struct OffsetAnimation {
@@ -91,6 +91,19 @@ class ScrollInteraction {
     };
     Option<EdgeSpring> edge_spring_;
     Scalar edge_pull_{};
+    struct NestedOrigin {
+        rstd::rc::Weak<ScrollInteraction> owner;
+        UiId target;
+        Serial gesture;
+    };
+    struct Ancestor;
+    struct BoundaryHit {
+        Scalar velocity;
+        Serial time;
+    };
+    Option<NestedOrigin> nested_origin_;
+    Vec<rstd::rc::Weak<ScrollInteraction>> nested_drag_members_;
+    bool nested_scroll_{}, handoff_pending_{};
     auto ui() -> UiDocument & {return session_.document();}
     static auto bounded(Scalar value,Scalar maximum) -> Scalar {return value<0 ? 0 : value>maximum ? maximum : value;}
     static auto bounded(Point value,Point maximum) -> Point {return {bounded(value.x,maximum.x),bounded(value.y,maximum.y)};}
@@ -98,15 +111,17 @@ class ScrollInteraction {
     auto now() -> Serial {auto value=ui().animation_sample_time();return value.is_some() ? *value : 0;}
     void wake() {if (motion_.binding.alive()) session_.motion().request(motion_.id);}
     auto acquire() -> bool;
+    auto owns_delta(Serial gesture) -> bool;
     auto local_event(const InputSnapshot &snapshot,const InputEvent &input) -> Option<InputEvent>;
     auto drag_value(Point position,const ViewportMetrics &metrics) const -> Point;
     void track(InputEvent event,const ViewportMetrics &metrics,Point actual,bool measured);
     auto write(Point value,const ViewportMetrics &metrics) -> bool;
-    auto measured_scroll() const -> bool {
-        return resolve_delta_ && (style_.motion.movement == ScrollMovement::Clamped ||
-                                  style_.axes.horizontal != style_.axes.vertical);
+    auto single_axis() const -> bool { return style_.axes.horizontal != style_.axes.vertical; }
+    auto uses_scroll_deltas() const -> bool {
+        return (resolve_delta_ || nested_scroll_ || mode_ == Mode::NestedDrag) &&
+               (style_.motion.movement == ScrollMovement::Clamped || single_axis());
     }
-    auto measured_elastic() const -> bool { return measured_scroll() && style_.motion.movement == ScrollMovement::Elastic; }
+    auto uses_elastic_deltas() const -> bool { return uses_scroll_deltas() && style_.motion.movement == ScrollMovement::Elastic; }
     auto along(Point value) const -> Scalar { return style_.axes.horizontal ? value.x : value.y; }
     auto along(Size value) const -> Scalar { return style_.axes.horizontal ? value.width : value.height; }
     auto main_axis(Scalar value) const -> Point { return style_.axes.horizontal ? Point{value, 0} : Point{0, value}; }
@@ -117,7 +132,16 @@ class ScrollInteraction {
     auto rubber(Scalar delta, Scalar extent) const -> Scalar;
     auto recover_pull(const ViewportMetrics &metrics) const -> Scalar;
     auto write_pull(Scalar pull, const ViewportMetrics &metrics) -> bool;
-    auto measured_drag(Point delta, const ViewportMetrics &metrics) -> bool;
+    auto drag_by(Point delta, const ViewportMetrics &metrics) -> bool;
+    auto consume_drag(Point delta, ViewportMetrics metrics) -> bool;
+    auto ancestor(Point delta, const ScrollInteraction *drag, bool test_range = true) -> Option<Ancestor>;
+    auto accepts_nested_drag(const ScrollInteraction &origin) const -> bool;
+    auto matches_origin(const ScrollInteraction &origin) const -> bool;
+    auto offer_drag(Point remaining, const ViewportMetrics &metrics) -> bool;
+    void release_nested_drag();
+    auto boundary_hit(Point remaining, Serial time) const -> BoundaryHit;
+    auto start_boundary_spring(Scalar remaining, const ViewportMetrics &metrics, BoundaryHit hit, Serial time) -> bool;
+    auto handoff_fling(Point remaining, const ViewportMetrics &metrics, BoundaryHit hit, Serial time) -> bool;
     auto reached_boundary(Point remaining, const ViewportMetrics &metrics, Serial time) -> bool;
     auto sample_edge_spring(const ViewportMetrics &metrics, Serial time) -> bool;
     auto resolve_delta(Point delta, const ViewportMetrics &metrics) -> Result<Option<ScrollDeltaResolution>, UiError>;
@@ -128,7 +152,7 @@ class ScrollInteraction {
     void begin_motion(const ViewportMetrics &metrics,Point velocity,Serial started);
     auto sample_axis(Axis &axis,Scalar maximum,Serial time) -> ScalarMotion;
     auto decay_sample(const Axis &axis, Serial elapsed) const -> ScalarMotion;
-    auto sample_measured_decay(MotionContext &context, const ViewportMetrics &metrics)
+    auto sample_scroll_deltas(MotionContext &context, const ViewportMetrics &metrics)
         -> Result<MotionStatus, MotionError>;
     void restart_animation(Point from, Serial time);
     auto sample_animation(MotionContext &context, const ViewportMetrics &metrics) -> Result<MotionStatus, MotionError>;
@@ -152,7 +176,7 @@ class ScrollInteraction {
     auto animate_offset(Point value, Serial duration_ns) -> Result<ScrollAnimation, UiError>;
     auto retarget_offset(const ScrollAnimation &animation, Point value) -> Result<empty, UiError>;
     auto describe_semantics() const -> Result<empty, UiError>;
-    auto status() const -> ScrollStatus {return {mode_==Mode::Drag,mode_==Mode::Animate || mode_==Mode::Programmatic,velocity_,error_};}
+    auto status() const -> ScrollStatus {return {mode_==Mode::Drag || mode_==Mode::NestedDrag,mode_==Mode::Animate || mode_==Mode::Programmatic,velocity_,error_};}
     auto observe(InputContext &context,const InputPacket &packet) -> InputDecision;
     void cancel(InputContext &context,CancelReason reason) {
         pan_.cancel(context,reason);tracker_.remove(context.pointer());
@@ -166,6 +190,7 @@ class ScrollInteraction {
 export namespace vui {
 class ScrollState {
     friend class ScrollView;
+    friend class ScrollInteraction;
     UiId viewport_;
     ScrollStyle style_;
     Signal<void(UserScroll)> user_scrolled_;
