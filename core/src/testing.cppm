@@ -12,7 +12,10 @@ struct TestError {
     Option<InputError> input;
 };
 
+class DifferentialTester;
+
 class UiTest {
+    friend class DifferentialTester;
     UiSession &session_;
     SurfaceInfo surface_;
     Serial now_;
@@ -107,5 +110,79 @@ class UiTest {
         return pointer(EventType::PointerDown, {bounds.x + bounds.width / 2, bounds.y + bounds.height / 2},
                        0, index, device);
     }
+};
+
+enum class DifferentialSide { Live, Replay };
+enum class DifferentialStage { Setup, Operation, Clock, Layout, Semantics, HitTest, Frame, Clip, Draw };
+
+struct DifferentialError {
+    DifferentialStage stage;
+    usize step;
+    Option<DifferentialSide> side;
+    Option<TestError> operation;
+    Option<UiError> setup;
+    Option<FrameError> frame;
+    Option<usize> index;
+    Option<Index> pass;
+    Option<Point> point;
+};
+
+class DifferentialFixture {
+    using Access = rstd::dyn<rstd::FnMut<UiSession &()>>;
+    Box<Access> owner_;
+    explicit DifferentialFixture(Box<Access> owner) : owner_(rstd::move(owner)) {}
+    auto session() -> UiSession & { return (*owner_)(); }
+    friend class DifferentialTester;
+
+  public:
+    // The fixture exposes session() and owns all state needed by that session.
+    template <class T> static auto own(Box<T> fixture) -> DifferentialFixture {
+        return DifferentialFixture(Box<Access>::make(
+            [fixture = rstd::move(fixture)]() mutable -> UiSession & { return fixture->session(); }));
+    }
+};
+
+class DifferentialTester {
+    using Factory = rstd::dyn<rstd::FnMut<Result<DifferentialFixture, UiError>(DifferentialSide)>>;
+    using ReplayOperation = rstd::dyn<rstd::Fn<Result<AdvanceResult, TestError>(UiTest &)>>;
+    struct Instance {
+        DifferentialFixture fixture;
+        UiTest test;
+        Instance(DifferentialFixture owner, SurfaceInfo surface)
+            : fixture(rstd::move(owner)), test(fixture.session(), surface) {}
+    };
+
+    Box<Factory> factory_;
+    SurfaceInfo initial_surface_;
+    Box<Instance> live_;
+    Vec<Box<ReplayOperation>> history_;
+    Option<DifferentialError> failure_;
+
+    DifferentialTester(Box<Factory> factory, SurfaceInfo surface, Box<Instance> live)
+        : factory_(rstd::move(factory)), initial_surface_(surface), live_(rstd::move(live)) {}
+    static auto create_impl(Box<Factory>, SurfaceInfo) -> Result<DifferentialTester, DifferentialError>;
+    static auto start(Box<Factory> &, SurfaceInfo, DifferentialSide)
+        -> Result<Box<Instance>, DifferentialError>;
+    auto apply(Box<ReplayOperation>) -> Result<empty, DifferentialError>;
+
+  public:
+    // Construct a fresh fixture on every call. Each side may use a different implementation.
+    template <class F>
+    static auto create(SurfaceInfo surface, F factory) -> Result<DifferentialTester, DifferentialError> {
+        return create_impl(Box<Factory>::make(rstd::move(factory)), surface);
+    }
+
+    auto snapshot() const -> SemanticsSnapshot;
+    auto now_ns() const -> Serial { return live_->test.now_ns(); }
+    // Payloads must use replayable values, as session-issued tokens differ across fixtures.
+    auto pump(slice<InputEvent> events = {}, Serial elapsed_ns = 0) -> Result<empty, DifferentialError>;
+    auto advance(Serial elapsed_ns) -> Result<empty, DifferentialError> { return pump({}, elapsed_ns); }
+    auto pointer(EventType type, Point position, Serial elapsed_ns = 0, Index index = 1,
+                 DeviceId device = 1, PointerKind kind = PointerKind::Touch) -> Result<empty, DifferentialError>;
+    auto perform(ref<str> label, SemanticsAction action, Option<SemanticsRole> role = {},
+                 Option<SemanticsPosition> position = {}) -> Result<empty, DifferentialError>;
+    auto resize(SurfaceInfo surface) -> Result<empty, DifferentialError>;
+    auto settle(Index max_frames = 120, Serial step_ns = UiTest::frame_interval_ns) -> Result<empty, DifferentialError>;
+    auto verify(slice<Point> probes = {}) -> Result<empty, DifferentialError>;
 };
 } // namespace vui::testing
